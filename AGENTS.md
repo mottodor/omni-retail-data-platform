@@ -186,6 +186,7 @@ For every task, follow this sequence.
 8. Identify affected services, contracts, schemas, and documentation.
 9. Check whether the task requires a new dependency or architectural decision.
 10. If a new technology or architecture decision is required, create an ADR first.
+11. When checking upstream documentation for any technology (Trino, dbt, Airflow, Iceberg, ClickHouse, Superset, Debezium, Spark, etc.), use the `context7` MCP tools.
 
 Do not start by rewriting unrelated files.
 
