@@ -443,7 +443,7 @@ edge
 
 Pin meaningful versions.
 
-For Python dependencies, use the project's chosen dependency management approach from `pyproject.toml`.
+For Python dependencies, use **uv** as the package and dependency manager. The lockfile (`uv.lock`) is committed and is the source of truth for reproducible installs; `pyproject.toml` declares the project metadata and dependencies. All Python environments (local, CI, containers) are created with `uv sync` — do not use `pip install` or a different package manager.
 
 Do not introduce a new dependency if the standard library or an existing dependency solves the task cleanly.
 
