@@ -1,0 +1,152 @@
+"""Guards for docker-compose configuration quality.
+
+Enforces AGENTS.md infrastructure rules:
+- pinned image versions (no latest/stable/edge);
+- every referenced env variable is documented in .env.example;
+- host ports are bound to loopback only;
+- long-running services have healthchecks;
+- stateful services use named volumes.
+"""
+
+import re
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
+TRINO_CATALOG_FILE = REPO_ROOT / "trino" / "etc" / "catalog" / "iceberg.properties"
+ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
+
+FORBIDDEN_IMAGE_TAGS = {"latest", "stable", "edge", "nightly"}
+
+EXPECTED_CORE_SERVICES = {
+    "postgres",
+    "minio",
+    "minio-init",
+    "polaris-postgres",
+    "polaris-bootstrap",
+    "polaris",
+    "polaris-init",
+    "trino",
+}
+
+# Services that run to completion and therefore must not have healthchecks.
+ONE_SHOT_SERVICES = {"minio-init", "polaris-bootstrap", "polaris-init"}
+
+
+def _load_compose() -> dict[str, Any]:
+    with COMPOSE_FILE.open(encoding="utf-8") as fh:
+        return cast(dict[str, Any], yaml.safe_load(fh))
+
+
+def _env_example_keys() -> set[str]:
+    keys: set[str] = set()
+    for line in ENV_EXAMPLE_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            keys.add(line.split("=", 1)[0])
+    return keys
+
+
+def test_compose_file_exists() -> None:
+    assert COMPOSE_FILE.is_file(), "docker-compose.yml is missing"
+
+
+def test_core_profile_contains_expected_services() -> None:
+    compose = _load_compose()
+    services = compose["services"]
+    missing = EXPECTED_CORE_SERVICES - set(services)
+    assert not missing, f"services missing from compose: {sorted(missing)}"
+    for name in EXPECTED_CORE_SERVICES:
+        assert "core" in services[name].get("profiles", []), f"{name} is not in the 'core' profile"
+
+
+def test_images_are_pinned() -> None:
+    services = _load_compose()["services"]
+    unpinned: list[str] = []
+    for name, cfg in services.items():
+        image = cfg.get("image", "")
+        tag = image.rsplit(":", 1)[-1] if ":" in image else ""
+        if not tag or tag.lower() in FORBIDDEN_IMAGE_TAGS:
+            unpinned.append(f"{name}: {image!r}")
+    assert not unpinned, f"images must be pinned to meaningful versions: {unpinned}"
+
+
+def test_env_references_are_documented_in_env_example() -> None:
+    compose_text = COMPOSE_FILE.read_text(encoding="utf-8")
+    referenced = set(re.findall(r"\$\{(\w+)(?::-[^}]*)?\}", compose_text))
+    if TRINO_CATALOG_FILE.is_file():
+        referenced |= set(
+            re.findall(r"\$\{ENV:(\w+)\}", TRINO_CATALOG_FILE.read_text(encoding="utf-8"))
+        )
+    undocumented = referenced - _env_example_keys()
+    assert not undocumented, (
+        f"env vars used in config but missing from .env.example: {sorted(undocumented)}"
+    )
+
+
+def test_long_running_services_have_healthchecks() -> None:
+    services = _load_compose()["services"]
+    missing = [
+        name
+        for name, cfg in services.items()
+        if name not in ONE_SHOT_SERVICES and "healthcheck" not in cfg
+    ]
+    assert not missing, f"long-running services without healthcheck: {missing}"
+
+
+def test_host_ports_bind_to_loopback_only() -> None:
+    services = _load_compose()["services"]
+    public: list[str] = []
+    for name, cfg in services.items():
+        for entry in cfg.get("ports", []):
+            host_part = str(entry).split(":", 1)[0]
+            if host_part not in {"127.0.0.1", "localhost"}:
+                public.append(f"{name}: {entry}")
+    assert not public, f"ports must bind to 127.0.0.1 only: {public}"
+
+
+def test_stateful_services_use_named_volumes() -> None:
+    compose = _load_compose()
+    volumes = set(compose.get("volumes", {}))
+    required = {"postgres-data", "minio-data", "polaris-postgres-data"}
+    assert required <= volumes, f"missing named volumes: {sorted(required - volumes)}"
+    services = compose["services"]
+    assert any("postgres-data" in str(services["postgres"].get("volumes", [])) for _ in [0]), (
+        "postgres must mount postgres-data"
+    )
+    assert any("minio-data" in str(services["minio"].get("volumes", [])) for _ in [0]), (
+        "minio must mount minio-data"
+    )
+
+
+def test_trino_catalog_targets_polaris_rest_api() -> None:
+    assert TRINO_CATALOG_FILE.is_file(), "trino/catalogs/iceberg.properties is missing"
+    props = TRINO_CATALOG_FILE.read_text(encoding="utf-8")
+    assert "connector.name=iceberg" in props
+    assert "iceberg.catalog.type=rest" in props
+    assert re.search(r"iceberg\.rest-catalog\.uri=\S+polaris:8181/api/catalog", props)
+    assert "iceberg.rest-catalog.warehouse=lakehouse" in props
+
+
+@pytest.mark.parametrize(
+    ("service", "dependency", "condition"),
+    [
+        ("trino", "polaris-init", "service_completed_successfully"),
+        ("polaris-init", "polaris", "service_healthy"),
+        ("polaris-init", "minio-init", "service_completed_successfully"),
+        ("polaris", "polaris-bootstrap", "service_completed_successfully"),
+        ("minio-init", "minio", "service_healthy"),
+    ],
+)
+def test_service_dependencies_use_health_conditions(
+    service: str, dependency: str, condition: str
+) -> None:
+    services = _load_compose()["services"]
+    depends = services[service]["depends_on"][dependency]
+    assert depends.get("condition") == condition, (
+        f"{service} must wait for {dependency} ({condition})"
+    )

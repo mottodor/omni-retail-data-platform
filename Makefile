@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit up down logs reset
+.PHONY: help setup lint test unit up down logs reset smoke-core
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -20,8 +20,20 @@ test: ## Run unit tests
 
 unit: test ## Alias for unit tests
 
-up down logs reset: ## docker compose wrappers (docker-compose.yml arrives in Phase 1)
-	@test -f docker-compose.yml || { echo "error: docker-compose.yml not found (it arrives in Phase 1)"; exit 1; }
-	@if [ "$@" = "logs" ]; then docker compose logs -f --tail=100; \
-	elif [ "$@" = "reset" ]; then echo "warning: reset destroys local volumes"; docker compose down -v; \
-	else docker compose $@; fi
+COMPOSE := docker compose --profile core
+
+up: ## Start core infrastructure and wait until healthy
+	$(COMPOSE) up -d --wait
+
+down: ## Stop services (named volumes are preserved)
+	$(COMPOSE) down
+
+logs: ## Follow service logs
+	docker compose logs -f --tail=100
+
+reset: ## WARNING: destroy containers AND named volumes (all local data)
+	@echo "warning: reset destroys all local volumes (postgres, minio, polaris metadata)"
+	@$(COMPOSE) down -v
+
+smoke-core: ## End-to-end check: Trino -> Polaris -> Iceberg -> MinIO
+	bash infrastructure/scripts/smoke_core.sh
