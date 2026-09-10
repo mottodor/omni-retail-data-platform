@@ -50,7 +50,8 @@ Iceberg is the analytical source of truth; ClickHouse is a derived serving layer
 
 - [x] Phase 0 — repository bootstrap and engineering standards
 - [x] Phase 1 — core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg)
-- [ ] Phase 2+ — see `ROADMAP.md`
+- [x] Phase 2 — OLTP model and deterministic data generator
+- [ ] Phase 3+ — see `ROADMAP.md`
 
 ## Prerequisites
 
@@ -82,6 +83,8 @@ make down       # stop services (named volumes are preserved)
 make logs       # follow service logs
 make reset      # DESTRUCTIVE: down -v, destroys all local volumes
 make smoke-core # end-to-end check: Trino -> Polaris -> Iceberg -> MinIO
+make generate-oltp # apply OLTP schema + load initial data (10k customers / 5k products / 100k orders)
+make mutate-oltp   # apply a batch of random inserts/updates/deletes (EVENTS=200 by default)
 ```
 
 ## Core infrastructure (Phase 1)
@@ -90,7 +93,7 @@ The `core` Compose profile provides the minimal working lakehouse:
 
 | Service | Image | Purpose |
 |---|---|---|
-| `postgres` | `postgres:16.15-alpine` | OLTP source (schema lands in Phase 2) |
+| `postgres` | `postgres:16.15-alpine` | OLTP source (schema and data from Phase 2, see below) |
 | `minio` + `minio-init` | pinned `minio/minio` + `mc` | S3 storage; buckets `landing`, `lakehouse`, `archive`, `rejected` |
 | `polaris-postgres` | `postgres:16.15-alpine` | metadata database for Polaris (network-internal) |
 | `polaris` + `polaris-bootstrap` | `apache/polaris:1.7.0` | Iceberg REST catalog (`lakehouse` catalog backed by MinIO) |
@@ -111,6 +114,39 @@ make down && make up && make smoke-core  # data survives a full restart
 Known simplification: Trino authenticates to Polaris with the bootstrap `root`
 client credentials; dedicated least-privilege Polaris principals are planned
 with the ingestion phases.
+
+## OLTP source and data generator (Phase 2)
+
+The PostgreSQL database carries a realistic e-commerce OLTP schema
+(`categories`, `products`, `customers`, `orders`, `order_items`, `payments`,
+`shipments`) with PK/FK constraints, `CHECK` constraints on statuses and
+amounts, and `created_at`/`updated_at` on every table. The DDL is idempotent
+(`postgres/init/01_oltp_schema.sql`) and is applied automatically on a fresh
+volume or explicitly via the generator.
+
+The generator (`python -m omni_retail.generators.oltp`) is fully
+deterministic: the same seed reproduces the same dataset (fixed anchor
+timestamp, single `random.Random` instance).
+
+```bash
+make up                  # core stack, if not running yet
+make generate-oltp       # schema + initial load: seed 42, 10k/5k/100k, ~365 days of history
+make mutate-oltp EVENTS=300  # one batch: ~40% order updates, 35% inserts, 10% hard deletes, ...
+```
+
+Behavior highlights:
+
+- initial load ages orders realistically (older orders are mostly `delivered`,
+  recent ones `pending`/`paid`) with consistent payment and shipment state;
+- mutations follow a strict state machine (`pending → paid → shipped →
+  delivered`, cancellations/refunds update payments, `paid → shipped` creates
+  an `in_transit` shipment);
+- hard deletes only target `pending` orders and cascade to their items and
+  payments — this provides the delete workload required for future CDC;
+- re-running `initial` on a non-empty database refuses to proceed unless
+  `--truncate-oltp-data` is passed (explicit, destructive).
+
+Table documentation, grain, and source metrics: `docs/data-model.md`.
 
 ## CI
 
