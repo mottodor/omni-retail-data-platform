@@ -38,4 +38,6 @@ jobs:
 
       - name: Docker Compose config
         if: hashFiles('docker-compose.yml') != ''
-        run: docker compose config
+        run: |
+          cp .env.example .env
+          docker compose config --quiet

@@ -1,0 +1,177 @@
+name: omni-retail-data-platform
+
+services:
+  postgres:
+    image: postgres:16.15-alpine
+    profiles: ["core"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["core"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    profiles: ["core"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT_URL: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./infrastructure/scripts/minio_init.sh:/usr/local/bin/minio_init.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/minio_init.sh"]
+    restart: "no"
+
+  polaris-postgres:
+    image: postgres:16.15-alpine
+    profiles: ["core"]
+    environment:
+      POSTGRES_USER: ${POLARIS_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POLARIS_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POLARIS_POSTGRES_DB}
+    volumes:
+      - polaris-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POLARIS_POSTGRES_USER} -d ${POLARIS_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:1.7.0
+    profiles: ["core"]
+    depends_on:
+      polaris-postgres:
+        condition: service_healthy
+    environment:
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-postgres:5432/${POLARIS_POSTGRES_DB}
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_POSTGRES_USER}
+      QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_POSTGRES_PASSWORD}
+    command:
+      - bootstrap
+      - --realm=POLARIS
+      - --credential=POLARIS,${POLARIS_CLIENT_ID},${POLARIS_CLIENT_SECRET}
+    restart: "no"
+
+  polaris:
+    image: apache/polaris:1.7.0
+    profiles: ["core"]
+    depends_on:
+      polaris-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_MAX_RETRIES: "10"
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_INITIAL_DELAY_IN_MS: "250"
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_MAX_DURATION_IN_MS: "30000"
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-postgres:5432/${POLARIS_POSTGRES_DB}
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_POSTGRES_USER}
+      QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_POSTGRES_PASSWORD}
+      POLARIS_REALM_CONTEXT_REALMS: POLARIS
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,${POLARIS_CLIENT_ID},${POLARIS_CLIENT_SECRET}
+      polaris.features."ALLOW_INSECURE_STORAGE_TYPES": "true"
+      polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES": '["FILE","S3","GCS","AZURE"]'
+      polaris.readiness.ignore-severe-issues: "true"
+      # Polaris resolves S3 credentials from the default AWS chain;
+      # static MinIO keys are provided via environment variables.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      JAVA_OPTIONS: -Xmx768m
+    ports:
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  polaris-init:
+    image: python:3.12-alpine
+    profiles: ["core"]
+    depends_on:
+      polaris:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      POLARIS_BASE_URL: http://polaris:8181
+      POLARIS_REALM: POLARIS
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+      POLARIS_CATALOG_NAME: lakehouse
+      MINIO_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: lakehouse
+    volumes:
+      - ./infrastructure/scripts/polaris_init.py:/usr/local/bin/polaris_init.py:ro
+    entrypoint: ["python", "/usr/local/bin/polaris_init.py"]
+    restart: "no"
+
+  trino:
+    image: trinodb/trino:483
+    profiles: ["core"]
+    depends_on:
+      polaris-init:
+        condition: service_completed_successfully
+    environment:
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./trino/etc:/etc/trino:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/status >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  polaris-postgres-data:
