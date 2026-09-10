@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit up down logs reset smoke-core
+.PHONY: help setup lint test unit up down logs reset smoke-core generate-oltp mutate-oltp
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -37,3 +37,11 @@ reset: ## WARNING: destroy containers AND named volumes (all local data)
 
 smoke-core: ## End-to-end check: Trino -> Polaris -> Iceberg -> MinIO
 	bash infrastructure/scripts/smoke_core.sh
+
+EVENTS ?= 200
+
+generate-oltp: ## Apply OLTP schema and load initial data (10k/5k/100k, seed 42). ARGS="--orders 1000" to override
+	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.generators.oltp initial $(ARGS)'
+
+mutate-oltp: ## Apply EVENTS random mutations (inserts/updates/deletes) to the OLTP source
+	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.generators.oltp mutate --events $(EVENTS) $(ARGS)'
