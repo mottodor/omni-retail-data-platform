@@ -5,6 +5,7 @@ description = "Production-like e-commerce data platform: batch ingestion, Iceber
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "boto3>=1.35,<2",
     "psycopg[binary]>=3.2,<4",
 ]
 
@@ -17,6 +18,7 @@ packages = ["src/omni_retail"]
 
 [dependency-groups]
 dev = [
+    "boto3-stubs[s3]>=1.35,<2",
     "mypy>=1.11,<2",
     "pre-commit>=4,<5",
     "pytest>=8,<9",
@@ -40,4 +42,5 @@ packages = ["omni_retail"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = "-ra"

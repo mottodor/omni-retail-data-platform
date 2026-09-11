@@ -19,6 +19,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 TRINO_CATALOG_FILE = REPO_ROOT / "trino" / "etc" / "catalog" / "iceberg.properties"
 ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
+MINIO_INIT_FILE = REPO_ROOT / "infrastructure" / "scripts" / "minio_init.sh"
+
+# Environment documented for the ingestion pipeline (Phase 3 design spec §11).
+EXPECTED_INGESTION_ENV_KEYS = {
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+}
 
 FORBIDDEN_IMAGE_TAGS = {"latest", "stable", "edge", "nightly"}
 
@@ -150,3 +158,20 @@ def test_service_dependencies_use_health_conditions(
     assert depends.get("condition") == condition, (
         f"{service} must wait for {dependency} ({condition})"
     )
+
+
+def test_env_example_documents_ingestion_variables() -> None:
+    missing = EXPECTED_INGESTION_ENV_KEYS - _env_example_keys()
+    assert not missing, f"ingestion env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_minio_init_creates_least_privilege_ingestion_user() -> None:
+    script = MINIO_INIT_FILE.read_text(encoding="utf-8")
+
+    assert "mc admin user add" in script
+    assert "mc admin policy attach local omni-ingestion-rw" in script
+    # the policy must be scoped to ingestion buckets only, without admin rights
+    for bucket in ("landing", "archive", "rejected"):
+        assert f"arn:aws:s3:::{bucket}" in script
+    assert "s3:PutObject" in script
+    assert "Administrator" not in script

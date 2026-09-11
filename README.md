@@ -51,7 +51,8 @@ Iceberg is the analytical source of truth; ClickHouse is a derived serving layer
 - [x] Phase 0 — repository bootstrap and engineering standards
 - [x] Phase 1 — core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg)
 - [x] Phase 2 — OLTP model and deterministic data generator
-- [ ] Phase 3+ — see `ROADMAP.md`
+- [ ] Phase 3 — batch ingestion: REST API + files/S3 (file core shipped; API clients next)
+- [ ] Phase 4+ — see `ROADMAP.md`
 
 ## Prerequisites
 
@@ -85,6 +86,8 @@ make reset      # DESTRUCTIVE: down -v, destroys all local volumes
 make smoke-core # end-to-end check: Trino -> Polaris -> Iceberg -> MinIO
 make generate-oltp # apply OLTP schema + load initial data (10k customers / 5k products / 100k orders)
 make mutate-oltp   # apply a batch of random inserts/updates/deletes (EVENTS=200 by default)
+make seed-supplier-files  # generate deterministic vendor files and upload to landing (ROWS/SEED)
+make ingest-files ARGS="--source supplier-prices"  # run the file ingestion flow
 ```
 
 ## Core infrastructure (Phase 1)
@@ -147,6 +150,50 @@ Behavior highlights:
   `--truncate-oltp-data` is passed (explicit, destructive).
 
 Table documentation, grain, and source metrics: `docs/data-model.md`.
+
+## Batch ingestion (Phase 3)
+
+External file sources flow through a durable, idempotent pipeline:
+
+```text
+supplier CSV / partner JSON
+  → landing/<source>/incoming/            (drop zone)
+  → landing/<source>/processing/          (transit; marker of an interrupted run)
+  → validation (schema + per-row)
+      ├─ ok       → archive/<source>/<yyyy>/<mm>/<dd>/<file>   (raw, unchanged)
+      ├─ bad rows → rejected/<source>/<yyyy>/<mm>/<dd>/<file>.badrows.<ext>
+      └─ bad file → rejected/<source>/<yyyy>/<mm>/<dd>/<file> (+ .rejection.json)
+  → manifest: archive/_manifests/<source>/<batch_id>.json
+  → dedup marker: archive/_dedup/<source>/<sha256>.json
+```
+
+Guarantees:
+
+- **raw payload is preserved unchanged** — validation never rewrites the archived object;
+- **idempotent re-runs** — `batch_id` is content-addressed (`<source>-<sha256[:16>]`);
+  a re-upload of the same content is skipped with status `duplicate`;
+- **interrupted-run recovery** — objects stranded in `processing` are reprocessed;
+  `incoming` objects are deleted only after a successful archive/reject;
+- **explicit quarantine** — broken files and malformed rows land in `rejected`
+  with machine-readable reasons; `--fail-on-rejected` turns quarantine into a failure;
+- **backfill-friendly** — archive paths use an explicit logical `--date`, never wall-clock.
+
+Sources (schema-driven, see `omni_retail.ingestion.files.schemas`): `supplier-prices`
+(CSV) and `partner-products` (JSON). Parquet/XLSX arrive with later slices.
+
+```bash
+make up
+make seed-supplier-files ROWS=500 SEED=11   # deterministic payload → landing
+make ingest-files ARGS="--source supplier-prices --date 2026-09-11"
+make ingest-files ARGS="--source supplier-prices --date 2026-09-11"  # again → duplicate, no double archive
+```
+
+The pipeline runs as the least-privilege MinIO user `omni-ingestion`
+(rw on `landing`/`archive`/`rejected`, read-only on `lakehouse`), created
+automatically by `minio-init` from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`.
+
+Note for proxied environments: if your shell sets `HTTP_PROXY`/`HTTPS_PROXY`,
+add `no_proxy=127.0.0.1,localhost` so local MinIO traffic bypasses the proxy.
 
 ## CI
 
