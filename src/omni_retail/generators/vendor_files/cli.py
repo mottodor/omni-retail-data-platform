@@ -22,13 +22,18 @@ logger = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m omni_retail.generators.vendor_files",
-        description="Generate deterministic vendor files (supplier CSV, partner JSON).",
+        description=(
+            "Generate deterministic vendor files "
+            "(supplier CSV, partner JSON, historical orders Parquet, supplier stock XLSX)."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     generate_parser = subparsers.add_parser("generate", help="generate a vendor file payload")
     generate_parser.add_argument(
-        "--source", required=True, help="supplier-prices or partner-products"
+        "--source",
+        required=True,
+        help="supplier-prices | partner-products | historical-orders | supplier-stock",
     )
     generate_parser.add_argument("--rows", type=int, default=200)
     generate_parser.add_argument("--seed", type=int, default=7)

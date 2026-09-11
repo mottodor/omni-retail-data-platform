@@ -3,10 +3,17 @@
 import csv
 import io
 import json
+import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from omni_retail.ingestion.files.schemas import FieldSpec, FileSourceSchema
 
@@ -44,7 +51,13 @@ def validate_payload(schema: FileSourceSchema, payload: bytes) -> ValidationResu
     """Validate a raw payload; never raises on malformed content."""
     if schema.format == "csv":
         return _validate_csv(schema, payload)
-    return _validate_json(schema, payload)
+    if schema.format == "json":
+        return _validate_json(schema, payload)
+    if schema.format == "parquet":
+        return _validate_parquet(schema, payload)
+    if schema.format == "xlsx":
+        return _validate_xlsx(schema, payload)
+    raise ValueError(f"unsupported file format: {schema.format!r}")
 
 
 def serialize_bad_rows_csv(schema: FileSourceSchema, bad_rows: tuple[BadRow, ...]) -> bytes:
@@ -143,6 +156,77 @@ def _header_errors(schema: FileSourceSchema, header: set[str]) -> tuple[str, ...
     errors = [f"missing required column: {name}" for name in missing]
     errors.extend(f"unexpected column: {name}" for name in unexpected)
     return tuple(errors)
+
+
+def _value_to_str(value: Any) -> str:
+    """Coerce one native cell/column value to its canonical string form."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _validate_parquet(schema: FileSourceSchema, payload: bytes) -> ValidationResult:
+    try:
+        table = pq.read_table(io.BytesIO(payload))
+    except (pa.ArrowException, OSError, ValueError) as error:
+        return ValidationResult(file_valid=False, file_errors=(f"malformed parquet: {error}",))
+    file_errors = _header_errors(schema, set(table.column_names))
+    if file_errors:
+        return ValidationResult(file_valid=False, file_errors=file_errors)
+    return _classify_rows(schema, iter(table.to_pylist()))
+
+
+def _validate_xlsx(schema: FileSourceSchema, payload: bytes) -> ValidationResult:
+    try:
+        workbook = load_workbook(io.BytesIO(payload), read_only=True)
+    except (InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, OSError) as error:
+        return ValidationResult(file_valid=False, file_errors=(f"malformed xlsx: {error}",))
+    try:
+        sheet = workbook.active
+        if sheet is None:
+            return ValidationResult(file_valid=False, file_errors=("empty file: no worksheet",))
+        rows_iter = sheet.iter_rows(values_only=True)
+        header = next(rows_iter, None)
+        if header is None:
+            return ValidationResult(file_valid=False, file_errors=("empty file: no header",))
+        header_names = [str(cell) if cell is not None else "" for cell in header]
+        file_errors = _header_errors(schema, set(header_names))
+        if file_errors:
+            return ValidationResult(file_valid=False, file_errors=file_errors)
+        return _classify_rows(
+            schema,
+            (
+                dict(zip(header_names, row, strict=False))
+                for row in rows_iter
+                if not _is_empty_row(row)
+            ),
+        )
+    finally:
+        workbook.close()
+
+
+def _is_empty_row(row: tuple[Any, ...] | None) -> bool:
+    return row is None or all(cell is None for cell in row)
+
+
+def _classify_rows(schema: FileSourceSchema, records: Iterator[dict[str, Any]]) -> ValidationResult:
+    """Classify string-coerced records into valid rows and quarantined bad rows."""
+    rows: list[dict[str, str]] = []
+    bad_rows: list[BadRow] = []
+    for row_number, record in enumerate(records, start=1):
+        raw_row = {name: _value_to_str(value) for name, value in record.items()}
+        reason = _row_error(schema, raw_row)
+        if reason is None:
+            rows.append(raw_row)
+        else:
+            bad_rows.append(BadRow(row_number=row_number, values=raw_row, reason=reason))
+    return ValidationResult(file_valid=True, rows=tuple(rows), bad_rows=tuple(bad_rows))
 
 
 def _row_error(schema: FileSourceSchema, raw_row: dict[str, Any]) -> str | None:

@@ -51,7 +51,7 @@ Iceberg is the analytical source of truth; ClickHouse is a derived serving layer
 - [x] Phase 0 — repository bootstrap and engineering standards
 - [x] Phase 1 — core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg)
 - [x] Phase 2 — OLTP model and deterministic data generator
-- [ ] Phase 3 — batch ingestion (file core, mock API service, and API clients shipped; parquet/XLSX + live integration tests next)
+- [x] Phase 3 — batch ingestion (CSV/JSON/Parquet/XLSX files, mock API service, retries, backfill, live integration tests)
 - [ ] Phase 4+ — see `ROADMAP.md`
 
 ## Prerequisites
@@ -90,6 +90,7 @@ make seed-supplier-files  # generate deterministic vendor files and upload to la
 make ingest-files ARGS="--source supplier-prices"  # run the file ingestion flow
 make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # fetch raw API pages into archive
 make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"  # date-range backfill
+make integration  # integration tests against the live core stack (requires `make up`)
 ```
 
 ## Core infrastructure (Phase 1)
@@ -159,7 +160,7 @@ Table documentation, grain, and source metrics: `docs/data-model.md`.
 External file sources flow through a durable, idempotent pipeline:
 
 ```text
-supplier CSV / partner JSON
+supplier CSV / partner JSON / historical-orders Parquet / supplier stock XLSX
   → landing/<source>/incoming/            (drop zone)
   → landing/<source>/processing/          (transit; marker of an interrupted run)
   → validation (schema + per-row)
@@ -182,7 +183,11 @@ Guarantees:
 - **backfill-friendly** — archive paths use an explicit logical `--date`, never wall-clock.
 
 Sources (schema-driven, see `omni_retail.ingestion.files.schemas`): `supplier-prices`
-(CSV) and `partner-products` (JSON). Parquet/XLSX arrive with later slices.
+(CSV), `partner-products` (JSON), `historical-orders` (Parquet with typed columns),
+and `supplier-stock` (XLSX edge case). All generated payloads are byte-deterministic
+for the same seed — including XLSX, whose volatile Excel timestamps are normalized —
+so checksum-based deduplication stays meaningful. Source contracts: `docs/data-contracts.md`;
+quarantine handling: `docs/runbooks/bad-supplier-file.md`.
 
 ```bash
 make up
@@ -233,6 +238,18 @@ make ingest-api ARGS="run --source fx-rates --date 2026-09-10"
 make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # again → same objects, no duplicates
 make ingest-api ARGS="backfill --source marketing-campaigns --from 2026-09-09 --to 2026-09-10"
 ```
+
+## Integration tests (Phase 3)
+
+`make integration` runs the Phase 3 acceptance scenarios against the live core
+stack (MinIO + mock-api), gated by `OMNI_INTEGRATION=1` so plain `make test`
+stays hermetic:
+
+- re-running the same file batch archives exactly once (content-addressed dedup);
+- a corrupted file is quarantined with a machine-readable `.rejection.json`;
+- Parquet and XLSX sources flow end-to-end through real object storage;
+- an injected HTTP 429 is retried and succeeds;
+- an API backfill over a date range is idempotent (deterministic page keys).
 
 ## CI
 

@@ -33,7 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
     process_parser.add_argument(
         "--source",
         required=True,
-        help="source name, e.g. supplier-prices or partner-products",
+        help=(
+            "source name, e.g. supplier-prices, partner-products, historical-orders, supplier-stock"
+        ),
     )
     process_parser.add_argument(
         "--date",

@@ -1,10 +1,10 @@
-"""Declarative schemas for external file sources (CSV/JSON vendors)."""
+"""Declarative schemas for external file sources (CSV/JSON/Parquet/XLSX vendors)."""
 
 from dataclasses import dataclass
 from typing import Literal
 
 FieldType = Literal["string", "integer", "decimal", "date", "boolean"]
-FileFormat = Literal["csv", "json"]
+FileFormat = Literal["csv", "json", "parquet", "xlsx"]
 
 
 @dataclass(frozen=True)
@@ -58,9 +58,36 @@ PARTNER_PRODUCTS = FileSourceSchema(
     ),
 )
 
+HISTORICAL_ORDERS = FileSourceSchema(
+    name="historical-orders",
+    format="parquet",
+    schema_version="1.0",
+    fields=(
+        FieldSpec("order_id", "integer"),
+        FieldSpec("customer_id", "integer"),
+        FieldSpec("status", "string"),
+        FieldSpec("order_total", "decimal"),
+        FieldSpec("order_date", "date"),
+    ),
+)
+
+SUPPLIER_STOCK = FileSourceSchema(
+    name="supplier-stock",
+    format="xlsx",
+    schema_version="1.0",
+    fields=(
+        FieldSpec("supplier_id", "string"),
+        FieldSpec("sku", "string"),
+        FieldSpec("quantity", "integer"),
+        FieldSpec("updated_at", "date"),
+    ),
+)
+
 KNOWN_SOURCES: dict[str, FileSourceSchema] = {
     SUPPLIER_PRICES.name: SUPPLIER_PRICES,
     PARTNER_PRODUCTS.name: PARTNER_PRODUCTS,
+    HISTORICAL_ORDERS.name: HISTORICAL_ORDERS,
+    SUPPLIER_STOCK.name: SUPPLIER_STOCK,
 }
 
 

@@ -5,12 +5,15 @@ acceptance criterion: idempotent re-runs, quarantine of broken files and
 rows, interrupted-run recovery and duplicate detection.
 """
 
+import io
 import json
 from datetime import UTC, date, datetime
 
 import pytest
+from openpyxl import Workbook
 
 from fakes.storage import FakeStorage
+from omni_retail.generators.vendor_files.generator import generate_payload
 from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
@@ -21,7 +24,12 @@ from omni_retail.ingestion.common.paths import (
 )
 from omni_retail.ingestion.common.storage import ObjectStorage
 from omni_retail.ingestion.files.flow import BatchOutcome, RejectedRowsError, process_incoming
-from omni_retail.ingestion.files.schemas import PARTNER_PRODUCTS, SUPPLIER_PRICES
+from omni_retail.ingestion.files.schemas import (
+    HISTORICAL_ORDERS,
+    PARTNER_PRODUCTS,
+    SUPPLIER_PRICES,
+    SUPPLIER_STOCK,
+)
 
 RUN_DATE = date(2026, 9, 11)
 FIXED_NOW = datetime(2026, 9, 11, 12, 30, tzinfo=UTC)
@@ -52,6 +60,16 @@ GOOD_JSON = json.dumps(
 
 def fixed_clock() -> datetime:
     return FIXED_NOW
+
+
+def xlsx_payload(rows: list[list[object]]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in rows:
+        sheet.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def seed_incoming(storage: ObjectStorage, filename: str, payload: bytes) -> None:
@@ -259,3 +277,43 @@ def test_limit_restricts_number_of_processed_objects() -> None:
 
     assert len(outcomes) == 1
     assert storage.list_object_keys(BUCKET_LANDING, "supplier-prices/incoming/") != ()
+
+
+def test_parquet_source_flow_archives_payload() -> None:
+    storage = FakeStorage()
+    payload = generate_payload(HISTORICAL_ORDERS, seed=7, rows=10, run_date=RUN_DATE)
+    storage.put_object(BUCKET_LANDING, "historical-orders/incoming/orders.parquet", payload)
+
+    outcomes = process_incoming(storage, HISTORICAL_ORDERS, RUN_DATE, clock=fixed_clock)
+
+    manifest = outcome_for(outcomes, "orders.parquet")
+    assert manifest.status == "completed"
+    assert manifest.row_count == 10
+    assert manifest.object_key == "historical-orders/2026/09/11/orders.parquet"
+    assert storage.stored_objects()[(BUCKET_ARCHIVE, manifest.object_key)] == payload
+    assert storage.list_object_keys(BUCKET_LANDING, "historical-orders/") == ()
+
+
+def test_xlsx_source_with_bad_rows_quarantines_rows_and_archives_file() -> None:
+    storage = FakeStorage()
+    payload = xlsx_payload(
+        [
+            ["supplier_id", "sku", "quantity", "updated_at"],
+            ["acme", "AC-S0001", 42, date(2026, 3, 5)],
+            ["acme", "AC-S0002", "many", date(2026, 3, 5)],
+        ]
+    )
+    storage.put_object(BUCKET_LANDING, "supplier-stock/incoming/stock.xlsx", payload)
+
+    outcomes = process_incoming(storage, SUPPLIER_STOCK, RUN_DATE, clock=fixed_clock)
+
+    manifest = outcome_for(outcomes, "stock.xlsx")
+    assert manifest.status == "completed"
+    assert manifest.row_count == 2
+    assert manifest.rejected_row_count == 1
+    badrows = storage.stored_objects()[
+        (BUCKET_REJECTED, "supplier-stock/2026/09/11/stock.xlsx.badrows.xlsx")
+    ]
+    assert b"AC-S0002" in badrows
+    assert b"_rejection_reason" in badrows
+    assert storage.list_object_keys(BUCKET_LANDING, "supplier-stock/") == ()
