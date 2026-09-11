@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files
+.PHONY: help setup lint test unit up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -54,3 +54,6 @@ seed-supplier-files: ## Generate deterministic vendor files and upload to landin
 
 ingest-files: ## Process pending vendor files (landing -> processing -> archive | rejected). ARGS="--source supplier-prices --date 2026-09-11"
 	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.ingestion.files process $(ARGS)'
+
+ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source fx-rates --date 2026-09-11" or "backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"
+	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.ingestion.api $(ARGS)'

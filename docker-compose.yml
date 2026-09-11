@@ -173,6 +173,28 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  mock-api:
+    image: omni-retail/mock-api:0.1.0
+    build:
+      context: ./infrastructure/mock_api
+    profiles: ["core"]
+    environment:
+      MOCK_API_SEED: ${MOCK_API_SEED:-42}
+    ports:
+      - "127.0.0.1:${MOCK_API_PORT:-9002}:9002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9002/healthz', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   minio-data:

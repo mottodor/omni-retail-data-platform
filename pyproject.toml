@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "boto3>=1.35,<2",
+    "httpx>=0.27,<1",
     "psycopg[binary]>=3.2,<4",
 ]
 
@@ -39,8 +40,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["omni_retail"]
+mypy_path = "infrastructure/mock_api/src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests"]
+pythonpath = ["tests", "infrastructure/mock_api/src"]
 addopts = "-ra"

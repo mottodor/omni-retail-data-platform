@@ -2,10 +2,14 @@
 
 from datetime import date
 
+import pytest
+
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
     BUCKET_LANDING,
     BUCKET_REJECTED,
+    api_batch_prefix,
+    api_page_key,
     archive_key,
     badrows_key,
     dedup_key,
@@ -77,3 +81,22 @@ def test_dedup_key_layout() -> None:
 def test_keys_are_deterministic_for_same_inputs() -> None:
     run_date = date(2026, 9, 11)
     assert archive_key("x", "f.csv", run_date) == archive_key("x", "f.csv", run_date)
+
+
+def test_api_page_key_is_date_addressed_and_zero_padded() -> None:
+    assert api_page_key("fx-rates", date(2026, 9, 10), 1) == "api/fx-rates/20260910/page_0001.json"
+    assert api_page_key("fx-rates", date(2026, 9, 10), 123) == (
+        "api/fx-rates/20260910/page_0123.json"
+    )
+
+
+def test_api_page_key_rejects_non_positive_page_numbers() -> None:
+    with pytest.raises(ValueError, match="page_number"):
+        api_page_key("fx-rates", date(2026, 9, 10), 0)
+
+
+def test_api_batch_prefix_covers_all_pages_of_one_batch() -> None:
+    assert api_batch_prefix("fx-rates", date(2026, 9, 10)) == "api/fx-rates/20260910/"
+    assert api_page_key("fx-rates", date(2026, 9, 10), 2).startswith(
+        api_batch_prefix("fx-rates", date(2026, 9, 10))
+    )

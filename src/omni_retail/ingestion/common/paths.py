@@ -56,3 +56,19 @@ def manifest_key(source: str, batch_id: str) -> str:
 def dedup_key(source: str, checksum: str) -> str:
     """Duplicate-detection marker key: ``_dedup/<source>/<sha256>.json`` (archive bucket)."""
     return f"_dedup/{source}/{checksum}.json"
+
+
+def api_page_key(source: str, logical_date: date, page_number: int) -> str:
+    """Raw API page key: ``api/<source>/<yyyymmdd>/page_XXXX.json`` (archive bucket).
+
+    Pages are already final raw payloads: deterministic keys make a re-run of
+    the same logical date overwrite the same objects instead of duplicating.
+    """
+    if page_number < 1:
+        raise ValueError(f"page_number must be >= 1, got {page_number}")
+    return f"api/{source}/{logical_date:%Y%m%d}/page_{page_number:04d}.json"
+
+
+def api_batch_prefix(source: str, logical_date: date) -> str:
+    """Prefix of every raw page object belonging to one API batch."""
+    return f"api/{source}/{logical_date:%Y%m%d}/"
