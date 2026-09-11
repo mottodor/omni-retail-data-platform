@@ -19,6 +19,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 TRINO_CATALOG_FILE = REPO_ROOT / "trino" / "etc" / "catalog" / "iceberg.properties"
 ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
+MINIO_INIT_FILE = REPO_ROOT / "infrastructure" / "scripts" / "minio_init.sh"
+MOCK_API_DIR = REPO_ROOT / "infrastructure" / "mock_api"
+MOCK_API_DOCKERFILE = MOCK_API_DIR / "Dockerfile"
+MOCK_API_REQUIREMENTS = MOCK_API_DIR / "requirements.txt"
+
+# Environment documented for the ingestion pipeline (Phase 3 design spec §11).
+EXPECTED_INGESTION_ENV_KEYS = {
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "MOCK_API_BASE_URL",
+    "MOCK_API_PORT",
+    "MOCK_API_SEED",
+}
 
 FORBIDDEN_IMAGE_TAGS = {"latest", "stable", "edge", "nightly"}
 
@@ -31,6 +45,7 @@ EXPECTED_CORE_SERVICES = {
     "polaris",
     "polaris-init",
     "trino",
+    "mock-api",
 }
 
 # Services that run to completion and therefore must not have healthchecks.
@@ -150,3 +165,56 @@ def test_service_dependencies_use_health_conditions(
     assert depends.get("condition") == condition, (
         f"{service} must wait for {dependency} ({condition})"
     )
+
+
+def test_env_example_documents_ingestion_variables() -> None:
+    missing = EXPECTED_INGESTION_ENV_KEYS - _env_example_keys()
+    assert not missing, f"ingestion env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_minio_init_creates_least_privilege_ingestion_user() -> None:
+    script = MINIO_INIT_FILE.read_text(encoding="utf-8")
+
+    assert "mc admin user add" in script
+    assert "mc admin policy attach local omni-ingestion-rw" in script
+    # the policy must be scoped to ingestion buckets only, without admin rights
+    for bucket in ("landing", "archive", "rejected"):
+        assert f"arn:aws:s3:::{bucket}" in script
+    assert "s3:PutObject" in script
+    assert "Administrator" not in script
+
+
+def test_mock_api_build_context_exists_with_pinned_base_image() -> None:
+    assert MOCK_API_DOCKERFILE.is_file(), "mock-api Dockerfile is missing"
+    from_lines = [
+        line.strip()
+        for line in MOCK_API_DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        if line.strip().upper().startswith("FROM ")
+    ]
+    assert from_lines, "Dockerfile must contain a FROM instruction"
+    for line in from_lines:
+        tag = line.split()[-1].rsplit(":", 1)[-1]
+        assert ":" in line.split()[-1], f"base image must carry a tag: {line}"
+        assert tag.lower() not in FORBIDDEN_IMAGE_TAGS, f"unpinned base image: {line}"
+
+
+def test_mock_api_requirements_are_version_pinned() -> None:
+    assert MOCK_API_REQUIREMENTS.is_file(), "mock-api requirements.txt is missing"
+    for line in MOCK_API_REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        assert any(marker in line for marker in ("==", ">=", "<=", "~=")), (
+            f"dependency without a version constraint: {line}"
+        )
+
+
+def test_mock_api_healthcheck_targets_healthz() -> None:
+    services = _load_compose()["services"]
+    healthcheck = services["mock-api"]["healthcheck"]
+    assert "/healthz" in str(healthcheck["test"])
+
+
+def test_mock_api_runs_non_root_user() -> None:
+    dockerfile = MOCK_API_DOCKERFILE.read_text(encoding="utf-8")
+    assert "USER " in dockerfile, "mock-api container must run as a non-root user"
