@@ -19,15 +19,30 @@ EXPECTED_DAG_IDS = {
     "ingest_marketing_api",
     "ingest_delivery_api",
     "ingest_supplier_files",
+    "ingest_postgres_snapshot",
 }
 
-API_DAG_IDS = sorted(EXPECTED_DAG_IDS - {"ingest_supplier_files"})
+API_DAG_IDS = sorted(
+    dag_id
+    for dag_id in EXPECTED_DAG_IDS
+    if dag_id.startswith("ingest_") and dag_id.endswith("_api")
+)
 
 EXPECTED_SUPPLIER_TASK_IDS = {
     "ingest_supplier_prices",
     "ingest_partner_products",
     "ingest_historical_orders",
     "ingest_supplier_stock",
+}
+
+EXPECTED_SNAPSHOT_TASK_IDS = {
+    "snapshot_categories",
+    "snapshot_customers",
+    "snapshot_products",
+    "snapshot_orders",
+    "snapshot_order_items",
+    "snapshot_payments",
+    "snapshot_shipments",
 }
 
 
@@ -104,3 +119,28 @@ def test_supplier_files_dag_params_defaults(dag_bag: DagBag) -> None:
     dag = dag_bag.dags["ingest_supplier_files"]
     params = dag.params
     assert params["fail_on_rejected"] is False
+
+
+def test_postgres_snapshot_dag_has_one_task_per_table(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["ingest_postgres_snapshot"]
+    assert {task.task_id for task in dag.tasks} == EXPECTED_SNAPSHOT_TASK_IDS
+
+
+def test_postgres_snapshot_tasks_are_independent(dag_bag: DagBag) -> None:
+    """A failure of one table must not stop the others (design spec §7)."""
+    dag = dag_bag.dags["ingest_postgres_snapshot"]
+    for task in dag.tasks:
+        assert not task.upstream_task_ids, f"{task.task_id} must not depend on other tables"
+        assert not task.downstream_task_ids, f"{task.task_id} must not be a dependency"
+
+
+def test_postgres_snapshot_tasks_use_default_pool(dag_bag: DagBag) -> None:
+    """Seven concurrent PostgreSQL connections are fine; no pool needed."""
+    dag = dag_bag.dags["ingest_postgres_snapshot"]
+    for task in dag.tasks:
+        assert task.pool == "default_pool"
+
+
+def test_postgres_snapshot_dag_params_defaults(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["ingest_postgres_snapshot"]
+    assert dag.params["full_refresh"] is False

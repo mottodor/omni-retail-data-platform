@@ -1,4 +1,4 @@
-"""Thin orchestration runners over the Phase 3 ingestion functions.
+"""Thin orchestration runners over the Phase 3/4 ingestion functions.
 
 DAG tasks must not become transformation code repositories (AGENTS.md
 §19.1): the runners only wire environment-configured ingestion entry points
@@ -7,6 +7,9 @@ to Airflow task context and return JSON-serializable summaries for XCom.
 
 import contextlib
 from datetime import date
+from typing import cast
+
+import psycopg
 
 from omni_retail.ingestion.api.cli import ApiSourceSpec, run_batch, spec_by_name
 from omni_retail.ingestion.api.client import ApiClient, ApiClientConfig
@@ -15,6 +18,10 @@ from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.storage import BotoObjectStorage, StorageConfig
 from omni_retail.ingestion.files.flow import BatchOutcome, process_incoming
 from omni_retail.ingestion.files.schemas import schema_by_name as file_schema_by_name
+from omni_retail.ingestion.postgres_snapshot.config import PostgresSourceConfig
+from omni_retail.ingestion.postgres_snapshot.extract import SnapshotConnection, snapshot_table
+from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
+from omni_retail.ingestion.postgres_snapshot.watermark import load_watermark
 
 
 def summarize_manifest(manifest: BatchManifest) -> dict[str, object]:
@@ -66,3 +73,23 @@ def run_file_ingestion(
         fail_on_rejected=fail_on_rejected,
     )
     return summarize_outcomes(outcomes)
+
+
+def run_postgres_snapshot(
+    table_name: str, logical_date: date, *, full_refresh: bool = False
+) -> dict[str, object]:
+    """Extract one OLTP table snapshot into the archive bucket (Phase 4 §5)."""
+    configure_logging()
+    spec = table_by_name(table_name)
+    config = PostgresSourceConfig.from_env()
+    storage = BotoObjectStorage(StorageConfig.from_env())
+    with psycopg.connect(config.conninfo()) as conn:
+        watermark = None if full_refresh else load_watermark(storage, spec)
+        manifest = snapshot_table(
+            storage,
+            cast(SnapshotConnection, conn),
+            spec,
+            logical_date=logical_date,
+            watermark=watermark,
+        )
+    return summarize_manifest(manifest)
