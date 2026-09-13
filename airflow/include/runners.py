@@ -13,6 +13,8 @@ from omni_retail.ingestion.api.client import ApiClient, ApiClientConfig
 from omni_retail.ingestion.common.logging import configure_logging
 from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.storage import BotoObjectStorage, StorageConfig
+from omni_retail.ingestion.files.flow import BatchOutcome, process_incoming
+from omni_retail.ingestion.files.schemas import schema_by_name as file_schema_by_name
 
 
 def summarize_manifest(manifest: BatchManifest) -> dict[str, object]:
@@ -34,3 +36,33 @@ def run_api_ingestion(source_name: str, logical_date: date) -> dict[str, object]
         storage = BotoObjectStorage(StorageConfig.from_env())
         manifest = run_batch(spec, client, storage, logical_date, page_size=None)
     return summarize_manifest(manifest)
+
+
+def summarize_outcomes(outcomes: tuple[BatchOutcome, ...]) -> list[dict[str, object]]:
+    """XCom-friendly summaries of processed files (identifiers and counts only)."""
+    return [
+        {
+            "filename": outcome.filename,
+            "batch_id": outcome.manifest.batch_id,
+            "status": outcome.manifest.status,
+            "row_count": outcome.manifest.row_count,
+            "rejected_row_count": outcome.manifest.rejected_row_count,
+        }
+        for outcome in outcomes
+    ]
+
+
+def run_file_ingestion(
+    source_name: str, run_date: date, *, fail_on_rejected: bool = False
+) -> list[dict[str, object]]:
+    """Process pending vendor files of one source through the Phase 3 flow."""
+    configure_logging()
+    schema = file_schema_by_name(source_name)
+    storage = BotoObjectStorage(StorageConfig.from_env())
+    outcomes = process_incoming(
+        storage,
+        schema,
+        run_date,
+        fail_on_rejected=fail_on_rejected,
+    )
+    return summarize_outcomes(outcomes)

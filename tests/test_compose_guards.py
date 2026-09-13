@@ -320,9 +320,13 @@ def test_dag_directory_contains_only_expected_dags() -> None:
     dags_dir = AIRFLOW_DIR / "dags"
     assert dags_dir.is_dir(), "airflow/dags is missing"
     dag_files = sorted(path.name for path in dags_dir.glob("*.py"))
-    assert dag_files == ["ingest_fx_api.py"], (
-        f"Phase 4 slice 1 registers exactly the pilot DAG: {dag_files}"
-    )
+    expected = [
+        "ingest_delivery_api.py",
+        "ingest_fx_api.py",
+        "ingest_marketing_api.py",
+        "ingest_supplier_files.py",
+    ]
+    assert dag_files == expected, f"unexpected DAG files: {dag_files}"
 
 
 def test_minio_init_creates_least_privilege_ingestion_user() -> None:
