@@ -2,11 +2,13 @@
 
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import boto3
 from botocore.exceptions import ClientError
-from mypy_boto3_s3 import S3Client
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
 
 DEFAULT_ENDPOINT_URL = "http://127.0.0.1:9000"
 DEFAULT_REGION = "us-east-1"
@@ -72,7 +74,7 @@ class BotoObjectStorage:
 
     def __init__(self, config: StorageConfig) -> None:
         self._config = config
-        self.client: S3Client = boto3.client(
+        self.client: "S3Client" = boto3.client(
             "s3",
             endpoint_url=config.endpoint_url,
             aws_access_key_id=config.access_key_id,

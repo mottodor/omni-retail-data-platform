@@ -8,6 +8,7 @@ Enforces AGENTS.md infrastructure rules:
 - stateful services use named volumes.
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +24,10 @@ MINIO_INIT_FILE = REPO_ROOT / "infrastructure" / "scripts" / "minio_init.sh"
 MOCK_API_DIR = REPO_ROOT / "infrastructure" / "mock_api"
 MOCK_API_DOCKERFILE = MOCK_API_DIR / "Dockerfile"
 MOCK_API_REQUIREMENTS = MOCK_API_DIR / "requirements.txt"
+AIRFLOW_DIR = REPO_ROOT / "airflow"
+AIRFLOW_DOCKERFILE = REPO_ROOT / "infrastructure" / "airflow" / "Dockerfile"
+AIRFLOW_TEST_SCRIPT = REPO_ROOT / "infrastructure" / "scripts" / "airflow_tests.sh"
+AIRFLOW_IMAGE = "omni-retail/airflow:0.1.0"
 
 # Environment documented for the ingestion pipeline (Phase 3 design spec §11).
 EXPECTED_INGESTION_ENV_KEYS = {
@@ -32,6 +37,18 @@ EXPECTED_INGESTION_ENV_KEYS = {
     "MOCK_API_BASE_URL",
     "MOCK_API_PORT",
     "MOCK_API_SEED",
+}
+
+# Airflow configuration documented for Phase 4 (design spec §11, ADR 0003).
+EXPECTED_AIRFLOW_ENV_KEYS = {
+    "AIRFLOW_UID",
+    "AIRFLOW_FERNET_KEY",
+    "AIRFLOW_WWW_USER",
+    "AIRFLOW_WWW_PASSWORD",
+    "AIRFLOW_WEBSERVER_PORT",
+    "AIRFLOW_POSTGRES_USER",
+    "AIRFLOW_POSTGRES_PASSWORD",
+    "AIRFLOW_POSTGRES_DB",
 }
 
 FORBIDDEN_IMAGE_TAGS = {"latest", "stable", "edge", "nightly"}
@@ -48,8 +65,15 @@ EXPECTED_CORE_SERVICES = {
     "mock-api",
 }
 
+EXPECTED_ORCHESTRATION_SERVICES = {
+    "airflow-postgres",
+    "airflow-init",
+    "airflow-webserver",
+    "airflow-scheduler",
+}
+
 # Services that run to completion and therefore must not have healthchecks.
-ONE_SHOT_SERVICES = {"minio-init", "polaris-bootstrap", "polaris-init"}
+ONE_SHOT_SERVICES = {"minio-init", "polaris-bootstrap", "polaris-init", "airflow-init"}
 
 
 def _load_compose() -> dict[str, Any]:
@@ -127,7 +151,13 @@ def test_host_ports_bind_to_loopback_only() -> None:
 def test_stateful_services_use_named_volumes() -> None:
     compose = _load_compose()
     volumes = set(compose.get("volumes", {}))
-    required = {"postgres-data", "minio-data", "polaris-postgres-data"}
+    required = {
+        "postgres-data",
+        "minio-data",
+        "polaris-postgres-data",
+        "airflow-metadata-data",
+        "airflow-logs",
+    }
     assert required <= volumes, f"missing named volumes: {sorted(required - volumes)}"
     services = compose["services"]
     assert any("postgres-data" in str(services["postgres"].get("volumes", [])) for _ in [0]), (
@@ -136,6 +166,9 @@ def test_stateful_services_use_named_volumes() -> None:
     assert any("minio-data" in str(services["minio"].get("volumes", [])) for _ in [0]), (
         "minio must mount minio-data"
     )
+    assert any(
+        "airflow-metadata-data" in str(services["airflow-postgres"].get("volumes", [])) for _ in [0]
+    ), "airflow-postgres must mount airflow-metadata-data (ADR 0003)"
 
 
 def test_trino_catalog_targets_polaris_rest_api() -> None:
@@ -155,6 +188,12 @@ def test_trino_catalog_targets_polaris_rest_api() -> None:
         ("polaris-init", "minio-init", "service_completed_successfully"),
         ("polaris", "polaris-bootstrap", "service_completed_successfully"),
         ("minio-init", "minio", "service_healthy"),
+        ("airflow-init", "airflow-postgres", "service_healthy"),
+        ("airflow-webserver", "airflow-postgres", "service_healthy"),
+        ("airflow-webserver", "airflow-init", "service_completed_successfully"),
+        ("airflow-scheduler", "airflow-postgres", "service_healthy"),
+        ("airflow-scheduler", "airflow-init", "service_completed_successfully"),
+        ("airflow-scheduler", "airflow-webserver", "service_healthy"),
     ],
 )
 def test_service_dependencies_use_health_conditions(
@@ -170,6 +209,120 @@ def test_service_dependencies_use_health_conditions(
 def test_env_example_documents_ingestion_variables() -> None:
     missing = EXPECTED_INGESTION_ENV_KEYS - _env_example_keys()
     assert not missing, f"ingestion env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_orchestration_profile_contains_expected_services() -> None:
+    services = _load_compose()["services"]
+    missing = EXPECTED_ORCHESTRATION_SERVICES - set(services)
+    assert not missing, f"orchestration services missing from compose: {sorted(missing)}"
+    for name in EXPECTED_ORCHESTRATION_SERVICES:
+        profiles = services[name].get("profiles", [])
+        assert "orchestration" in profiles, f"{name} is not in the 'orchestration' profile"
+        assert "core" not in profiles, f"{name} must not be in the 'core' profile"
+
+
+def test_env_example_documents_airflow_variables() -> None:
+    missing = EXPECTED_AIRFLOW_ENV_KEYS - _env_example_keys()
+    assert not missing, f"airflow env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_airflow_services_use_custom_pinned_image() -> None:
+    services = _load_compose()["services"]
+    for name in ("airflow-init", "airflow-webserver", "airflow-scheduler"):
+        assert services[name]["image"] == AIRFLOW_IMAGE, f"{name} must use {AIRFLOW_IMAGE}"
+    assert services["airflow-init"]["build"]["dockerfile"].endswith(
+        "infrastructure/airflow/Dockerfile"
+    )
+
+
+def test_airflow_postgres_has_no_host_ports() -> None:
+    services = _load_compose()["services"]
+    assert not services["airflow-postgres"].get("ports"), (
+        "airflow-postgres metadata must stay Docker-network-local"
+    )
+
+
+def test_airflow_webserver_port_is_loopback_only() -> None:
+    services = _load_compose()["services"]
+    entry = str(services["airflow-webserver"]["ports"][0])
+    assert entry.startswith("127.0.0.1:"), f"webserver port must bind loopback: {entry}"
+
+
+def test_airflow_services_mount_code_readonly() -> None:
+    services = _load_compose()["services"]
+    for name in ("airflow-init", "airflow-webserver", "airflow-scheduler"):
+        mounts = [str(m) for m in services[name].get("volumes", [])]
+        for required in (
+            "./airflow/dags:/opt/airflow/dags:ro",
+            "./airflow/include:/opt/airflow/include:ro",
+            "./airflow/tests:/opt/airflow/tests:ro",
+        ):
+            assert required in mounts, f"{name} must mount {required}"
+
+
+def test_airflow_uses_local_executor_and_paused_dags() -> None:
+    services = _load_compose()["services"]
+    for name in ("airflow-init", "airflow-webserver", "airflow-scheduler"):
+        env = services[name]["environment"]
+        assert env["AIRFLOW__CORE__EXECUTOR"] == "LocalExecutor", f"{name}: LocalExecutor"
+        assert env["AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION"] == "True", (
+            f"{name}: new DAGs must start paused"
+        )
+        assert env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "False", f"{name}: no example DAGs"
+
+
+def test_airflow_metadata_db_is_external_to_the_source_db() -> None:
+    services = _load_compose()["services"]
+    conn = services["airflow-webserver"]["environment"]["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"]
+    assert "airflow-postgres:5432" in conn, "metadata DB must be the dedicated instance"
+    assert "postgresql+psycopg2://" in conn
+
+
+def test_airflow_ingestion_env_uses_docker_network_addresses() -> None:
+    env = _load_compose()["services"]["airflow-scheduler"]["environment"]
+    assert env["S3_ENDPOINT_URL"] == "http://minio:9000"
+    assert env["MOCK_API_BASE_URL"] == "http://mock-api:9002"
+    assert env["POSTGRES_HOST"] == "postgres"
+
+
+def test_airflow_dockerfile_pinned_base_and_nonroot() -> None:
+    assert AIRFLOW_DOCKERFILE.is_file(), "airflow Dockerfile is missing"
+    text = AIRFLOW_DOCKERFILE.read_text(encoding="utf-8")
+    assert "FROM apache/airflow:2.11.2-python3.12" in text, "base image must be pinned"
+    assert "ghcr.io/astral-sh/uv:" in text, "uv must be copied from a pinned tag"
+    assert "uv export --frozen --no-dev" in text, "versions must come from the lockfile"
+    assert text.rstrip().endswith("USER airflow"), "image must end as the airflow user"
+
+
+def test_airflow_dockerfile_context_whitelist_is_minimal() -> None:
+    dockerignore = REPO_ROOT / ".dockerignore"
+    assert dockerignore.is_file(), "root .dockerignore is missing (Airflow build context)"
+    entries = [
+        line.strip()
+        for line in dockerignore.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert entries[0] == "*", "dockerignore must use a whitelist"
+    for required in ("!pyproject.toml", "!uv.lock", "!src/**"):
+        assert required in entries, f"dockerignore must whitelist {required}"
+
+
+def test_airflow_tests_script_is_executable_harness() -> None:
+    assert AIRFLOW_TEST_SCRIPT.is_file(), "airflow_tests.sh is missing"
+    text = AIRFLOW_TEST_SCRIPT.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in text
+    assert "python -m pytest /opt/airflow/tests" in text
+    assert "list-import-errors" in text
+    assert os.access(AIRFLOW_TEST_SCRIPT, os.X_OK), "airflow_tests.sh must be executable"
+
+
+def test_dag_directory_contains_only_expected_dags() -> None:
+    dags_dir = AIRFLOW_DIR / "dags"
+    assert dags_dir.is_dir(), "airflow/dags is missing"
+    dag_files = sorted(path.name for path in dags_dir.glob("*.py"))
+    assert dag_files == ["ingest_fx_api.py"], (
+        f"Phase 4 slice 1 registers exactly the pilot DAG: {dag_files}"
+    )
 
 
 def test_minio_init_creates_least_privilege_ingestion_user() -> None:

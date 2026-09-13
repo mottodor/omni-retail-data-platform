@@ -1,5 +1,33 @@
 name: omni-retail-data-platform
 
+# Shared Airflow service environment (Phase 4 design spec §8, ADR 0003):
+# LocalExecutor, dedicated metadata PostgreSQL, secrets from .env, and the
+# Phase 3 ingestion variables repointed at docker-network addresses.
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@airflow-postgres:5432/${AIRFLOW_POSTGRES_DB}
+  PYTHONPATH: /opt/airflow
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+  MOCK_API_BASE_URL: http://mock-api:9002
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  POSTGRES_DB: ${POSTGRES_DB}
+
+x-airflow-volumes: &airflow-volumes
+  # DAGs stay thin wrappers (AGENTS §19): helpers and tests are mounted
+  # read-only next to the DAG folder.
+  - ./airflow/dags:/opt/airflow/dags:ro
+  - ./airflow/include:/opt/airflow/include:ro
+  - ./airflow/tests:/opt/airflow/tests:ro
+  - airflow-logs:/opt/airflow/logs
+
 services:
   postgres:
     image: postgres:16.15-alpine
@@ -195,7 +223,96 @@ services:
       retries: 12
     restart: unless-stopped
 
+  airflow-postgres:
+    image: postgres:16.15-alpine
+    profiles: ["orchestration"]
+    environment:
+      POSTGRES_USER: ${AIRFLOW_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_POSTGRES_DB}
+    volumes:
+      - airflow-metadata-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_POSTGRES_USER} -d ${AIRFLOW_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  airflow-init:
+    image: omni-retail/airflow:0.1.0
+    build:
+      context: .
+      dockerfile: infrastructure/airflow/Dockerfile
+    profiles: ["orchestration"]
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_PASSWORD}
+    volumes: *airflow-volumes
+    # The image entrypoint runs db migrate + admin user creation first, then
+    # exec's this command (Phase 4 design spec §8).
+    command: >
+      bash -c "airflow pools set mock_api 2 'mock external API concurrency limit'"
+    restart: "no"
+
+  airflow-webserver:
+    image: omni-retail/airflow:0.1.0
+    profiles: ["orchestration"]
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    command: webserver
+    ports:
+      - "127.0.0.1:${AIRFLOW_WEBSERVER_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: omni-retail/airflow:0.1.0
+    profiles: ["orchestration"]
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-webserver:
+        condition: service_healthy
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    command: scheduler
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "airflow jobs check --job-type SchedulerJob --hostname $(hostname)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   minio-data:
   polaris-postgres-data:
+  airflow-metadata-data:
+  airflow-logs:
