@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
 
-SourceKind = Literal["file", "api"]
+SourceKind = Literal["file", "api", "postgres"]
 BatchStatus = Literal["completed", "rejected", "duplicate"]
 
 

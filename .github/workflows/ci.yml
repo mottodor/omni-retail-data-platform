@@ -41,3 +41,26 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config --quiet
+
+  airflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Airflow image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/airflow/Dockerfile
+          tags: omni-retail/airflow:0.1.0
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: DAG tests (pytest + import errors, inside the image)
+        run: bash infrastructure/scripts/airflow_tests.sh
+        env:
+          AIRFLOW_SKIP_BUILD: "1"

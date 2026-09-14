@@ -72,3 +72,17 @@ def api_page_key(source: str, logical_date: date, page_number: int) -> str:
 def api_batch_prefix(source: str, logical_date: date) -> str:
     """Prefix of every raw page object belonging to one API batch."""
     return f"api/{source}/{logical_date:%Y%m%d}/"
+
+
+def postgres_snapshot_key(table: str, logical_date: date) -> str:
+    """PostgreSQL snapshot key: ``postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet``.
+
+    The key depends only on (table, logical date): a re-run of the same day
+    overwrites the same object, so retries and backfills never duplicate data.
+    """
+    return f"postgres/{table}/{logical_date:%Y/%m/%d}/data.parquet"
+
+
+def postgres_watermark_key(table: str) -> str:
+    """Incremental-extraction watermark key (archive bucket)."""
+    return f"_watermarks/postgres/{table}.json"

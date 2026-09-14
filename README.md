@@ -52,7 +52,8 @@ Iceberg is the analytical source of truth; ClickHouse is a derived serving layer
 - [x] Phase 1 — core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg)
 - [x] Phase 2 — OLTP model and deterministic data generator
 - [x] Phase 3 — batch ingestion (CSV/JSON/Parquet/XLSX files, mock API service, retries, backfill, live integration tests)
-- [ ] Phase 4+ — see `ROADMAP.md`
+- [x] Phase 4 — Airflow orchestration (LocalExecutor, 5 ingestion DAGs, PG snapshot extraction, DAG tests in CI)
+- [ ] Phase 5+ — see `ROADMAP.md`
 
 ## Prerequisites
 
@@ -91,6 +92,11 @@ make ingest-files ARGS="--source supplier-prices"  # run the file ingestion flow
 make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # fetch raw API pages into archive
 make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"  # date-range backfill
 make integration  # integration tests against the live core stack (requires `make up`)
+make airflow-up     # start the orchestration profile (requires the core profile up)
+make airflow-down   # stop Airflow services (metadata/logs volumes preserved)
+make airflow-test   # DAG import/structure tests inside the Airflow image
+make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"     # run one DAG for a logical date
+make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # backfill a DAG
 ```
 
 ## Core infrastructure (Phase 1)
@@ -249,8 +255,52 @@ stays hermetic:
 - a corrupted file is quarantined with a machine-readable `.rejection.json`;
 - Parquet and XLSX sources flow end-to-end through real object storage;
 - an injected HTTP 429 is retried and succeeds;
-- an API backfill over a date range is idempotent (deterministic page keys).
+- an API backfill over a date range is idempotent (deterministic page keys);
+- a PostgreSQL snapshot lifecycle: full extract → parquet + manifest + watermark,
+  re-run with an empty window (no duplicates), incremental extract after a
+  controlled mutation, and `full_refresh` rebase.
+
+## Airflow orchestration (Phase 4)
+
+Orchestration lives in the `orchestration` Compose profile (ADR 0003):
+LocalExecutor, a dedicated metadata PostgreSQL (separate from the OLTP
+source, so `make reset` cannot wipe Airflow state), and a custom image
+`omni-retail/airflow:0.1.0` built from `apache/airflow:2.11.2-python3.12`
+with dependency versions exported from the committed `uv.lock` and the
+`omni_retail` package baked in — tasks call the ingestion functions in the
+worker process (no shell-outs, no logic duplicated in DAGs).
+
+| DAG | Schedule | Shape |
+|---|---|---|
+| `ingest_fx_api` / `ingest_marketing_api` / `ingest_delivery_api` | `@daily` | single `ingest` task, pool `mock_api`, XCom summary |
+| `ingest_supplier_files` | `@daily` | 4 independent per-source tasks; param `fail_on_rejected` (default `False`) |
+| `ingest_postgres_snapshot` | `@daily` | 7 independent per-table snapshot tasks; param `full_refresh` (default `False`) |
+
+Shared policy: `retries=3` with exponential backoff (capped at 5 min) on top
+of the http-level retries inside the API client, `execution_timeout=5min`,
+`max_active_runs=1`, `catchup=False`, new DAGs start paused, and the logical
+date (`ds`) is the only date input — wall-clock `now()` never appears in
+paths or identifiers.
+
+PostgreSQL snapshots (`omni_retail.ingestion.postgres_snapshot`) extract
+each OLTP table as Parquet with an explicit pyarrow schema:
+`archive/postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet`, manifest in the
+shared registry (`source_kind="postgres"`), and a durable watermark
+`archive/_watermarks/postgres/<table>.json`. Keyset pagination on
+`(updated_at, pk)` makes same-second events safe; the watermark moves only
+after a successful upload, so interruptions re-extract and overwrite the
+same window. Limitations (closed by CDC in Phase 8): hard deletes are
+invisible and historical backfill is impossible (snapshots hold current
+state).
+
+```bash
+make up                  # core profile first (postgres, minio, mock-api)
+make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081
+make airflow-test        # DAG tests (DagBag) inside the image — no live services needed
+make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
+make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
+```
 
 ## CI
 
-GitHub Actions runs on every push and pull request: ruff check, ruff format, mypy (non-blocking at bootstrap), pytest, and `docker compose config` validation.
+GitHub Actions runs on every push and pull request: ruff check, ruff format, mypy (non-blocking at bootstrap), pytest, `docker compose config` validation, plus an `airflow` job that builds the custom image and runs the DAG test harness (pytest + `airflow dags list-import-errors`) inside it.

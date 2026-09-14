@@ -2,11 +2,13 @@
 
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import boto3
 from botocore.exceptions import ClientError
-from mypy_boto3_s3 import S3Client
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
 
 DEFAULT_ENDPOINT_URL = "http://127.0.0.1:9000"
 DEFAULT_REGION = "us-east-1"
