@@ -26,7 +26,9 @@ docker run --rm \
     set -euo pipefail
     airflow db migrate >/dev/null
     python -m pytest /opt/airflow/tests -v
-    import_errors="$(airflow dags list-import-errors -o json)"
+    # Airflow logs INFO lines (e.g. alembic plugin setup) to stdout around the
+    # payload; -o json prints compact JSON on the last stdout line.
+    import_errors="$(airflow dags list-import-errors -o json | tail -n 1)"
     if [[ "${import_errors}" != "[]" ]]; then
       echo "DAG import errors:" >&2
       echo "${import_errors}" >&2
