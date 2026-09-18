@@ -53,7 +53,7 @@ Iceberg is the analytical source of truth; ClickHouse is a derived serving layer
 - [x] Phase 2 — OLTP model and deterministic data generator
 - [x] Phase 3 — batch ingestion (CSV/JSON/Parquet/XLSX files, mock API service, retries, backfill, live integration tests)
 - [x] Phase 4 — Airflow orchestration (LocalExecutor, 5 ingestion DAGs, PG snapshot extraction, DAG tests in CI)
-- [ ] Phase 5+ — see `ROADMAP.md`
+- [ ] Phase 5 — dbt + Trino lakehouse (in progress: slice 1 — Bronze loader, dbt skeleton)
 
 ## Prerequisites
 
@@ -92,6 +92,10 @@ make ingest-files ARGS="--source supplier-prices"  # run the file ingestion flow
 make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # fetch raw API pages into archive
 make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"  # date-range backfill
 make integration  # integration tests against the live core stack (requires `make up`)
+make bronze-load # load raw archive data into Iceberg Bronze (ARGS="run --source orders --date 2026-09-18" / "run-all --date ...")
+make dbt-parse   # offline dbt manifest check
+make dbt-build   # run dbt models + tests against the live stack (ARGS="--select staging")
+make dbt-test    # run dbt tests
 make airflow-up     # start the orchestration profile (requires the core profile up)
 make airflow-down   # stop Airflow services (metadata/logs volumes preserved)
 make airflow-test   # DAG import/structure tests inside the Airflow image
@@ -300,6 +304,16 @@ make airflow-test        # DAG tests (DagBag) inside the image — no live servi
 make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
 make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
 ```
+
+## Bronze layer (Phase 5 slice 1)
+
+Raw archive objects (PG snapshot Parquet, API JSON pages) are loaded into
+Iceberg `bronze.*` tables partitioned by `_batch_date` via
+`make bronze-load`. Loads are idempotent per (source, logical date): the
+day's partition is `DELETE`d and re-filled with batched `INSERT` statements,
+verified against the raw manifest row count before any DML is issued. Empty
+days are warnings; schema drift and row-count mismatches fail before touching
+the partition.
 
 ## CI
 
