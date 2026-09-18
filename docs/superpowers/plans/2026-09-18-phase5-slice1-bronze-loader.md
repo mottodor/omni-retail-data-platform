@@ -120,9 +120,16 @@ LOGICAL_DATE = date(2026, 9, 18)
 
 def test_all_ten_tables_registered() -> None:
     assert set(TABLES) == {
-        "orders", "order_items", "customers", "products",
-        "categories", "payments", "shipments",
-        "fx_rates", "campaigns", "deliveries",
+        "orders",
+        "order_items",
+        "customers",
+        "products",
+        "categories",
+        "payments",
+        "shipments",
+        "fx_rates",
+        "campaigns",
+        "deliveries",
     }
 
 
@@ -147,7 +154,10 @@ def test_object_prefixes_match_raw_layout() -> None:
 
 def test_service_columns_are_last_and_partition_on_batch_date() -> None:
     assert [column.name for column in SERVICE_COLUMNS] == [
-        "_batch_id", "_batch_date", "_source_object", "_ingested_at",
+        "_batch_id",
+        "_batch_date",
+        "_source_object",
+        "_ingested_at",
     ]
     assert SERVICE_COLUMNS[1].trino_type == "date"
     assert TABLES["orders"].all_columns[-4:] == SERVICE_COLUMNS
@@ -465,8 +475,16 @@ DELIVERIES = BronzeTableSpec(
 TABLES: dict[str, BronzeTableSpec] = {
     spec.name: spec
     for spec in (
-        CATEGORIES, PRODUCTS, CUSTOMERS, ORDERS, ORDER_ITEMS, PAYMENTS, SHIPMENTS,
-        FX_RATES, CAMPAIGNS, DELIVERIES,
+        CATEGORIES,
+        PRODUCTS,
+        CUSTOMERS,
+        ORDERS,
+        ORDER_ITEMS,
+        PAYMENTS,
+        SHIPMENTS,
+        FX_RATES,
+        CAMPAIGNS,
+        DELIVERIES,
     )
 }
 
@@ -793,12 +811,22 @@ SNAPSHOT_ORDERS = table_by_name("orders")
 def orders_parquet_body() -> bytes:
     rows = [
         (
-            1, 9001, "paid", "USD", Decimal("1.50"), Decimal("10.00"),
+            1,
+            9001,
+            "paid",
+            "USD",
+            Decimal("1.50"),
+            Decimal("10.00"),
             datetime(2026, 9, 17, 10, 0, tzinfo=UTC),
             datetime(2026, 9, 17, 10, 5, tzinfo=UTC),
         ),
         (
-            2, 9002, "shipped", "EUR", Decimal("2.00"), Decimal("20.00"),
+            2,
+            9002,
+            "shipped",
+            "EUR",
+            Decimal("2.00"),
+            Decimal("20.00"),
             datetime(2026, 9, 17, 11, 0, tzinfo=UTC),
             datetime(2026, 9, 17, 11, 5, tzinfo=UTC),
         ),
@@ -825,9 +853,7 @@ def test_parquet_reader_returns_source_rows() -> None:
 
 
 def test_parquet_reader_rejects_schema_drift() -> None:
-    schema = pa.schema(
-        [pa.field("order_id", pa.int64()), pa.field("surprise", pa.string())]
-    )
+    schema = pa.schema([pa.field("order_id", pa.int64()), pa.field("surprise", pa.string())])
     table = pa.Table.from_arrays(
         [pa.array([1], pa.int64()), pa.array(["x"], pa.string())], schema=schema
     )
@@ -876,7 +902,8 @@ def test_json_reader_parses_campaign_dates_and_decimals() -> None:
         ]
     }
     rows = read_json_rows(
-        TABLES["campaigns"], "api/marketing-campaigns/20260918/page_0001.json",
+        TABLES["campaigns"],
+        "api/marketing-campaigns/20260918/page_0001.json",
         json.dumps(page).encode(),
     )
     assert rows[0]["start_date"] == date(2026, 1, 15)
@@ -900,7 +927,8 @@ def test_json_reader_parses_delivery_datetimes_and_nulls() -> None:
         ]
     }
     rows = read_json_rows(
-        TABLES["deliveries"], "api/deliveries/20260918/page_0001.json",
+        TABLES["deliveries"],
+        "api/deliveries/20260918/page_0001.json",
         json.dumps(page).encode(),
     )
     assert rows[0]["shipped_at"] == datetime(2026, 7, 1, 5, 30, tzinfo=UTC)
@@ -1000,9 +1028,7 @@ def read_parquet_rows(spec: BronzeTableSpec, object_key: str, body: bytes) -> li
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
-        raise BronzeReadError(
-            f"{object_key}: schema drift (missing={missing}, extra={extra})"
-        )
+        raise BronzeReadError(f"{object_key}: schema drift (missing={missing}, extra={extra})")
     rows: list[Row] = []
     for record in table.to_pylist():
         rows.append(
@@ -1032,9 +1058,7 @@ def read_json_rows(spec: BronzeTableSpec, object_key: str, body: bytes) -> list[
         row: Row = {}
         for column in spec.columns:
             if column.name not in record:
-                raise BronzeReadError(
-                    f"{object_key}: row {position} missing field {column.name!r}"
-                )
+                raise BronzeReadError(f"{object_key}: row {position} missing field {column.name!r}")
             row[column.name] = _coerce_json(object_key, column, record[column.name])
         rows.append(row)
     return rows
@@ -1047,7 +1071,13 @@ def _type_family(trino_type: str) -> str:
         return "decimal"
     if trino_type.startswith("timestamp"):
         return "timestamp"
-    known = {"bigint": "bigint", "integer": "bigint", "boolean": "boolean", "date": "date", "double": "double"}
+    known = {
+        "bigint": "bigint",
+        "integer": "bigint",
+        "boolean": "boolean",
+        "date": "date",
+        "double": "double",
+    }
     family = known.get(trino_type)
     if family is None:
         raise BronzeReadError(f"unsupported trino type in bronze spec: {trino_type!r}")
@@ -1059,9 +1089,7 @@ def _check_nullable(object_key: str, column: BronzeColumnSpec, value: object) ->
         raise BronzeReadError(f"{object_key}: {column.name} is null but not nullable")
 
 
-def _validate_native(
-    object_key: str, column: BronzeColumnSpec, value: object
-) -> object:
+def _validate_native(object_key: str, column: BronzeColumnSpec, value: object) -> object:
     """Parquet values already carry types; validate the Python-side family."""
     _check_nullable(object_key, column, value)
     if value is None:
@@ -1206,9 +1234,7 @@ def test_create_table_sql_declares_all_columns_and_partitioning() -> None:
 
 def test_delete_partition_sql_targets_logical_date() -> None:
     sql = delete_partition_sql(TABLES["orders"], "iceberg", LOGICAL_DATE)
-    assert sql == (
-        'delete from iceberg.bronze.orders where "_batch_date" = DATE \'2026-09-18\''
-    )
+    assert sql == ("delete from iceberg.bronze.orders where \"_batch_date\" = DATE '2026-09-18'")
 
 
 def test_dbapi_executor_is_closable_context_manager() -> None:
@@ -1434,8 +1460,12 @@ def fixed_clock() -> datetime:
 def orders_rows(count: int) -> list[tuple[object, ...]]:
     return [
         (
-            order_id, 9000 + order_id, "paid", "USD",
-            Decimal("1.50"), Decimal(f"{10 * order_id}.00"),
+            order_id,
+            9000 + order_id,
+            "paid",
+            "USD",
+            Decimal("1.50"),
+            Decimal(f"{10 * order_id}.00"),
             datetime(2026, 9, 17, 10, 0, tzinfo=UTC),
             datetime(2026, 9, 17, 10, 5, tzinfo=UTC),
         )
@@ -1454,9 +1484,7 @@ def orders_parquet(rows: list[tuple[object, ...]]) -> bytes:
     return sink.getvalue().to_pybytes()  # type: ignore[no-any-return]
 
 
-def write_manifest(
-    storage: FakeStorage, *, source: str, batch_id: str, row_count: int
-) -> None:
+def write_manifest(storage: FakeStorage, *, source: str, batch_id: str, row_count: int) -> None:
     manifest = BatchManifest(
         batch_id=batch_id,
         source=source,
@@ -1507,9 +1535,7 @@ def test_load_postgres_batch_deletes_then_inserts() -> None:
     executor = FakeTrinoExecutor()
     seed_orders_batch(storage, rows=3)
 
-    result = load(
-        storage, executor, TABLES["orders"], logical_date=LOGICAL_DATE, clock=fixed_clock
-    )
+    result = load(storage, executor, TABLES["orders"], logical_date=LOGICAL_DATE, clock=fixed_clock)
 
     assert result.status == "loaded"
     assert result.row_count == 3
@@ -1579,9 +1605,7 @@ def test_load_empty_day_is_noop() -> None:
     storage = FakeStorage()
     executor = FakeTrinoExecutor()
 
-    result = load(
-        storage, executor, TABLES["orders"], logical_date=LOGICAL_DATE, clock=fixed_clock
-    )
+    result = load(storage, executor, TABLES["orders"], logical_date=LOGICAL_DATE, clock=fixed_clock)
 
     assert result.status == "empty"
     assert result.row_count == 0
@@ -1625,9 +1649,7 @@ def load(
 
     objects = list_data_objects(storage, spec, logical_date)
     if not objects:
-        log.warning(
-            "bronze batch empty: no raw objects under %s", spec.object_prefix(logical_date)
-        )
+        log.warning("bronze batch empty: no raw objects under %s", spec.object_prefix(logical_date))
         return LoadResult(spec.source_key, batch_id, logical_date, 0, "empty")
 
     manifest = _read_manifest(storage, spec, logical_date)
@@ -1740,9 +1762,7 @@ def test_parser_run_all_parses_date() -> None:
 
 def test_run_one_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
-    monkeypatch.setattr(
-        cli, "load", lambda *a, **k: calls.append(a) or _result("loaded")
-    )
+    monkeypatch.setattr(cli, "load", lambda *a, **k: calls.append(a) or _result("loaded"))
     assert run_one(TABLES["orders"], FakeStorage(), FakeTrinoExecutor(), LOGICAL_DATE) == 0
     assert len(calls) == 1
 
@@ -1867,9 +1887,7 @@ def run_all(
     for spec in TABLES.values():
         result = load(storage, executor, spec, logical_date=logical_date, catalog=catalog)
         if result.status == "loaded":
-            log.info(
-                "run-all progress: source=%s row_count=%d", result.source, result.row_count
-            )
+            log.info("run-all progress: source=%s row_count=%d", result.source, result.row_count)
     return 0
 
 
@@ -2234,8 +2252,12 @@ def clean_bronze(live_storage: BotoObjectStorage) -> Generator[None, None, None]
 def orders_rows(count: int) -> list[tuple[object, ...]]:
     return [
         (
-            order_id, 9000 + order_id, "paid", "USD",
-            Decimal("1.50"), Decimal(f"{10 * order_id}.00"),
+            order_id,
+            9000 + order_id,
+            "paid",
+            "USD",
+            Decimal("1.50"),
+            Decimal(f"{10 * order_id}.00"),
             datetime(2026, 9, 9, 10, 0, tzinfo=UTC),
             datetime(2026, 9, 9, 10, 5, tzinfo=UTC),
         )
@@ -2281,20 +2303,17 @@ def test_postgres_bronze_load_is_idempotent(
     seed_orders(live_storage, rows=3)
 
     with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
-        first = load(
-            live_storage, executor, spec_by_source("orders"), logical_date=LOGICAL_DATE
-        )
-        second = load(
-            live_storage, executor, spec_by_source("orders"), logical_date=LOGICAL_DATE
-        )
+        first = load(live_storage, executor, spec_by_source("orders"), logical_date=LOGICAL_DATE)
+        second = load(live_storage, executor, spec_by_source("orders"), logical_date=LOGICAL_DATE)
 
     assert first.row_count == 3
     assert second.row_count == 3
     where = f"where \"_batch_date\" = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
-    assert trino_scalar(f'select count(*) from iceberg.bronze.orders {where}') == 3
-    assert trino_scalar(
-        f'select distinct "_batch_id" from iceberg.bronze.orders {where}'
-    ) == f"postgres-orders-{LOGICAL_DATE:%Y%m%d}"
+    assert trino_scalar(f"select count(*) from iceberg.bronze.orders {where}") == 3
+    assert (
+        trino_scalar(f'select distinct "_batch_id" from iceberg.bronze.orders {where}')
+        == f"postgres-orders-{LOGICAL_DATE:%Y%m%d}"
+    )
 
 
 def test_api_bronze_load_flattens_pages(
@@ -2306,7 +2325,9 @@ def test_api_bronze_load_flattens_pages(
     ]
     for number, page in enumerate(pages, start=1):
         live_storage.put_object(
-            BUCKET_ARCHIVE, api_page_key("fx-rates", LOGICAL_DATE, number), json.dumps(page).encode()
+            BUCKET_ARCHIVE,
+            api_page_key("fx-rates", LOGICAL_DATE, number),
+            json.dumps(page).encode(),
         )
     manifest = BatchManifest(
         batch_id=f"fx-rates-{LOGICAL_DATE:%Y%m%d}",
@@ -2331,7 +2352,12 @@ def test_api_bronze_load_flattens_pages(
 
     assert result.row_count == 3
     where = f"where \"_batch_date\" = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
-    assert trino_scalar(f'select count(distinct "_source_object") from iceberg.bronze.fx_rates {where}') == 2
+    assert (
+        trino_scalar(
+            f'select count(distinct "_source_object") from iceberg.bronze.fx_rates {where}'
+        )
+        == 2
+    )
 
 
 def test_dbt_staging_view_builds_from_bronze(
@@ -2343,8 +2369,16 @@ def test_dbt_staging_view_builds_from_bronze(
 
     subprocess.run(
         [
-            "uv", "run", "dbt", "run",
-            "--project-dir", "dbt", "--profiles-dir", "dbt", "--select", "stg_orders",
+            "uv",
+            "run",
+            "dbt",
+            "run",
+            "--project-dir",
+            "dbt",
+            "--profiles-dir",
+            "dbt",
+            "--select",
+            "stg_orders",
         ],
         cwd=REPO_ROOT,
         check=True,
