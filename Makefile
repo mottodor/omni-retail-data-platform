@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -60,6 +60,9 @@ ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source f
 
 bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18" or "run-all --date 2026-09-18"
 	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
+
+dbt-parse: ## Parse the dbt project offline (no live stack needed)
+	$(UV) run dbt parse --project-dir dbt --profiles-dir dbt
 
 integration: ## Run integration tests against the live core stack (requires `make up`)
 	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'

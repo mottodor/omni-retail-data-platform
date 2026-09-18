@@ -36,6 +36,9 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+      - name: dbt parse (offline manifest check)
+        run: uv run dbt parse --project-dir dbt --profiles-dir dbt
+
       - name: Docker Compose config
         if: hashFiles('docker-compose.yml') != ''
         run: |

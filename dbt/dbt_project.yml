@@ -1,0 +1,16 @@
+name: omni_retail
+version: "1.0.0"
+config-version: 2
+
+profile: omni_retail
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  omni_retail:
+    staging:
+      +materialized: view
+      +schema: silver
