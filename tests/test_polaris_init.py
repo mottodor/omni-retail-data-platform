@@ -56,3 +56,34 @@ def test_catalog_exists_decision_is_idempotent() -> None:
     module = _load_module()
     assert module.decide_action(catalog_exists=True) == "skip"
     assert module.decide_action(catalog_exists=False) == "create"
+
+
+def test_decide_grant_action_skips_when_content_privilege_present() -> None:
+    module = _load_module()
+    grants = [
+        {"privilege": "CATALOG_MANAGE_ACCESS", "type": "catalog"},
+        {"privilege": "CATALOG_MANAGE_METADATA", "type": "catalog"},
+        {"privilege": "CATALOG_MANAGE_CONTENT", "type": "catalog"},
+    ]
+    assert module.decide_grant_action(grants) == "skip"
+
+
+def test_decide_grant_action_grants_when_missing() -> None:
+    module = _load_module()
+    grants = [
+        {"privilege": "CATALOG_MANAGE_ACCESS", "type": "catalog"},
+        {"privilege": "CATALOG_MANAGE_METADATA", "type": "catalog"},
+    ]
+    assert module.decide_grant_action(grants) == "grant"
+
+
+def test_decide_grant_action_grants_on_empty_grants() -> None:
+    module = _load_module()
+    assert module.decide_grant_action([]) == "grant"
+
+
+def test_required_privileges_cover_drop_path() -> None:
+    """CATALOG_MANAGE_CONTENT covers TABLE_DROP/VIEW_DROP inheritance and the
+    TABLE_WRITE_DATA needed for Trino's purge-drops."""
+    module = _load_module()
+    assert module.REQUIRED_CATALOG_PRIVILEGES == ("CATALOG_MANAGE_CONTENT",)
