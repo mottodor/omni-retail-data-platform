@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api integration airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -57,6 +57,18 @@ ingest-files: ## Process pending vendor files (landing -> processing -> archive 
 
 ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source fx-rates --date 2026-09-11" or "backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"
 	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.ingestion.api $(ARGS)'
+
+bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18" or "run-all --date 2026-09-18"
+	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
+
+dbt-parse: ## Parse the dbt project offline (no live stack needed)
+	$(UV) run dbt parse --project-dir dbt --profiles-dir dbt
+
+dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select staging"
+	@bash -c 'set -a; source .env; set +a; $(UV) run dbt build --project-dir dbt --profiles-dir dbt $(ARGS)'
+
+dbt-test: ## Run dbt tests. ARGS="--select staging"
+	@bash -c 'set -a; source .env; set +a; $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
 
 integration: ## Run integration tests against the live core stack (requires `make up`)
 	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'

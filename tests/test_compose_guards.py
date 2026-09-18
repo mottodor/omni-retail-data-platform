@@ -39,6 +39,20 @@ EXPECTED_INGESTION_ENV_KEYS = {
     "MOCK_API_SEED",
 }
 
+# Trino/dbt configuration documented for Phase 5 (design spec §8).
+EXPECTED_TRINO_ENV_KEYS = {"TRINO_HOST", "TRINO_PORT", "TRINO_CATALOG", "TRINO_USER"}
+
+DBT_DIR = REPO_ROOT / "dbt"
+DBT_STAGING_MODELS = {
+    "stg_categories.sql",
+    "stg_customers.sql",
+    "stg_order_items.sql",
+    "stg_orders.sql",
+    "stg_payments.sql",
+    "stg_products.sql",
+    "stg_shipments.sql",
+}
+
 # Airflow configuration documented for Phase 4 (design spec §11, ADR 0003).
 EXPECTED_AIRFLOW_ENV_KEYS = {
     "AIRFLOW_UID",
@@ -376,3 +390,27 @@ def test_mock_api_healthcheck_targets_healthz() -> None:
 def test_mock_api_runs_non_root_user() -> None:
     dockerfile = MOCK_API_DOCKERFILE.read_text(encoding="utf-8")
     assert "USER " in dockerfile, "mock-api container must run as a non-root user"
+
+
+def test_env_example_documents_trino_variables() -> None:
+    missing = EXPECTED_TRINO_ENV_KEYS - _env_example_keys()
+    assert not missing, f"trino env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_dbt_profiles_are_env_driven_and_secret_free() -> None:
+    profiles = yaml.safe_load((DBT_DIR / "profiles.yml").read_text(encoding="utf-8"))
+    output = profiles["omni_retail"]["outputs"]["dev"]
+    assert output["type"] == "trino"
+    assert output["http_scheme"] == "http"
+    for forbidden in ("password", "key_file", "access_token", "credentials"):
+        assert forbidden not in output, f"profiles.yml must not contain {forbidden!r}"
+    for env_driven in ("host", "user", "catalog", "schema"):
+        assert "env_var" in str(output[env_driven]), f"{env_driven} must come from env_var"
+
+
+def test_dbt_project_and_staging_skeleton_exist() -> None:
+    assert (DBT_DIR / "dbt_project.yml").is_file()
+    assert (DBT_DIR / "profiles.yml").is_file()
+    assert (DBT_DIR / "models" / "staging" / "sources.yml").is_file()
+    models = {path.name for path in (DBT_DIR / "models" / "staging").glob("stg_*.sql")}
+    assert models == DBT_STAGING_MODELS

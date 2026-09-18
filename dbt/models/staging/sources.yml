@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: bronze
+    catalog: iceberg
+    schema: bronze
+    freshness:
+      warn_after: {count: 48, period: hour}
+      error_after: {count: 7, period: day}
+    loaded_at_field: _ingested_at
+    tables:
+      - name: categories
+      - name: products
+      - name: customers
+      - name: orders
+      - name: order_items
+      - name: payments
+      - name: shipments
