@@ -2,7 +2,8 @@
 
 Requires the core profile (MinIO, Polaris, Trino) and OMNI_INTEGRATION=1
 (``make up`` then ``make integration``). Seeded raw objects are deterministic;
-bronze/silver objects are dropped before and after each test.
+raw objects are purged around each test and loaded bronze partitions are
+deleted afterwards (Polaris denies DROP to the bootstrap principal).
 """
 
 import hashlib
@@ -51,6 +52,15 @@ def trino_scalar(sql: str) -> object:
     return row[0]
 
 
+def bronze_table_exists(table: str) -> bool:
+    """Fresh-stack guard: a bronze table exists only after its first load."""
+    count = trino_scalar(
+        "select count(*) from iceberg.information_schema.tables "
+        f"where table_schema = 'bronze' and table_name = '{table}'"
+    )
+    return bool(count == 1)
+
+
 def purge_raw(storage: BotoObjectStorage) -> None:
     for prefix in (
         f"postgres/orders/{LOGICAL_DATE:%Y/%m/%d}/",
@@ -69,9 +79,12 @@ def clean_bronze(live_storage: BotoObjectStorage) -> Generator[None, None, None]
     # Polaris does not grant the bootstrap principal DROP_TABLE_WITH_PURGE or
     # DROP_VIEW, so teardown removes the loaded DATA by partition instead of
     # dropping the table/view objects (see task-9 report; infra grant follow-up).
+    # On a fresh stack a test can run before its table ever existed, so each
+    # DELETE is guarded by an existence check.
     partition = f"\"_batch_date\" = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
     for table in ("orders", "fx_rates"):
-        trino_scalar(f"delete from iceberg.bronze.{table} where {partition}")
+        if bronze_table_exists(table):
+            trino_scalar(f"delete from iceberg.bronze.{table} where {partition}")
     purge_raw(live_storage)
 
 
