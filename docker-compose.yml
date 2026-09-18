@@ -136,6 +136,10 @@ services:
       POLARIS_REALM_CONTEXT_REALMS: POLARIS
       POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,${POLARIS_CLIENT_ID},${POLARIS_CLIENT_SECRET}
       polaris.features."ALLOW_INSECURE_STORAGE_TYPES": "true"
+      # Trino 483 always issues dropTable(purge=true) on REST catalogs, and
+      # Polaris purge-drops (tables AND views) require this flag; without it
+      # every DROP from Trino fails authorization/feature checks.
+      polaris.features."DROP_WITH_PURGE_ENABLED": "true"
       polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES": '["FILE","S3","GCS","AZURE"]'
       polaris.readiness.ignore-severe-issues: "true"
       # Polaris resolves S3 credentials from the default AWS chain;
