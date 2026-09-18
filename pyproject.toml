@@ -54,3 +54,16 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 pythonpath = ["tests", "infrastructure/mock_api/src"]
 addopts = "-ra"
+
+[tool.uv]
+# Constraints keep shared libraries compatible with the packages frozen inside
+# apache/airflow:2.11.2-python3.12, so the overlay installed into the custom
+# Airflow image (uv export --no-dev) stays `pip check` clean:
+#   aiobotocore 3.2.1            -> botocore<1.42.62
+#   awswrangler 3.15.1           -> pyarrow<23
+#   opentelemetry-sdk 1.40.0     -> opentelemetry-api==1.40.0
+constraint-dependencies = [
+    "botocore<1.42.62",
+    "opentelemetry-api==1.40.0",
+    "pyarrow<23",
+]
