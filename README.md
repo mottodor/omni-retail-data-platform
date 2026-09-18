@@ -293,9 +293,12 @@ shared registry (`source_kind="postgres"`), and a durable watermark
 `archive/_watermarks/postgres/<table>.json`. Keyset pagination on
 `(updated_at, pk)` makes same-second events safe; the watermark moves only
 after a successful upload, so interruptions re-extract and overwrite the
-same window. Limitations (closed by CDC in Phase 8): hard deletes are
-invisible and historical backfill is impossible (snapshots hold current
-state).
+same window. After re-seeding the source (`make generate-oltp` with a
+truncate), purge the stale watermarks first: `uv run python -m
+omni_retail.ingestion.postgres_snapshot purge-watermarks` (all tables) or
+`… purge-watermarks --table orders` (one table). Limitations (closed by CDC
+in Phase 8): hard deletes are invisible and historical backfill is
+impossible (snapshots hold current state).
 
 ```bash
 make up                  # core profile first (postgres, minio, mock-api)

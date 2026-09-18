@@ -25,7 +25,7 @@ from omni_retail.ingestion.common.storage import BotoObjectStorage
 from omni_retail.ingestion.postgres_snapshot.config import PostgresSourceConfig
 from omni_retail.ingestion.postgres_snapshot.extract import SnapshotConnection, snapshot_table
 from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
-from omni_retail.ingestion.postgres_snapshot.watermark import load_watermark
+from omni_retail.ingestion.postgres_snapshot.watermark import load_watermark, purge_watermarks
 
 CUSTOMERS = table_by_name("customers")
 DAY_1 = date(2026, 9, 13)
@@ -37,10 +37,10 @@ def purge_customers_namespace(storage: BotoObjectStorage) -> None:
     for bucket, prefix in (
         (BUCKET_ARCHIVE, "postgres/customers/"),
         (BUCKET_ARCHIVE, "_manifests/postgres-customers/"),
-        (BUCKET_ARCHIVE, "_watermarks/postgres/customers.json"),
     ):
         for key in storage.list_object_keys(bucket, prefix):
             storage.delete_object(bucket, key)
+    purge_watermarks(storage, tables=["customers"])
 
 
 def controlled_customer(marker: str, updated_at: datetime) -> tuple[object, ...]:

@@ -16,8 +16,8 @@ from omni_retail.ingestion.common.storage import (
 )
 from omni_retail.ingestion.postgres_snapshot.config import PostgresSourceConfig
 from omni_retail.ingestion.postgres_snapshot.extract import SnapshotConnection, snapshot_table
-from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
-from omni_retail.ingestion.postgres_snapshot.watermark import load_watermark
+from omni_retail.ingestion.postgres_snapshot.tables import TABLES, table_by_name
+from omni_retail.ingestion.postgres_snapshot.watermark import load_watermark, purge_watermarks
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ignore the watermark and extract a full snapshot (bootstrap)",
     )
+
+    purge_parser = subparsers.add_parser(
+        "purge-watermarks",
+        help=(
+            "delete durable extraction watermarks (all tables, or --table); "
+            "use after re-seeding the OLTP source so incremental extracts "
+            "do not skip freshly generated rows"
+        ),
+    )
+    purge_parser.add_argument(
+        "--table",
+        choices=sorted(TABLES),
+        default=None,
+        help="restrict the purge to one snapshot table (default: all tables)",
+    )
     return parser
 
 
@@ -55,9 +70,19 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = build_parser().parse_args(argv)
     try:
+        storage = BotoObjectStorage(StorageConfig.from_env())
+        if args.command == "purge-watermarks":
+            tables = [args.table] if args.table else None
+            purged = purge_watermarks(storage, tables=tables)
+            logger.info(
+                "purge-watermarks result: purged=%d keys=%s",
+                len(purged),
+                list(purged),
+            )
+            return 0
+
         spec = table_by_name(args.table)
         config = PostgresSourceConfig.from_env()
-        storage = BotoObjectStorage(StorageConfig.from_env())
         with psycopg.connect(config.conninfo()) as conn:
             watermark = None if args.full_refresh else load_watermark(storage, spec)
             manifest = snapshot_table(
@@ -77,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except (ValueError, StorageError, psycopg.Error) as error:
-        logger.error("run failed: %s", error)
+        logger.error("%s failed: %s", args.command, error)
         return 1
 
 
