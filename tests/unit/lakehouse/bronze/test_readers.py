@@ -173,6 +173,12 @@ def test_json_reader_rejects_invalid_json() -> None:
         read_json_rows(TABLES["fx_rates"], "key", b"{not json")
 
 
+def test_json_reader_wraps_invalid_decimal_string() -> None:
+    page = {"rates": [{"currency": "USD", "rate": "abc"}]}
+    with pytest.raises(BronzeReadError, match="rate"):
+        read_json_rows(TABLES["fx_rates"], "key", json.dumps(page).encode())
+
+
 def test_list_data_objects_filters_by_suffix() -> None:
     storage = FakeStorage()
     storage.put_object(BUCKET_ARCHIVE, ORDERS_KEY, orders_parquet_body())

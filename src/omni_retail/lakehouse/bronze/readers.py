@@ -167,7 +167,7 @@ def _coerce_json(object_key: str, column: BronzeColumnSpec, value: object) -> ob
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise BronzeReadError("expected number")
             return float(value)
-    except (ValueError, BronzeReadError) as error:
+    except (ValueError, ArithmeticError, BronzeReadError) as error:
         raise BronzeReadError(
             f"{object_key}: {column.name} cannot be coerced to {family}: {error}"
         ) from error
