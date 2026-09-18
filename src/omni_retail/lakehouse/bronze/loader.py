@@ -13,13 +13,25 @@ import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal, Protocol
 
 import trino
 
-from omni_retail.lakehouse.bronze.literals import date_literal
-from omni_retail.lakehouse.bronze.specs import BATCH_DATE, SCHEMA_BRONZE, BronzeTableSpec
+from omni_retail.ingestion.common.logging import context_logger
+from omni_retail.ingestion.common.manifest import BatchManifest
+from omni_retail.ingestion.common.paths import BUCKET_ARCHIVE, manifest_key
+from omni_retail.ingestion.common.storage import ObjectNotFoundError, ObjectStorage
+from omni_retail.lakehouse.bronze.literals import date_literal, insert_statements
+from omni_retail.lakehouse.bronze.readers import list_data_objects, read_rows
+from omni_retail.lakehouse.bronze.specs import (
+    BATCH_DATE,
+    BATCH_ID,
+    INGESTED_AT,
+    SCHEMA_BRONZE,
+    SOURCE_OBJECT,
+    BronzeTableSpec,
+)
 
 Clock = Callable[[], datetime]
 
@@ -116,3 +128,72 @@ def delete_partition_sql(spec: BronzeTableSpec, catalog: str, logical_date: date
         f"delete from {catalog}.{SCHEMA_BRONZE}.{spec.name} "
         f'where "{BATCH_DATE}" = {date_literal(logical_date)}'
     )
+
+
+def load(
+    storage: ObjectStorage,
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    *,
+    logical_date: date,
+    clock: Clock | None = None,
+    catalog: str = "iceberg",
+) -> LoadResult:
+    """Load one (source, logical date) batch into Bronze; idempotent per day."""
+    effective_clock: Clock = clock or (lambda: datetime.now(UTC))
+    log = context_logger(__name__, source=spec.source_name, logical_date=logical_date.isoformat())
+    batch_id = spec.batch_id(logical_date)
+
+    objects = list_data_objects(storage, spec, logical_date)
+    if not objects:
+        log.warning("bronze batch empty: no raw objects under %s", spec.object_prefix(logical_date))
+        return LoadResult(spec.source_key, batch_id, logical_date, 0, "empty")
+
+    manifest = _read_manifest(storage, spec, logical_date)
+    ingested_at = effective_clock()
+    rows: list[dict[str, object]] = []
+    for object_key in objects:
+        body = storage.get_object(BUCKET_ARCHIVE, object_key)
+        for row in read_rows(spec, object_key, body):
+            rows.append(
+                {
+                    **row,
+                    BATCH_ID: batch_id,
+                    BATCH_DATE: logical_date,
+                    SOURCE_OBJECT: object_key,
+                    INGESTED_AT: ingested_at,
+                }
+            )
+
+    if len(rows) != manifest.row_count:
+        raise LoadError(
+            f"{spec.source_key}: row count mismatch for {logical_date}: "
+            f"raw rows={len(rows)} manifest rows={manifest.row_count} "
+            "(partition not modified)"
+        )
+
+    executor.execute(create_schema_sql(catalog))
+    executor.execute(create_table_sql(spec, catalog))
+    executor.execute(delete_partition_sql(spec, catalog, logical_date))
+    statements = insert_statements(spec, rows, catalog=catalog)
+    for statement in statements:
+        executor.execute(statement)
+    log.info(
+        "bronze load completed: batch_id=%s objects=%d row_count=%d statements=%d",
+        batch_id,
+        len(objects),
+        len(rows),
+        len(statements),
+    )
+    return LoadResult(spec.source_key, batch_id, logical_date, len(rows), "loaded")
+
+
+def _read_manifest(
+    storage: ObjectStorage, spec: BronzeTableSpec, logical_date: date
+) -> BatchManifest:
+    key = manifest_key(spec.source_name, spec.batch_id(logical_date))
+    try:
+        body = storage.get_object(BUCKET_ARCHIVE, key)
+    except ObjectNotFoundError as error:
+        raise LoadError(f"manifest not found: s3://{BUCKET_ARCHIVE}/{key}") from error
+    return BatchManifest.from_json(body.decode())
