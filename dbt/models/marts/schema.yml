@@ -112,3 +112,30 @@ models:
           - not_null:
               config:
                 where: impressions > 0
+
+  - name: mart_delivery_performance
+    description: >
+      Carrier delivery performance mart from the delivery-partner API feed.
+      Purpose: carrier scorecard (transit times, status mix) for the
+      delivery dashboard. Grain: one row per carrier. PK: carrier.
+      Measures: delivery_count, per-status counts (sum-tested), and
+      avg_transit_hours averaged over deliveries with both shipped_at and
+      delivered_at (delivered/returned). NOTE: the feed's order_id values
+      are the partner's synthetic references ("ORD-...") and never join
+      OLTP orders (spec §2); this mart is independent of fact_shipments
+      (OLTP shipments serve fact_shipments). Upstream: int_deliveries.
+    columns:
+      - name: carrier
+        tests: [unique, not_null]
+      - name: delivery_count
+        tests: [not_null]
+      - name: delivered_count
+        tests: [not_null]
+      - name: in_transit_count
+        tests: [not_null]
+      - name: delayed_count
+        tests: [not_null]
+      - name: returned_count
+        tests: [not_null]
+      - name: avg_transit_hours
+        description: NULL only when the carrier has no completed deliveries yet.
