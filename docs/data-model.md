@@ -92,3 +92,83 @@ Customer status: 85 % active / 10 % inactive / 5 % churned.
 Segment: 70 % standard / 25 % premium / 5 % vip.
 Currency: 85 % USD / 10 % EUR / 5 % GBP. Item popularity follows a power law
 (`weight ∝ 1/rank^0.7`) so downstream "top products" analytics are meaningful.
+
+## Bronze layer (Phase 5 slice 1)
+
+Ten Iceberg tables (`bronze` schema) mirror the raw archive objects one
+logical day at a time, partitioned by `_batch_date`:
+
+| Table | Source | Grain |
+|---|---|---|
+| `orders`, `order_items`, `customers`, `products`, `categories`, `payments`, `shipments` | PG snapshots (Parquet) | one row per source record per logical batch |
+| `fx_rates`, `campaigns`, `deliveries` | API pages (JSON, flattened) | one row per source record per raw page |
+
+Service columns on every table: `_batch_id` (deterministic
+`<source>-<yyyymmdd>`), `_batch_date` (partition), `_source_object`,
+`_ingested_at`. Loads are idempotent per (table, logical date):
+`DELETE` partition → batched `INSERT`, row-count-verified against the raw
+manifest.
+
+## Silver layer (Phase 5 slice 2)
+
+Staging (`stg_*`) is a typed pass-through of bronze. Intermediate
+(`int_*`) derives the **current state** of each entity: append-only bronze
+history is deduplicated by `row_number() ... order by _batch_date desc,
+_ingested_at desc` on the business key. `int_fx_rates_daily` keeps the
+latest rate per (currency, day); `int_campaigns` keeps the latest daily
+campaign snapshot; `int_deliveries` keeps the latest carrier status.
+
+Known limitation (until CDC, Phase 8): snapshot extraction cannot see hard
+deletes, so a deleted source row retains its last version in `int_*` and
+downstream facts/dimensions.
+
+## Gold layer — Kimball (Phase 5 slice 2)
+
+### Dimensions
+
+| Model | Grain | PK | Type | Upstream |
+|---|---|---|---|---|
+| `dim_date` | calendar day | `date_key` (yyyymmdd int) | generated | `int_orders` bounds (created/updated) |
+| `dim_product` | product | `product_id` | SCD1 | `int_products`, `int_categories` |
+| `dim_campaign` | campaign | `campaign_id` | SCD1 | `int_campaigns` |
+| `dim_customer` | customer **version** | `customer_key` | SCD2 | `stg_customers` history |
+
+`dim_customer` SCD2 semantics:
+
+- every bronze row of a customer is one version (incremental batches carry
+  only changed rows);
+- `valid_from` = `_batch_date` of the version; `valid_to` = the day before
+  the next version (inclusive); open versions use `9999-12-31`;
+- `customer_key = '<customer_id>_<valid_from>'` — deterministic, rebuildable;
+- `is_current` marks the single open version (tested);
+- daily grain: multiple same-day source changes collapse into that day's
+  version.
+
+### Facts
+
+| Model | Grain | PK | FKs | Measures | Notes |
+|---|---|---|---|---|---|
+| `fact_orders` | order | `order_id` | `customer_key` → `dim_customer` (point-in-time on `created_at`, earliest-version fallback) | `shipping_cost`, `order_total` (source currency) | degenerate `customer_id` |
+| `fact_order_items` | order line | `order_item_id` | `order_id` → `fact_orders`; `product_id` → `dim_product` | `quantity`, `unit_price`, `line_total` | immutable |
+| `fact_payments` | payment | `payment_id` | `order_id` → `fact_orders` | `payment_amount` | degenerate `transaction_id`; reconciled vs orders by test |
+| `fact_shipments` | shipment | `shipment_id` | `order_id` → `fact_orders` | — | degenerate `tracking_number` |
+
+### Business tests (dbt singular)
+
+- orders ↔ payments: exactly one payment per order, equal amounts,
+  consistent status pairs, no orphans;
+- SCD2: non-overlapping contiguous intervals; exactly one current version;
+- non-negative amounts; strictly positive FX rates;
+- temporal ordering (created ≤ updated; shipped ≤ delivered; payment
+  created ≥ order created; campaign start ≤ end);
+- `line_total = quantity × unit_price`.
+
+### Known limitations
+
+- delivery-API `order_id` values are the partner's synthetic references
+  ("ORD-…") and never join OLTP orders; `int_deliveries` feeds
+  `mart_delivery_performance` (slice 3) only;
+- currency normalization to EUR happens in marts (slice 3) via
+  `int_fx_rates_daily`; facts keep source currency;
+- snapshot extracts hide hard deletes until CDC (Phase 8);
+- SCD2 versions have daily granularity (see above).
