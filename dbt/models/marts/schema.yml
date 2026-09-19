@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: mart_daily_sales
+    description: >
+      Daily sales mart. Purpose: GMV/revenue/margin roll-ups for the Revenue
+      and Sales dashboards. Grain: one row per (order_date, category_name,
+      region). PK: the combination (order_date, category_name, region).
+      Measures: orders_count (distinct orders in the group — additive across
+      dates, NOT across category/region: a multi-category order counts once
+      per row), items_sold, revenue_eur (item-line revenue, excl. shipping),
+      margin_eur. Financial measures exclude cancelled and refunded orders
+      (realized-revenue policy); orders_count includes all orders. Shipping
+      is an order-grain measure and stays in fact_orders/int_orders_fx.
+      Upstream: int_orders_fx, fact_order_items, dim_product, dim_customer
+      (point-in-time region), dim_date. Known simplification (mock source):
+      product prices are currency-naive; line amounts are normalized with
+      the order currency's FX rate.
+    columns:
+      - name: date_key
+        description: yyyymmdd integer key; joins dim_date.
+        tests: [not_null]
+      - name: order_date
+        tests: [not_null]
+      - name: category_name
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: orders_count
+        tests: [not_null]
+      - name: items_sold
+        tests: [not_null]
+      - name: revenue_eur
+        tests: [not_null]
+      - name: margin_eur
+        tests: [not_null]
