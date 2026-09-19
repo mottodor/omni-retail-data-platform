@@ -315,6 +315,18 @@ verified against the raw manifest row count before any DML is issued. Empty
 days are warnings; schema drift and row-count mismatches fail before touching
 the partition.
 
+## Silver and Gold layers (Phase 5 slice 2)
+
+dbt builds the analytical model over Bronze: `silver.stg_*` (typed
+pass-through) and `silver.int_*` (current entity state via keyset dedup),
+then the Kimball `gold` layer — `dim_date`, `dim_product`, `dim_campaign`,
+SCD2 `dim_customer`, and the `fact_orders` / `fact_order_items` /
+`fact_payments` / `fact_shipments` facts. Every core model carries a YAML
+contract (grain, PK, measures, upstream) and is covered by built-in and
+singular business tests, including the orders ↔ payments reconciliation.
+Run against the live core stack with `make dbt-build`; the model reference
+lives in `docs/data-model.md`.
+
 ## CI
 
 GitHub Actions runs on every push and pull request: ruff check, ruff format, mypy (non-blocking at bootstrap), pytest, `docker compose config` validation, plus an `airflow` job that builds the custom image and runs the DAG test harness (pytest + `airflow dags list-import-errors`) inside it.

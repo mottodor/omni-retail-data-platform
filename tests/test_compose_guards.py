@@ -44,8 +44,11 @@ EXPECTED_TRINO_ENV_KEYS = {"TRINO_HOST", "TRINO_PORT", "TRINO_CATALOG", "TRINO_U
 
 DBT_DIR = REPO_ROOT / "dbt"
 DBT_STAGING_MODELS = {
+    "stg_campaigns.sql",
     "stg_categories.sql",
     "stg_customers.sql",
+    "stg_deliveries.sql",
+    "stg_fx_rates.sql",
     "stg_order_items.sql",
     "stg_orders.sql",
     "stg_payments.sql",
