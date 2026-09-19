@@ -182,9 +182,7 @@ def list_catalog_role_grants(
 def decide_grant_action(grants: list[dict[str, Any]]) -> str:
     """Return the grant step action: grant missing privileges or skip."""
     present = {
-        (grant.get("type"), grant.get("privilege"))
-        for grant in grants
-        if isinstance(grant, dict)
+        (grant.get("type"), grant.get("privilege")) for grant in grants if isinstance(grant, dict)
     }
     missing = [
         privilege
