@@ -17,3 +17,6 @@ models:
     intermediate:
       +materialized: view
       +schema: silver
+    core:
+      +materialized: table
+      +schema: gold
