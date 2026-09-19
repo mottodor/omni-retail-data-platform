@@ -67,3 +67,48 @@ models:
         tests: [not_null]
       - name: avg_order_value_eur
         description: NULL only for customers whose every order is cancelled/refunded.
+
+  - name: mart_marketing_roi
+    description: >
+      Marketing campaign efficiency mart. Purpose: spend/CTR/CPC/CPM
+      monitoring; feeds the Marketing dashboard. Grain: one row per
+      campaign. PK: campaign_id. Measures: spend/budget/impressions/clicks
+      (current snapshot) and derived ctr, cpc_eur, cpm_eur,
+      budget_utilization (can exceed 1.0: the source overspends up to 5%).
+      LIMITATION (spec §2): campaigns are not linked to orders, so revenue
+      attribution is impossible with current data — no ROAS is computed and
+      none may be faked; ROAS arrives with clickstream attribution
+      (Phase 9). Upstream: dim_campaign.
+    columns:
+      - name: campaign_id
+        tests: [unique, not_null]
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ["search", "display", "social", "email", "video"]
+      - name: campaign_status
+        tests:
+          - accepted_values:
+              values: ["active", "paused", "completed", "scheduled"]
+      - name: impressions
+        tests: [not_null]
+      - name: clicks
+        tests: [not_null]
+      - name: spend_eur
+        tests: [not_null]
+      - name: ctr
+        description: clicks / impressions; NULL while a campaign has 0 impressions.
+        tests:
+          - not_null:
+              config:
+                where: impressions > 0
+      - name: cpc_eur
+        tests:
+          - not_null:
+              config:
+                where: clicks > 0
+      - name: cpm_eur
+        tests:
+          - not_null:
+              config:
+                where: impressions > 0
