@@ -34,3 +34,36 @@ models:
         tests: [not_null]
       - name: margin_eur
         tests: [not_null]
+
+  - name: mart_customer_ltv
+    description: >
+      Customer lifetime value mart. Purpose: retention/LTV/activation
+      analysis; feeds the Customer dashboard. Grain: one row per customer
+      with at least one order. PK: customer_id. Measures: orders_count (all
+      orders), gmv_eur (realized order totals incl. shipping, EUR),
+      avg_order_value_eur. Attributes region/segment are the customer's
+      CURRENT dim_customer version — LTV reports today's segmentation, not
+      point-in-time (documented choice). Upstream: int_orders_fx,
+      dim_customer (current versions).
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: customer_key
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["standard", "premium", "vip"]
+      - name: first_order_date
+        tests: [not_null]
+      - name: last_order_date
+        tests: [not_null]
+      - name: orders_count
+        tests: [not_null]
+      - name: gmv_eur
+        tests: [not_null]
+      - name: avg_order_value_eur
+        description: NULL only for customers whose every order is cancelled/refunded.
