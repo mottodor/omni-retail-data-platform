@@ -839,9 +839,7 @@ def bronze_table_exists(executor: TrinoExecutor, spec: BronzeTableSpec, catalog:
     """True when the Bronze table for this spec already exists."""
     rows = executor.fetch_all(
         "select 1 from {}.information_schema.tables "
-        "where table_schema = '{}' and table_name = '{}'".format(
-            catalog, SCHEMA_BRONZE, spec.name
-        )
+        "where table_schema = '{}' and table_name = '{}'".format(catalog, SCHEMA_BRONZE, spec.name)
     )
     return len(rows) > 0
 
@@ -849,18 +847,14 @@ def bronze_table_exists(executor: TrinoExecutor, spec: BronzeTableSpec, catalog:
 def loaded_batch_dates(executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str) -> set[date]:
     """Partition dates already present in one Bronze table (empty if none)."""
     rows = executor.fetch_all(
-        'select distinct "{}" from {}.{}.{}'.format(
-            BATCH_DATE, catalog, SCHEMA_BRONZE, spec.name
-        )
+        'select distinct "{}" from {}.{}.{}'.format(BATCH_DATE, catalog, SCHEMA_BRONZE, spec.name)
     )
     return {cast(date, row[0]) for row in rows}
 
 
 def raw_batch_dates(storage: ObjectStorage, spec: BronzeTableSpec) -> set[date]:
     """Logical dates present in the raw archive for one source."""
-    root = (
-        f"postgres/{spec.name}/" if spec.kind == "postgres" else f"api/{spec.source_name}/"
-    )
+    root = f"postgres/{spec.name}/" if spec.kind == "postgres" else f"api/{spec.source_name}/"
     date_pattern = (
         re.compile(r"^(\d{4})/(\d{2})/(\d{2})/.+")
         if spec.kind == "postgres"
@@ -868,7 +862,7 @@ def raw_batch_dates(storage: ObjectStorage, spec: BronzeTableSpec) -> set[date]:
     )
     found: set[date] = set()
     for key in storage.list_object_keys(BUCKET_ARCHIVE, root):
-        match = date_pattern.match(key[len(root):])
+        match = date_pattern.match(key[len(root) :])
         if match:
             year, month, day = (int(part) for part in match.groups())
             found.add(date(year, month, day))
@@ -905,9 +899,7 @@ def load_pending(
     row_count = 0
     for spec in TABLES.values():
         for logical_date in pending_raw_dates(storage, executor, spec, catalog=catalog):
-            result = load(
-                storage, executor, spec, logical_date=logical_date, catalog=catalog
-            )
+            result = load(storage, executor, spec, logical_date=logical_date, catalog=catalog)
             if result.status == "loaded":
                 row_count += result.row_count
             loaded_dates.add(logical_date)
@@ -1392,9 +1384,7 @@ Skip gate + fixture:
 def airflow_reachable() -> bool:
     port = os.environ.get("AIRFLOW_WEBSERVER_PORT", "8081")
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/health", timeout=3
-        ) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3) as response:
             return response.status == 200
     except urllib.error.URLError:
         return False
@@ -1456,10 +1446,13 @@ def test_transform_lakehouse_dag_publishes_marts(seeded_day3: BotoObjectStorage)
     )
 
     # Bronze picked up DAY_3 for every source (watermark-driven).
-    assert trino_scalar(
-        'select count(*) from iceberg.bronze.orders where "_batch_date" = '
-        f"DATE '{DAY_3:%Y-%m-%d}'"
-    ) == 4
+    assert (
+        trino_scalar(
+            'select count(*) from iceberg.bronze.orders where "_batch_date" = '
+            f"DATE '{DAY_3:%Y-%m-%d}'"
+        )
+        == 4
+    )
 
     # mart_daily_sales: exact rows and EUR math (Review Focus 5 scenario).
     rows = trino_rows(  # small helper: trino.dbapi fetchall, mirroring trino_scalar
@@ -1469,8 +1462,8 @@ def test_transform_lakehouse_dag_publishes_marts(seeded_day3: BotoObjectStorage)
         "order by category_name, region"
     )
     expected = [
-        ("A", "EMEA", 2, 5, 45.4545, 18.1818),   # (20+30)/1.1 ; margin (2+3)*4/1.1
-        ("A", "NA", 1, 0, 0.0, 0.0),             # cancelled order: count only
+        ("A", "EMEA", 2, 5, 45.4545, 18.1818),  # (20+30)/1.1 ; margin (2+3)*4/1.1
+        ("A", "NA", 1, 0, 0.0, 0.0),  # cancelled order: count only
         ("B", "EMEA", 2, 2, 107.9545, 43.1818),  # 50/1.1 + 50/0.8 ; 20/1.1 + 20/0.8
     ]
     assert [tuple(row) for row in rows] == expected
@@ -1478,21 +1471,19 @@ def test_transform_lakehouse_dag_publishes_marts(seeded_day3: BotoObjectStorage)
     # mart_customer_ltv: 3 customers, C1 gmv = 75/1.1 + 55/0.8.
     assert trino_scalar("select count(*) from iceberg.analytics.mart_customer_ltv") == 3
     c1 = trino_scalar(
-        "select round(gmv_eur, 4) from iceberg.analytics.mart_customer_ltv "
-        "where customer_id = 1"
+        "select round(gmv_eur, 4) from iceberg.analytics.mart_customer_ltv where customer_id = 1"
     )
     assert c1 == 136.9318  # 68.1818 + 68.75
 
     # mart_marketing_roi: 2 campaigns; zero-impression campaign keeps NULL ctr.
     assert trino_scalar("select count(*) from iceberg.analytics.mart_marketing_roi") == 2
-    assert trino_scalar(
-        "select count(*) from iceberg.analytics.mart_marketing_roi where ctr is null"
-    ) == 1
+    assert (
+        trino_scalar("select count(*) from iceberg.analytics.mart_marketing_roi where ctr is null")
+        == 1
+    )
 
     # mart_delivery_performance: 3 carriers; DHL avg transit 24h.
-    assert trino_scalar(
-        "select count(*) from iceberg.analytics.mart_delivery_performance"
-    ) == 3
+    assert trino_scalar("select count(*) from iceberg.analytics.mart_delivery_performance") == 3
     dhl = trino_scalar(
         "select round(avg_transit_hours, 4) from "
         "iceberg.analytics.mart_delivery_performance where carrier = 'DHL'"
