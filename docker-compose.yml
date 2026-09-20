@@ -179,6 +179,12 @@ services:
     restart: "no"
 
   trino:
+    # NOTE (known upstream issue, fixed by trinodb/trino#30816 in the
+    # unreleased 484): each catalog operation may fetch a fresh OAuth2 token
+    # against Polaris; under rapid write sequences some requests lose auth
+    # and Polaris answers empty-body 401s. The Bronze loader retries this
+    # transient class (see lakehouse/bronze/loader.py). Bump to 484+ when
+    # the image is published.
     image: trinodb/trino:483
     profiles: ["core"]
     depends_on:

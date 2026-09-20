@@ -11,6 +11,7 @@ Load semantics (Phase 5 design spec §4, §6):
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -197,3 +198,60 @@ def _read_manifest(
     except ObjectNotFoundError as error:
         raise LoadError(f"manifest not found: s3://{BUCKET_ARCHIVE}/{key}") from error
     return BatchManifest.from_json(body.decode())
+
+
+#: Trino/Polaris catalog errors that are safe to retry by re-running the
+#: whole idempotent per-day load (DELETE partition + INSERT). Known trigger:
+#: trinodb/trino#30816 (fixed in the unreleased 484) — per-operation OAuth2
+#: token fetches occasionally send catalog requests unauthenticated, and
+#: Polaris answers empty-body 401 "Not authorized" responses.
+_TRANSIENT_CATALOG_MARKERS: tuple[str, ...] = ("Not authorized",)
+
+
+def is_transient_catalog_error(error: BaseException) -> bool:
+    """Classify trino errors that a retry of the same load can survive."""
+    if not isinstance(error, trino.exceptions.Error):
+        return False
+    message = getattr(error, "message", "")
+    return isinstance(message, str) and any(
+        marker in message for marker in _TRANSIENT_CATALOG_MARKERS
+    )
+
+
+def load_with_retry(
+    storage: ObjectStorage,
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    *,
+    logical_date: date,
+    clock: Clock | None = None,
+    catalog: str = "iceberg",
+    attempts: int = 3,
+    sleep: Callable[[float], None] = time.sleep,
+) -> LoadResult:
+    """Run :func:`load` with bounded retries on transient catalog-auth errors.
+
+    Non-transient failures (row-count mismatch, schema drift) propagate
+    immediately; each retry re-executes the whole idempotent day load.
+    """
+    log = context_logger(__name__, source=spec.source_name, logical_date=logical_date.isoformat())
+    for attempt in range(1, attempts + 1):
+        try:
+            return load(
+                storage, executor, spec, logical_date=logical_date, clock=clock, catalog=catalog
+            )
+        except trino.exceptions.Error as error:
+            if attempt == attempts or not is_transient_catalog_error(error):
+                raise
+            backoff_seconds = float(2**attempt)
+            log.warning(
+                "transient catalog error, retrying bronze load: attempt=%d/%d "
+                "backoff_seconds=%.0f error_type=%s error_message=%s",
+                attempt,
+                attempts,
+                backoff_seconds,
+                type(error).__name__,
+                getattr(error, "message", ""),
+            )
+            sleep(backoff_seconds)
+    raise AssertionError("unreachable: load_with_retry exhausted attempts without raising")

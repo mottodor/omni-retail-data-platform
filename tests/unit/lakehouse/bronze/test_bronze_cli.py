@@ -35,7 +35,7 @@ def test_run_one_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
         calls.append(args)
         return _result("loaded")
 
-    monkeypatch.setattr(cli, "load", fake_load)
+    monkeypatch.setattr(cli, "load_with_retry", fake_load)
     assert run_one(TABLES["orders"], FakeStorage(), FakeTrinoExecutor(), LOGICAL_DATE) == 0
     assert len(calls) == 1
 
@@ -57,7 +57,7 @@ def test_run_all_loads_every_source_and_tolerates_empty_days(
         loaded.append(spec.source_key)
         return _result("empty")
 
-    monkeypatch.setattr(cli, "load", fake_load)
+    monkeypatch.setattr(cli, "load_with_retry", fake_load)
     assert run_all(FakeStorage(), FakeTrinoExecutor(), LOGICAL_DATE) == 0
     assert len(loaded) == 10
 
@@ -74,7 +74,7 @@ def test_run_all_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> No
     ) -> LoadResult:
         raise LoadError("boom")
 
-    monkeypatch.setattr(cli, "load", fake_load)
+    monkeypatch.setattr(cli, "load_with_retry", fake_load)
     with pytest.raises(LoadError):
         run_all(FakeStorage(), FakeTrinoExecutor(), LOGICAL_DATE)
 

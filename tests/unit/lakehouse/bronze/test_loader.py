@@ -8,6 +8,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from trino.exceptions import TrinoQueryError
 
 from fakes.storage import FakeStorage
 from fakes.trino import FakeTrinoExecutor
@@ -27,6 +28,7 @@ from omni_retail.lakehouse.bronze.loader import (
     create_table_sql,
     delete_partition_sql,
     load,
+    load_with_retry,
 )
 from omni_retail.lakehouse.bronze.specs import TABLES
 
@@ -249,3 +251,85 @@ def test_load_all_rows_share_one_ingested_at() -> None:
 
     insert = executor.statements_matching("insert into")[0]
     assert insert.count("TIMESTAMP '2026-09-18 09:00:00.000000 UTC'") == 3
+
+
+class FlakyTrinoExecutor:
+    """Fake that raises a transient catalog-auth error N times before working."""
+
+    def __init__(self, failures: int) -> None:
+        self.statements: list[str] = []
+        self.failures = failures
+
+    def execute(self, sql: str) -> None:
+        self.statements.append(sql)
+        if self.failures > 0 and sql.startswith("delete from"):
+            self.failures -= 1
+            raise TrinoQueryError(
+                {
+                    "type": "INTERNAL_ERROR",
+                    "name": "GENERIC_INTERNAL_ERROR",
+                    "message": "Not authorized: ",
+                },
+                "test-query",
+            )
+
+    def statements_matching(self, prefix: str) -> list[str]:
+        return [sql for sql in self.statements if sql.startswith(prefix)]
+
+
+def test_load_with_retry_recovers_from_transient_not_authorized() -> None:
+    storage = FakeStorage()
+    seed_orders_batch(storage, rows=2)
+    executor = FlakyTrinoExecutor(failures=1)
+    sleeps: list[float] = []
+
+    result = load_with_retry(
+        storage,
+        executor,
+        TABLES["orders"],
+        logical_date=LOGICAL_DATE,
+        clock=fixed_clock,
+        sleep=sleeps.append,
+    )
+
+    assert result.status == "loaded"
+    assert result.row_count == 2
+    # the failing attempt plus the successful retry each ran a DELETE first
+    assert len(executor.statements_matching("delete from")) == 2
+    assert sleeps  # bounded backoff was engaged
+
+
+def test_load_with_retry_reraises_non_transient_immediately() -> None:
+    storage = FakeStorage()
+    seed_orders_batch(storage, rows=2, manifest_rows=99)  # row-count mismatch
+    executor = FlakyTrinoExecutor(failures=0)
+    sleeps: list[float] = []
+
+    with pytest.raises(LoadError, match="row count mismatch"):
+        load_with_retry(
+            storage,
+            executor,
+            TABLES["orders"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+            sleep=sleeps.append,
+        )
+    assert sleeps == []
+
+
+def test_load_with_retry_gives_up_after_bounded_attempts() -> None:
+    storage = FakeStorage()
+    seed_orders_batch(storage, rows=2)
+    executor = FlakyTrinoExecutor(failures=99)
+    sleeps: list[float] = []
+
+    with pytest.raises(TrinoQueryError, match="Not authorized"):
+        load_with_retry(
+            storage,
+            executor,
+            TABLES["orders"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+            sleep=sleeps.append,
+        )
+    assert len(sleeps) == 2  # attempts=3 -> two backoff sleeps before giving up

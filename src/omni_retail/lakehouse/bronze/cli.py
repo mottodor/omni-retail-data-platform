@@ -18,7 +18,7 @@ from omni_retail.lakehouse.bronze.loader import (
     LoadError,
     TrinoConfig,
     TrinoExecutor,
-    load,
+    load_with_retry,
 )
 from omni_retail.lakehouse.bronze.readers import BronzeReadError
 from omni_retail.lakehouse.bronze.specs import TABLES, BronzeTableSpec, spec_by_source
@@ -61,7 +61,7 @@ def run_one(
     catalog: str = "iceberg",
 ) -> int:
     """Load one source for the logical date; returns a process exit code."""
-    load(storage, executor, spec, logical_date=logical_date, catalog=catalog)
+    load_with_retry(storage, executor, spec, logical_date=logical_date, catalog=catalog)
     return 0
 
 
@@ -71,7 +71,9 @@ def run_all(
     """Load every registered source; empty days are warnings, errors fail fast."""
     log = context_logger(__name__, logical_date=logical_date.isoformat())
     for spec in TABLES.values():
-        result = load(storage, executor, spec, logical_date=logical_date, catalog=catalog)
+        result = load_with_retry(
+            storage, executor, spec, logical_date=logical_date, catalog=catalog
+        )
         if result.status == "loaded":
             log.info("run-all progress: source=%s row_count=%d", result.source, result.row_count)
     return 0
