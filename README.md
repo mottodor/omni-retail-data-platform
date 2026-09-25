@@ -48,12 +48,15 @@ Iceberg is the analytical source of truth; ClickHouse is a derived serving layer
 
 ## Status
 
+Detailed current state — slice-level status, current focus, deferred follow-ups — lives in [`PROGRESS.md`](PROGRESS.md).
+
 - [x] Phase 0 — repository bootstrap and engineering standards
 - [x] Phase 1 — core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg)
 - [x] Phase 2 — OLTP model and deterministic data generator
 - [x] Phase 3 — batch ingestion (CSV/JSON/Parquet/XLSX files, mock API service, retries, backfill, live integration tests)
 - [x] Phase 4 — Airflow orchestration (LocalExecutor, 5 ingestion DAGs, PG snapshot extraction, DAG tests in CI)
-- [ ] Phase 5 — dbt + Trino lakehouse (in progress: slice 1 — Bronze loader, dbt skeleton)
+- [ ] Phase 5 — dbt + Trino lakehouse (in progress — see [PROGRESS.md](PROGRESS.md) for slice detail)
+- [ ] Phases 6+ — not started (serving, BI, CDC, Spark, data quality, observability)
 
 ## Prerequisites
 
