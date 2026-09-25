@@ -12,20 +12,27 @@ Contract:
 - read at session start (AGENTS.md §5.1); updated whenever a task changes
   phase/slice status, the current focus, or the deferred list (AGENTS.md §49).
 
-Last updated: 2026-09-25.
+Last updated: 2026-09-26.
 
 ## Current focus
 
-Phase 5 slice 3 tail — lakehouse orchestration. Already merged:
-`int_orders_fx` and the four analytics marts with EUR normalization.
-Also merged: watermark-driven Bronze `run-new` (loads archived logical dates
-past `max(_batch_date)` per source; Bronze itself is the watermark state).
-Remaining:
+Active plan: `docs/plans/active.md` — task 4 of slice 3: README slice-3
+section (dataset-triggered lakehouse orchestration) and `docs/data-model.md`
+marts tables. Task 3 (live integration test over the `run_bronze_load` ->
+`run_dbt_build` runners, incl. idempotency leg) is done.
 
-- `transform_lakehouse` DAG triggered by the `lakehouse://bronze` dataset
-  (`load_bronze` -> `dbt build`);
-- live integration test covering the transform DAG;
-- docs: README slice-3 section and `docs/data-model.md` marts tables.
+Phase 5 slice 3 tail — lakehouse orchestration. All pipeline work merged:
+`int_orders_fx` + four analytics marts with EUR normalization;
+watermark-driven Bronze `run-new`; dataset-triggered pair `load_bronze` /
+`transform_lakehouse` (+ DAG structure tests); live integration test
+`test_lakehouse_orchestration.py` with shared seeding helpers in
+`tests/integration/lakehouse_seed.py`.
+
+Environment fix that unblocked validation on a fresh stack (volumes wiped by
+a Docker Desktop reset): ported the tested `feature/phase5-followups` infra
+commits (grant `CATALOG_MANAGE_CONTENT` to `catalog_admin` in polaris-init,
+`DROP_WITH_PURGE_ENABLED` compose flag, smoke-core drop guard) into this
+branch's working tree.
 
 ## Phase status
 
@@ -56,10 +63,23 @@ Remaining:
 |---|---|---|
 | 1 | Bronze loader (Iceberg via Polaris) | done |
 | 2 | Silver/Gold Kimball model, SCD2 `dim_customer`, reconciliation tests | done |
-| 3 | Analytics marts + dataset-triggered orchestration | in progress — see Current focus |
+| 3 | Analytics marts + dataset-triggered orchestration | in progress — docs task 4 remains |
 
 ## Deferred / follow-ups
 
+- Branch reconciliation: `feature/phase5-followups` (forked before slice 2)
+  carries the purge/grant infra fix, a stale-watermark purge CLI, lockfile
+  alignment, and a bronze-teardown cleanup; its polaris-init/compose/smoke
+  changes are already in this branch's working tree — merge or rebase it
+  against the slice-3 line.
+- MinIO images unpullable: `minio/minio` / `minio/mc` were removed from
+  Docker Hub and dl.min.io returns 410; the local stack runs on locally
+  built images from sha256-verified GitHub-release binaries, tagged under
+  the pinned names. Follow-up issue (+ADR if the S3 store changes) to make
+  `make up` reproducible again.
+- Stale comment in `tests/integration/test_bronze_load.py` about Polaris
+  denying DROP — obsolete after the purge/grant fix; cleanup exists as
+  05e1fd3 on the followups branch.
 - Bronze ingestion for the 4 file-based sources — supplier files land in
   MinIO (landing/archive) but are not loaded into Iceberg Bronze; the Bronze
   loader currently covers the PostgreSQL snapshot and API sources only.

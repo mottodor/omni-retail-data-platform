@@ -23,6 +23,7 @@ packages = ["src/omni_retail"]
 
 [dependency-groups]
 dev = [
+    "apache-airflow==2.11.2",
     "boto3-stubs[s3]>=1.35,<2",
     "mypy>=1.11,<2",
     "pre-commit>=4,<5",
@@ -44,7 +45,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["omni_retail"]
-mypy_path = "infrastructure/mock_api/src"
+mypy_path = ["infrastructure/mock_api/src", "airflow"]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "openpyxl.*", "trino.*"]
@@ -52,5 +53,5 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests", "infrastructure/mock_api/src"]
+pythonpath = ["tests", "infrastructure/mock_api/src", "airflow"]
 addopts = "-ra"

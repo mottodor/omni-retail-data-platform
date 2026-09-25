@@ -343,6 +343,8 @@ def test_dag_directory_contains_only_expected_dags() -> None:
         "ingest_marketing_api.py",
         "ingest_postgres_snapshot.py",
         "ingest_supplier_files.py",
+        "load_bronze.py",
+        "transform_lakehouse.py",
     ]
     assert dag_files == expected, f"unexpected DAG files: {dag_files}"
 

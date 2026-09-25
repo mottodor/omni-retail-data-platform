@@ -18,6 +18,7 @@ from omni_retail.lakehouse.bronze.loader import (
     LoadError,
     TrinoConfig,
     TrinoExecutor,
+    load_new,
     load_with_retry,
 )
 from omni_retail.lakehouse.bronze.readers import BronzeReadError
@@ -50,6 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
         "run-all", help="load every source for one logical date; fails fast, restartable"
     )
     run_all_parser.add_argument("--date", type=date.fromisoformat, required=True)
+
+    subparsers.add_parser(
+        "run-new",
+        help=(
+            "load every source's archived logical dates newer than its Bronze "
+            "watermark (max _batch_date); fails fast, restartable"
+        ),
+    )
     return parser
 
 
@@ -79,6 +88,21 @@ def run_all(
     return 0
 
 
+def run_new(storage: ObjectStorage, executor: TrinoExecutor, catalog: str = "iceberg") -> int:
+    """Load every source past its Bronze watermark; up-to-date sources are no-ops."""
+    log = context_logger(__name__, command="run-new")
+    for spec in TABLES.values():
+        results = load_new(storage, executor, spec, catalog=catalog)
+        loaded = sum(1 for result in results if result.status == "loaded")
+        log.info(
+            "run-new source complete: source=%s dates=%d loaded=%d",
+            spec.source_key,
+            len(results),
+            loaded,
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = build_parser().parse_args(argv)
@@ -90,7 +114,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "run":
                 assert spec is not None
                 return run_one(spec, storage, executor, args.date)
-            return run_all(storage, executor, args.date)
+            if args.command == "run-all":
+                return run_all(storage, executor, args.date)
+            return run_new(storage, executor)
     except (LoadError, BronzeReadError, StorageError, ValueError) as error:
         logger.error("%s failed: %s", args.command, error)
         return 1

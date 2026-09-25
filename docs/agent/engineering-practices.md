@@ -78,6 +78,23 @@ Examples:
 - ClickHouse outage;
 - malformed supplier file.
 
+### 41.3 Active task plan
+
+The active task plan lives in `docs/plans/active.md` — exactly one file,
+referenced from `PROGRESS.md` (Current focus) and picked up via AGENTS.md
+§5.1. It is a session-resume artifact, not documentation:
+
+- holds what an agent needs to continue mid-task: goal, files to read first,
+  decisions already made, a step checklist, validation commands, scope fence;
+- written in the same session that planned the task; updated when decisions
+  change during implementation;
+- replaced (or deleted) in the same commit as the work it describes —
+  completed plans are not archived in the tree, git history keeps them.
+
+Division of labor stays: `ROADMAP.md` owns acceptance criteria, ADRs own
+architectural decisions, `PROGRESS.md` owns status, the active plan owns
+execution detail of the single current task.
+
 ---
 
 ## 42. ADR policy

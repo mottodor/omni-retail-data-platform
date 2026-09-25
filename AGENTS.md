@@ -218,7 +218,7 @@ For every task, follow this sequence.
 
 1. Read the GitHub issue or task specification.
 2. Read `AGENTS.md` and the topical guide(s) under `docs/agent/` that match the task (routing table above).
-3. Read `PROGRESS.md` — current project state: phase/slice status, current focus, deferred items.
+3. Read `PROGRESS.md` — current project state: phase/slice status, current focus, deferred items. If it references an active task plan (`docs/plans/active.md`), read it and resume from its checklist instead of re-deriving the plan.
 4. Read the relevant section of `ROADMAP.md`.
 5. Read relevant ADRs.
 6. Inspect existing implementation.

@@ -24,4 +24,10 @@ if ! [[ "$row_count" =~ ^[0-9]+$ ]] || ((row_count < 1)); then
     exit 1
 fi
 
+# Regression guard (Phase 5 follow-up): Trino must be able to DROP objects
+# (purge-drop path + views) through Polaris.
+trino_exec "DROP TABLE IF EXISTS iceberg.demo.drop_probe" >/dev/null
+trino_exec "CREATE TABLE iceberg.demo.drop_probe (probe_id int)" >/dev/null
+trino_exec "DROP TABLE iceberg.demo.drop_probe" >/dev/null
+
 echo "smoke-core: PASS run_id=$run_id row_count=$row_count"

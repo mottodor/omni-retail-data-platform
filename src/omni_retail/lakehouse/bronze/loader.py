@@ -67,6 +67,8 @@ class TrinoExecutor(Protocol):
 
     def execute(self, sql: str) -> None: ...
 
+    def fetch(self, sql: str) -> list[tuple[object, ...]]: ...
+
 
 class DbapiTrinoExecutor:
     """Lazily-connecting autocommit executor over one trino.dbapi connection."""
@@ -88,6 +90,11 @@ class DbapiTrinoExecutor:
     def execute(self, sql: str) -> None:
         cursor = self._connect().cursor()
         cursor.execute(sql)
+
+    def fetch(self, sql: str) -> list[tuple[object, ...]]:
+        cursor = self._connect().cursor()
+        cursor.execute(sql)
+        return list(cursor.fetchall())
 
     def close(self) -> None:
         if self._connection is not None:
@@ -129,6 +136,51 @@ def delete_partition_sql(spec: BronzeTableSpec, catalog: str, logical_date: date
         f"delete from {catalog}.{SCHEMA_BRONZE}.{spec.name} "
         f'where "{BATCH_DATE}" = {date_literal(logical_date)}'
     )
+
+
+def table_exists_sql(spec: BronzeTableSpec, catalog: str) -> str:
+    return (
+        f"select 1 from {catalog}.information_schema.tables "
+        f"where table_schema = '{SCHEMA_BRONZE}' and table_name = '{spec.name}'"
+    )
+
+
+def max_batch_date_sql(spec: BronzeTableSpec, catalog: str) -> str:
+    return f'select max("{BATCH_DATE}") from {catalog}.{SCHEMA_BRONZE}.{spec.name}'
+
+
+def read_watermark(executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str) -> date | None:
+    """Highest logical date already present in the source's Bronze table.
+
+    The Bronze table itself is the watermark state: a missing table or an
+    empty one means "nothing loaded yet". The check goes through
+    ``information_schema`` instead of catching a missing-table query error.
+    """
+    if not executor.fetch(table_exists_sql(spec, catalog)):
+        return None
+    rows = executor.fetch(max_batch_date_sql(spec, catalog))
+    if not rows or rows[0][0] is None:
+        return None
+    value = rows[0][0]
+    if not isinstance(value, date):
+        raise LoadError(
+            f"{spec.source_key}: watermark is not a date: {value!r} "
+            f"(from {max_batch_date_sql(spec, catalog)})"
+        )
+    return value
+
+
+def discover_archive_dates(storage: ObjectStorage, spec: BronzeTableSpec) -> tuple[date, ...]:
+    """Sorted logical dates that have at least one raw data object archived."""
+    suffix = "." + spec.data_object_suffix
+    dates = {
+        parsed
+        for key in storage.list_object_keys(BUCKET_ARCHIVE, spec.root_prefix)
+        if key.endswith(suffix)
+        for parsed in (spec.logical_date_from_key(key),)
+        if parsed is not None
+    }
+    return tuple(sorted(dates))
 
 
 def load(
@@ -255,3 +307,57 @@ def load_with_retry(
             )
             sleep(backoff_seconds)
     raise AssertionError("unreachable: load_with_retry exhausted attempts without raising")
+
+
+def load_new(
+    storage: ObjectStorage,
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    *,
+    clock: Clock | None = None,
+    catalog: str = "iceberg",
+    attempts: int = 3,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[LoadResult]:
+    """Load every archived logical date newer than the Bronze watermark.
+
+    Watermark-driven counterpart of repeated ``run`` calls: unlike a
+    dataset-triggered logical date, ``max(_batch_date)`` always addresses the
+    producer's next unloaded day, and days with no raw objects are simply not
+    discovered. Dates load in ascending order; the first failure aborts the
+    source (fail fast) and a restart resumes at the watermark.
+    """
+    log = context_logger(__name__, source=spec.source_name, command="run-new")
+    watermark = read_watermark(executor, spec, catalog)
+    pending = [
+        logical_date
+        for logical_date in discover_archive_dates(storage, spec)
+        if watermark is None or logical_date > watermark
+    ]
+    results: list[LoadResult] = []
+    for logical_date in pending:
+        result = load_with_retry(
+            storage,
+            executor,
+            spec,
+            logical_date=logical_date,
+            clock=clock,
+            catalog=catalog,
+            attempts=attempts,
+            sleep=sleep,
+        )
+        results.append(result)
+        log.info(
+            "run-new progress: source=%s logical_date=%s status=%s row_count=%d",
+            result.source,
+            result.logical_date.isoformat(),
+            result.status,
+            result.row_count,
+        )
+    if not results:
+        log.info(
+            "run-new up-to-date: source=%s watermark=%s pending_dates=0",
+            spec.source_key,
+            watermark.isoformat() if watermark is not None else "none",
+        )
+    return results

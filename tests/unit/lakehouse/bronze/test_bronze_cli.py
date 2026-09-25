@@ -8,7 +8,7 @@ import pytest
 from fakes.storage import FakeStorage
 from fakes.trino import FakeTrinoExecutor
 from omni_retail.lakehouse.bronze import cli
-from omni_retail.lakehouse.bronze.cli import build_parser, main, run_all, run_one
+from omni_retail.lakehouse.bronze.cli import build_parser, main, run_all, run_new, run_one
 from omni_retail.lakehouse.bronze.loader import LoadError, LoadResult
 from omni_retail.lakehouse.bronze.specs import TABLES, BronzeTableSpec
 
@@ -26,6 +26,11 @@ def test_parser_run_all_parses_date() -> None:
     args = build_parser().parse_args(["run-all", "--date", "2026-09-18"])
     assert args.command == "run-all"
     assert args.date == LOGICAL_DATE
+
+
+def test_parser_run_new_takes_no_arguments() -> None:
+    args = build_parser().parse_args(["run-new"])
+    assert args.command == "run-new"
 
 
 def test_run_one_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,6 +82,34 @@ def test_run_all_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(cli, "load_with_retry", fake_load)
     with pytest.raises(LoadError):
         run_all(FakeStorage(), FakeTrinoExecutor(), LOGICAL_DATE)
+
+
+def test_run_new_loads_every_source_and_tolerates_uptodate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def fake_load_new(
+        storage: object,
+        executor: object,
+        spec: BronzeTableSpec,
+        **kwargs: object,
+    ) -> list[LoadResult]:
+        called.append(spec.source_key)
+        return []
+
+    monkeypatch.setattr(cli, "load_new", fake_load_new)
+    assert run_new(FakeStorage(), FakeTrinoExecutor()) == 0
+    assert len(called) == 10
+
+
+def test_run_new_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_load_new(*args: object, **kwargs: object) -> list[LoadResult]:
+        raise LoadError("boom")
+
+    monkeypatch.setattr(cli, "load_new", fake_load_new)
+    with pytest.raises(LoadError):
+        run_new(FakeStorage(), FakeTrinoExecutor())
 
 
 def test_main_unknown_source_returns_one() -> None:

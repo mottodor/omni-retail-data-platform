@@ -1,12 +1,19 @@
-"""Thin orchestration runners over the Phase 3/4 ingestion functions.
+"""Thin orchestration runners over the Phase 3/4/5 pipeline functions.
 
 DAG tasks must not become transformation code repositories (AGENTS.md
-§19.1): the runners only wire environment-configured ingestion entry points
-to Airflow task context and return JSON-serializable summaries for XCom.
+§19.1): the runners only wire environment-configured entry points to Airflow
+task context and return JSON-serializable summaries for XCom.
 """
 
 import contextlib
+import json
+import logging
+import os
+import subprocess
+import tempfile
+from collections import Counter
 from datetime import date
+from pathlib import Path
 from typing import cast
 
 import psycopg
@@ -22,6 +29,17 @@ from omni_retail.ingestion.postgres_snapshot.config import PostgresSourceConfig
 from omni_retail.ingestion.postgres_snapshot.extract import SnapshotConnection, snapshot_table
 from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
 from omni_retail.ingestion.postgres_snapshot.watermark import load_watermark
+from omni_retail.lakehouse.bronze.loader import (
+    DbapiTrinoExecutor,
+    TrinoConfig,
+    load_new,
+)
+from omni_retail.lakehouse.bronze.specs import TABLES
+
+logger = logging.getLogger(__name__)
+
+#: dbt project location inside the Airflow image (compose mounts it read-only).
+DBT_PROJECT_DIR = "/opt/airflow/dbt"
 
 
 def summarize_manifest(manifest: BatchManifest) -> dict[str, object]:
@@ -93,3 +111,85 @@ def run_postgres_snapshot(
             watermark=watermark,
         )
     return summarize_manifest(manifest)
+
+
+def run_bronze_load() -> dict[str, object]:
+    """Watermark-driven Bronze load of every registered source (Phase 5 §3)."""
+    configure_logging()
+    storage = BotoObjectStorage(StorageConfig.from_env())
+    by_source: dict[str, dict[str, object]] = {}
+    loaded_sources = 0
+    total_dates = 0
+    total_rows = 0
+    with contextlib.closing(DbapiTrinoExecutor(TrinoConfig.from_env())) as executor:
+        for spec in TABLES.values():
+            results = load_new(storage, executor, spec)
+            rows = sum(result.row_count for result in results)
+            if results:
+                loaded_sources += 1
+                total_dates += len(results)
+                total_rows += rows
+            by_source[spec.source_key] = {
+                "dates": [result.logical_date.isoformat() for result in results],
+                "rows": rows,
+            }
+    return {
+        "sources": len(by_source),
+        "loaded_sources": loaded_sources,
+        "dates": total_dates,
+        "rows": total_rows,
+        "by_source": by_source,
+    }
+
+
+class DbtBuildError(RuntimeError):
+    """The dbt build subprocess failed (non-zero exit or missing artifacts)."""
+
+
+def summarize_dbt_results(payload: dict[str, object]) -> dict[str, object]:
+    """XCom-friendly summary of a dbt ``run_results.json`` payload."""
+    results = cast(list[dict[str, object]], payload.get("results", []))
+    statuses = Counter(str(item.get("status")) for item in results if isinstance(item, dict))
+    return {
+        "elapsed_seconds": round(float(cast(float, payload.get("elapsed_time", 0.0))), 3),
+        "result_count": len(results),
+        "status_counts": dict(statuses),
+    }
+
+
+def run_dbt_build() -> dict[str, object]:
+    """Run a full ``dbt build`` in the worker process (Phase 5 §3).
+
+    The dbt project directory is mounted read-only, so target and log
+    artifacts are written to a throwaway per-run directory. The summary comes
+    from ``run_results.json``; a non-zero dbt exit fails the task explicitly.
+    """
+    configure_logging()
+    project_dir = Path(os.environ.get("DBT_PROJECT_DIR", DBT_PROJECT_DIR))
+    run_dir = Path(tempfile.mkdtemp(prefix="dbt-build-"))
+    command = [
+        "dbt",
+        "build",
+        "--project-dir",
+        str(project_dir),
+        "--profiles-dir",
+        str(project_dir),
+        "--target-path",
+        str(run_dir / "target"),
+        "--log-path",
+        str(run_dir / "logs"),
+    ]
+    env = {**os.environ, "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"}
+    completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    if completed.returncode != 0:
+        tail = "\n".join((completed.stdout + completed.stderr).splitlines()[-30:])
+        logger.error("dbt build failed: returncode=%d\n%s", completed.returncode, tail)
+        raise DbtBuildError(f"dbt build exited with {completed.returncode}; see task logs")
+
+    results_path = run_dir / "target" / "run_results.json"
+    if not results_path.is_file():
+        raise DbtBuildError(f"dbt build succeeded but {results_path} is missing")
+    summary = summarize_dbt_results(json.loads(results_path.read_text(encoding="utf-8")))
+    summary["run_dir"] = str(run_dir)
+    logger.info("dbt build completed: %s", summary)
+    return summary
