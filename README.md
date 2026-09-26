@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: batch ingestion, Iceberg lakehouse (Trino + dbt), ClickHouse serving layer, BI with Superset, orchestration with Airflow, CDC via Debezium + Kafka, observability and lineage — on a local Docker Compose stack.
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. Today it ingests a PostgreSQL OLTP database, supplier files, and REST APIs into an Iceberg lakehouse (MinIO + Polaris + Trino), models the data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, and orchestrates everything with Airflow. Planned on the same foundation: ClickHouse serving, Superset BI, CDC via Debezium + Kafka, Spark, observability and lineage — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -15,6 +15,8 @@ Production-like data engineering portfolio project: batch ingestion, Iceberg lak
 - Are there discrepancies between orders and payments?
 
 ## Architecture
+
+Target architecture (per [ROADMAP.md](ROADMAP.md)):
 
 ```text
 SOURCES
@@ -44,20 +46,15 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: GitLab CI, Kubernetes, Airflow 3 migration
 ```
 
-Iceberg is the analytical source of truth; ClickHouse is a derived serving layer that can always be rebuilt from Iceberg Gold.
+Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, CI. Not yet built: ClickHouse, Superset, Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.
 
-## Status
+Iceberg is the analytical source of truth; the planned ClickHouse serving layer will be derived from Iceberg Gold and always rebuildable from it.
 
-Detailed current state — slice-level status, current focus, deferred follow-ups — lives in [`PROGRESS.md`](PROGRESS.md).
+## Project status
 
-- [x] Phase 0 — repository bootstrap and engineering standards
-- [x] Phase 1 — core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg)
-- [x] Phase 2 — OLTP model and deterministic data generator
-- [x] Phase 3 — batch ingestion (CSV/JSON/Parquet/XLSX files, mock API service, retries, backfill, live integration tests)
-- [x] Phase 4 — Airflow orchestration (LocalExecutor, 5 ingestion DAGs, PG snapshot extraction, DAG tests in CI)
-- [x] Phase 5 — dbt + Trino lakehouse (Bronze → Silver → Gold, analytics marts, dataset-triggered orchestration)
-- [ ] Phase 6 — ClickHouse serving layer (in progress — slice 1: `mart_daily_sales` published via atomic staging swap)
-- [ ] Phases 7+ — not started (BI, CDC, Spark, data quality, observability)
+End-to-end today: **PostgreSQL / supplier files / mock APIs → MinIO archive → Iceberg Bronze → dbt Silver/Gold → analytics marts, orchestrated by Airflow.**
+
+Slice-level status, current focus, and deferred follow-ups live in [PROGRESS.md](PROGRESS.md); plans and acceptance criteria live in [ROADMAP.md](ROADMAP.md).
 
 ## Prerequisites
 
@@ -80,49 +77,67 @@ make setup
 ## Commands
 
 ```bash
+# --- Environment and code quality ---
 make setup      # uv sync + pre-commit install
 make lint       # ruff check + ruff format --check + mypy
-make test       # pytest
-make unit       # alias for make test
+make test       # pytest (unit tests; `unit` is an alias)
+
+# --- Stack lifecycle ---
 make up         # start the core profile and wait until healthy
 make down       # stop services (named volumes are preserved)
 make logs       # follow service logs
 make reset      # DESTRUCTIVE: down -v, destroys all local volumes
 make smoke-core # end-to-end check: Trino -> Polaris -> Iceberg -> MinIO
-make generate-oltp # apply OLTP schema + load initial data (10k customers / 5k products / 100k orders)
-make mutate-oltp   # apply a batch of random inserts/updates/deletes (EVENTS=200 by default)
-make seed-supplier-files  # generate deterministic vendor files and upload to landing (ROWS/SEED)
+
+# --- Source data ---
+make generate-oltp       # apply OLTP schema + load initial data (10k customers / 5k products / 100k orders)
+make mutate-oltp         # apply a batch of random inserts/updates/deletes (EVENTS=200 by default)
+make seed-supplier-files # generate deterministic vendor files and upload to landing (ROWS/SEED)
+
+# --- Ingestion ---
 make ingest-files ARGS="--source supplier-prices"  # run the file ingestion flow
 make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # fetch raw API pages into archive
 make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"  # date-range backfill
-make integration  # integration tests against the live core stack (requires `make up`)
-make bronze-load # load raw archive data into Iceberg Bronze (ARGS="run --source orders --date 2026-09-18" / "run-all --date ...")
+
+# --- Lakehouse ---
+make bronze-load # load raw archive data into Iceberg Bronze (ARGS="run --source orders --date 2026-09-18" / "run-all --date ..." / "run-new")
 make dbt-parse   # offline dbt manifest check
 make dbt-build   # run dbt models + tests against the live stack (ARGS="--select staging")
 make dbt-test    # run dbt tests
-make airflow-up     # start the orchestration profile (requires the core profile up)
-make airflow-down   # stop Airflow services (metadata/logs volumes preserved)
-make airflow-test   # DAG import/structure tests inside the Airflow image
+
+# --- Orchestration ---
+make airflow-build     # build the custom Airflow image (omni-retail/airflow:0.1.0)
+make airflow-up        # start the orchestration profile (requires the core profile up)
+make airflow-down      # stop Airflow services (metadata/logs volumes preserved)
+make airflow-test      # DAG import/structure tests inside the Airflow image
 make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"     # run one DAG for a logical date
 make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # backfill a DAG
+
+# --- Integration testing ---
+make integration # integration tests against the live core stack (requires `make up`)
 ```
 
-## Core infrastructure (Phase 1)
+## Platform stack
 
-The `core` Compose profile provides the minimal working lakehouse:
+The `core` Compose profile provides the lakehouse and the sources:
 
 | Service | Image | Purpose |
 |---|---|---|
-| `postgres` | `postgres:16.15-alpine` | OLTP source (schema and data from Phase 2, see below) |
+| `postgres` | `postgres:16.15-alpine` | OLTP source (schema and data — see [Data sources](#data-sources-and-ingestion)) |
 | `minio` + `minio-init` | pinned `minio/minio` + `mc` | S3 storage; buckets `landing`, `lakehouse`, `archive`, `rejected` |
 | `polaris-postgres` | `postgres:16.15-alpine` | metadata database for Polaris (network-internal) |
-| `polaris` + `polaris-bootstrap` | `apache/polaris:1.7.0` | Iceberg REST catalog (`lakehouse` catalog backed by MinIO) |
+| `polaris` + `polaris-bootstrap` + `polaris-init` | `apache/polaris:1.7.0` | Iceberg REST catalog (`lakehouse` catalog backed by MinIO) |
 | `trino` | `trinodb/trino:483` | SQL engine; catalog `iceberg` via Polaris REST API |
 | `mock-api` | `omni-retail/mock-api:0.1.0` (built locally) | deterministic external API simulator with fault injection (ADR 0002) |
 
+The `orchestration` profile adds Airflow: a custom image `omni-retail/airflow:0.1.0`
+built from `apache/airflow:2.11.2-python3.12` (webserver + scheduler, LocalExecutor)
+with a dedicated metadata PostgreSQL (`airflow-postgres`) separated from the OLTP
+source, so `make reset` cannot wipe Airflow state.
+
 All host ports bind to `127.0.0.1` only: PostgreSQL `5432`, MinIO `9000`/`9001`,
-Polaris `8181`, Trino `8080`. All images are pinned; environment-driven
-credentials come from `.env` (see `.env.example`).
+mock-api `9002`, Polaris `8181`, Trino `8080`, Airflow UI `8081`. All images are
+pinned; environment-driven credentials come from `.env` (see `.env.example`).
 
 Verification:
 
@@ -133,10 +148,12 @@ make down && make up && make smoke-core  # data survives a full restart
 ```
 
 Known simplification: Trino authenticates to Polaris with the bootstrap `root`
-client credentials; dedicated least-privilege Polaris principals are planned
-with the ingestion phases.
+client credentials; dedicated least-privilege Polaris principals are a planned
+follow-up.
 
-## OLTP source and data generator (Phase 2)
+## Data sources and ingestion
+
+### OLTP source and data generator
 
 The PostgreSQL database carries a realistic e-commerce OLTP schema
 (`categories`, `products`, `customers`, `orders`, `order_items`, `payments`,
@@ -169,7 +186,7 @@ Behavior highlights:
 
 Table documentation, grain, and source metrics: `docs/data-model.md`.
 
-## Batch ingestion (Phase 3)
+### File ingestion
 
 External file sources flow through a durable, idempotent pipeline:
 
@@ -217,7 +234,7 @@ automatically by `minio-init` from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`.
 Note for proxied environments: if your shell sets `HTTP_PROXY`/`HTTPS_PROXY`,
 add `no_proxy=127.0.0.1,localhost` so local MinIO traffic bypasses the proxy.
 
-## API ingestion (Phase 3)
+### API ingestion
 
 REST sources are served by the `mock-api` container (ADR 0002): a FastAPI
 service with **deterministic data** (same `MOCK_API_SEED` + logical date always
@@ -244,7 +261,7 @@ Guarantees:
 - **backfill** — `backfill --from --to` walks logical dates sequentially,
   fails fast, and is restartable (already-done dates re-run without duplicates);
 - **no wall-clock in paths or identifiers** — dates come only from explicit
-  CLI arguments (Airflow will pass logical dates in Phase 4).
+  CLI arguments (the Airflow DAGs pass their logical date).
 
 ```bash
 make up                                                          # includes mock-api
@@ -253,73 +270,38 @@ make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # again → same
 make ingest-api ARGS="backfill --source marketing-campaigns --from 2026-09-09 --to 2026-09-10"
 ```
 
-## Integration tests (Phase 3)
+### PostgreSQL snapshots
 
-`make integration` runs the Phase 3 acceptance scenarios against the live core
-stack (MinIO + mock-api), gated by `OMNI_INTEGRATION=1` so plain `make test`
-stays hermetic:
-
-- re-running the same file batch archives exactly once (content-addressed dedup);
-- a corrupted file is quarantined with a machine-readable `.rejection.json`;
-- Parquet and XLSX sources flow end-to-end through real object storage;
-- an injected HTTP 429 is retried and succeeds;
-- an API backfill over a date range is idempotent (deterministic page keys);
-- a PostgreSQL snapshot lifecycle: full extract → parquet + manifest + watermark,
-  re-run with an empty window (no duplicates), incremental extract after a
-  controlled mutation, and `full_refresh` rebase.
-
-## Airflow orchestration (Phase 4)
-
-Orchestration lives in the `orchestration` Compose profile (ADR 0003):
-LocalExecutor, a dedicated metadata PostgreSQL (separate from the OLTP
-source, so `make reset` cannot wipe Airflow state), and a custom image
-`omni-retail/airflow:0.1.0` built from `apache/airflow:2.11.2-python3.12`
-with dependency versions exported from the committed `uv.lock` and the
-`omni_retail` package baked in — tasks call the ingestion functions in the
-worker process (no shell-outs, no logic duplicated in DAGs).
-
-| DAG | Schedule | Shape |
-|---|---|---|
-| `ingest_fx_api` / `ingest_marketing_api` / `ingest_delivery_api` | `@daily` | single `ingest` task, pool `mock_api`, XCom summary |
-| `ingest_supplier_files` | `@daily` | 4 independent per-source tasks; param `fail_on_rejected` (default `False`) |
-| `ingest_postgres_snapshot` | `@daily` | 7 independent per-table snapshot tasks; param `full_refresh` (default `False`) |
-
-Shared policy: `retries=3` with exponential backoff (capped at 5 min) on top
-of the http-level retries inside the API client, `execution_timeout=5min`,
-`max_active_runs=1`, `catchup=False`, new DAGs start paused, and the logical
-date (`ds`) is the only date input — wall-clock `now()` never appears in
-paths or identifiers.
-
-PostgreSQL snapshots (`omni_retail.ingestion.postgres_snapshot`) extract
-each OLTP table as Parquet with an explicit pyarrow schema:
+`omni_retail.ingestion.postgres_snapshot` extracts each OLTP table as Parquet
+with an explicit pyarrow schema:
 `archive/postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet`, manifest in the
 shared registry (`source_kind="postgres"`), and a durable watermark
 `archive/_watermarks/postgres/<table>.json`. Keyset pagination on
 `(updated_at, pk)` makes same-second events safe; the watermark moves only
 after a successful upload, so interruptions re-extract and overwrite the
-same window. Limitations (closed by CDC in Phase 8): hard deletes are
-invisible and historical backfill is impossible (snapshots hold current
-state).
+same window. Known limitation (until CDC — see [ROADMAP.md](ROADMAP.md)):
+hard deletes are invisible to snapshots, and historical backfill of past
+states is impossible (a snapshot holds the current state).
 
-```bash
-make up                  # core profile first (postgres, minio, mock-api)
-make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081
-make airflow-test        # DAG tests (DagBag) inside the image — no live services needed
-make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
-make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
-```
+## Lakehouse: Bronze → Silver → Gold → marts
 
-## Bronze layer (Phase 5 slice 1)
+### Bronze
 
 Raw archive objects (PG snapshot Parquet, API JSON pages) are loaded into
-Iceberg `bronze.*` tables partitioned by `_batch_date` via
-`make bronze-load`. Loads are idempotent per (source, logical date): the
-day's partition is `DELETE`d and re-filled with batched `INSERT` statements,
-verified against the raw manifest row count before any DML is issued. Empty
-days are warnings; schema drift and row-count mismatches fail before touching
-the partition.
+Iceberg `bronze.*` tables partitioned by `_batch_date` via `make bronze-load`.
+Loads are idempotent per (source, logical date): the day's partition is
+`DELETE`d and re-filled with batched `INSERT` statements, verified against
+the raw manifest row count before any DML is issued. Empty days are warnings;
+schema drift and row-count mismatches fail before touching the partition.
 
-## Silver and Gold layers (Phase 5 slice 2)
+CLI modes: `run --source --date` (one day), `run-all --date` (every source),
+and `run-new` — a watermark-driven sweep that loads, per source, every
+archived logical date past `max(_batch_date)` in ascending order, so
+re-running it is an idempotent no-op. This is the mode the `load_bronze`
+DAG uses. Supplier files currently stop at the raw archive — loading them
+into Bronze is a tracked follow-up ([PROGRESS.md](PROGRESS.md)).
+
+### Silver and Gold
 
 dbt builds the analytical model over Bronze: `silver.stg_*` (typed
 pass-through) and `silver.int_*` (current entity state via keyset dedup),
@@ -330,6 +312,103 @@ contract (grain, PK, measures, upstream) and is covered by built-in and
 singular business tests, including the orders ↔ payments reconciliation.
 Run against the live core stack with `make dbt-build`; the model reference
 lives in `docs/data-model.md`.
+
+On top of Gold, four marts provide dashboard-ready aggregates with all
+financial measures normalized to EUR by `int_orders_fx` (the order
+currency's FX rate at the order date):
+
+- `mart_daily_sales` — daily GMV/revenue/margin per date × category × region;
+- `mart_customer_ltv` — orders/GMV/AOV per customer with current segment;
+- `mart_marketing_roi` — spend/CTR/CPC/CPM per campaign;
+- `mart_delivery_performance` — transit times and status mix per carrier.
+
+## Orchestration (Airflow)
+
+Orchestration lives in the `orchestration` Compose profile (ADR 0003):
+tasks call the ingestion and lakehouse functions in the worker process
+(no shell-outs, no logic duplicated in DAGs), with dependency versions
+exported from the committed `uv.lock` and the `omni_retail` package baked
+into the image.
+
+Ingestion and lakehouse transformation are chained with Airflow datasets:
+
+```text
+ingest_postgres_snapshot / ingest_fx_api / ingest_marketing_api / ingest_delivery_api
+    └─ outlet: raw://<source>
+          → load_bronze        (watermark-driven `run-new` over all sources)
+             └─ outlet: lakehouse://bronze
+                   → transform_lakehouse   (full dbt build: Silver → Gold → marts + tests)
+```
+
+Dataset URIs are logical data addresses, not S3 paths. Because supplier files
+are not loaded into Bronze yet, `ingest_supplier_files` emits no dataset.
+Dataset-triggered runs never rely on their own logical date (it differs from
+the producer's) — the watermark sweep alone decides what to load.
+
+| DAG | Schedule | Shape |
+|---|---|---|
+| `ingest_fx_api` / `ingest_marketing_api` / `ingest_delivery_api` | `@daily` | single `ingest` task, pool `mock_api`, XCom summary; outlet `raw://<source>` |
+| `ingest_supplier_files` | `@daily` | 4 independent per-source tasks; param `fail_on_rejected` (default `False`) |
+| `ingest_postgres_snapshot` | `@daily` | 7 independent per-table snapshot tasks; param `full_refresh` (default `False`); outlet `raw://postgres-snapshot` |
+| `load_bronze` | `raw://` datasets (4 ingestion DAGs) | watermark-driven `run-new` Bronze load; outlet `lakehouse://bronze` |
+| `transform_lakehouse` | `lakehouse://bronze` | full `dbt build` (models + tests) via the dbt CLI in the worker process |
+
+Transformation SQL lives in the dbt project, never in DAGs; dbt target/log
+artifacts go to a per-run temp directory (the project dir is mounted
+read-only), and `max_active_runs=1` keeps concurrent dbt builds off the
+single-node Trino/Polaris stack.
+
+Shared policy: `retries=3` with exponential backoff (capped at 5 min) on top
+of the http-level retries inside the API client, `execution_timeout=5min`,
+`max_active_runs=1`, `catchup=False`, new DAGs start paused, and the logical
+date (`ds`) is the only date input — wall-clock `now()` never appears in
+paths or identifiers.
+
+```bash
+make up                  # core profile first (postgres, minio, mock-api)
+make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081
+make airflow-test        # DAG tests (DagBag) inside the image — no live services needed
+make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
+make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
+```
+
+Manual verification of the dataset chain: `make airflow-up`, unpause the
+DAGs above, trigger any ingestion DAG (or wait for its schedule), then watch
+`load_bronze` and `transform_lakehouse` fire in sequence in the Datasets
+view of the Airflow UI.
+
+## Data quality and testing
+
+- Unit tests (`make test`) stay hermetic; no network, no containers.
+- dbt tests: built-in constraints plus singular business tests, including
+  the orders ↔ payments reconciliation (see the Lakehouse section).
+- `make integration` runs the acceptance scenarios against the live core
+  stack (MinIO + mock-api + Trino), gated by `OMNI_INTEGRATION=1`:
+  - re-running the same file batch archives exactly once (content-addressed dedup);
+  - a corrupted file is quarantined with a machine-readable `.rejection.json`;
+  - Parquet and XLSX sources flow end-to-end through real object storage;
+  - an injected HTTP 429 is retried and succeeds;
+  - an API backfill over a date range is idempotent (deterministic page keys);
+  - a PostgreSQL snapshot lifecycle: full extract → parquet + manifest + watermark,
+    re-run with an empty window (no duplicates), incremental extract after a
+    controlled mutation, and `full_refresh` rebase;
+  - a dataset-triggered lakehouse orchestration run: seeded raw data →
+    watermark-swept Bronze load → full dbt build, with an idempotent
+    re-trigger (no duplicates).
+
+## Project layout
+
+```text
+src/omni_retail/    Python package: ingestion (files, api, postgres_snapshot),
+                   generators, lakehouse (bronze)
+dbt/               dbt project: staging → intermediate → core → marts
+airflow/           DAGs, dataset definitions, shared policy and runners
+postgres/          OLTP schema DDL (idempotent, applied on first volume init)
+infrastructure/    custom Dockerfiles, init/bootstrap scripts, smoke and DAG-test scripts
+trino/             Trino configuration
+tests/             unit tests + opt-in integration tests (OMNI_INTEGRATION=1)
+docs/              data model, data contracts, ADRs, runbooks, agent guides
+```
 
 ## Lakehouse orchestration (Phase 5 slice 3)
 
