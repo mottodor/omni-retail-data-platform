@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. Today it ingests a PostgreSQL OLTP database, supplier files, and REST APIs into an Iceberg lakehouse (MinIO + Polaris + Trino), models the data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, and orchestrates everything with Airflow. Planned on the same foundation: ClickHouse serving, Superset BI, CDC via Debezium + Kafka, Spark, observability and lineage — see [ROADMAP.md](ROADMAP.md).
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. Today it ingests a PostgreSQL OLTP database, supplier files, and REST APIs into an Iceberg lakehouse (MinIO + Polaris + Trino), models the data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, orchestrates everything with Airflow, and publishes Gold marts to a ClickHouse serving layer. Planned next on the same foundation: Superset BI, CDC via Debezium + Kafka, Spark, observability and lineage — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -46,13 +46,13 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: GitLab CI, Kubernetes, Airflow 3 migration
 ```
 
-Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, CI. Not yet built: ClickHouse, Superset, Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.
+Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, CI. Not yet built: Superset, Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.
 
-Iceberg is the analytical source of truth; the planned ClickHouse serving layer will be derived from Iceberg Gold and always rebuildable from it.
+Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
 
 ## Project status
 
-End-to-end today: **PostgreSQL / supplier files / mock APIs → MinIO archive → Iceberg Bronze → dbt Silver/Gold → analytics marts, orchestrated by Airflow.**
+End-to-end today: **PostgreSQL / supplier files / mock APIs → MinIO archive → Iceberg Bronze → dbt Silver/Gold → analytics marts → ClickHouse serving copy, orchestrated by Airflow.**
 
 Slice-level status, current focus, and deferred follow-ups live in [PROGRESS.md](PROGRESS.md); plans and acceptance criteria live in [ROADMAP.md](ROADMAP.md).
 
@@ -356,7 +356,10 @@ the producer's) — the watermark sweep alone decides what to load.
 Transformation SQL lives in the dbt project, never in DAGs; dbt target/log
 artifacts go to a per-run temp directory (the project dir is mounted
 read-only), and `max_active_runs=1` keeps concurrent dbt builds off the
-single-node Trino/Polaris stack.
+single-node Trino/Polaris stack. Dataset wiring is asserted by the DAG
+structure tests (`make airflow-test`); the exact task code paths — watermark
+sweep, idempotent re-trigger, full build — by the live integration test
+`tests/integration/test_lakehouse_orchestration.py` (`make integration`).
 
 Shared policy: `retries=3` with exponential backoff (capped at 5 min) on top
 of the http-level retries inside the API client, `execution_timeout=5min`,
@@ -369,6 +372,7 @@ make up                  # core profile first (postgres, minio, mock-api)
 make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081
 make airflow-test        # DAG tests (DagBag) inside the image — no live services needed
 make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
+make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"  # dataset-triggered lakehouse chain
 make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
 ```
 
@@ -410,52 +414,7 @@ tests/             unit tests + opt-in integration tests (OMNI_INTEGRATION=1)
 docs/              data model, data contracts, ADRs, runbooks, agent guides
 ```
 
-## Lakehouse orchestration (Phase 5 slice 3)
-
-The same `dbt build` also produces the `analytics` marts (`mart_daily_sales`,
-`mart_customer_ltv`, `mart_marketing_roi`, `mart_delivery_performance`; grain
-and measures in `docs/data-model.md`), and the lakehouse transforms are wired
-into Airflow with **Datasets** (data-aware scheduling) instead of a wall-clock
-schedule:
-
-```text
-ingest_postgres_snapshot | ingest_fx_api | ingest_marketing_api | ingest_delivery_api
-        │  outlets: raw://<source>
-        ▼
-load_bronze            watermark-driven sweep: per source, every archived
-                       logical date > max(_batch_date), ascending
-        │  outlet: lakehouse://bronze
-        ▼
-transform_lakehouse    full dbt build (staging → intermediate → core →
-                       marts, plus built-in and singular tests)
-```
-
-- `load_bronze` never relies on its own logical date (which does not equal the
-  producer's), so a dataset re-trigger between ingestion batches is an
-  idempotent no-op;
-- `transform_lakehouse` runs the dbt CLI in the worker process —
-  transformation SQL lives in the dbt project, never in the DAG;
-- both DAGs use bounded task retries (safe to re-run: per-day loads are
-  partition-scoped, dbt tables rebuild), `max_active_runs=1`, and start paused;
-- supplier files reach the raw archive but are not loaded into Bronze yet
-  (deferred follow-up), so `ingest_supplier_files` emits none of the consumed
-  `raw://` datasets.
-
-Dataset wiring is asserted by the DAG structure tests (`make airflow-test`);
-the exact task code paths — watermark sweep, idempotent re-trigger, full
-build — by the live integration test
-`tests/integration/test_lakehouse_orchestration.py` (`make integration`).
-
-```bash
-make up             # core profile first (postgres, minio, mock-api)
-make airflow-up     # orchestration profile; UI at http://127.0.0.1:8081
-# unpause load_bronze / transform_lakehouse, trigger any ingestion DAG,
-# then watch Datasets -> lakehouse://bronze in the Airflow UI
-make airflow-dag-test ARGS="load_bronze 2026-09-18"
-make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"
-```
-
-## ClickHouse serving layer (Phase 6, slice 1)
+## ClickHouse serving layer
 
 Gold marts are published from Iceberg to ClickHouse as a rebuildable,
 read-only-for-BI serving copy ([ADR 0004](docs/adr/0004-clickhouse-serving-publication.md)):
@@ -475,7 +434,7 @@ Schema changes are versioned migrations under `clickhouse/migrations/`,
 applied by the `clickhouse-init` container and tracked in the
 `analytics.schema_migrations` ledger. Service accounts follow least
 privilege: `omni_publisher` (write grants on `analytics.*` only) and
-`superset_reader` (SELECT-only; Superset connects in Phase 7). Only the
+`superset_reader` (SELECT-only, reserved for the Superset BI layer). Only the
 HTTP interface is published to the host (`127.0.0.1:8123`); the native
 port stays docker-network-only. Idempotency, rebuild-from-Gold parity,
 and reader permissions are asserted by
