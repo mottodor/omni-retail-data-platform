@@ -19,6 +19,10 @@ x-airflow-env: &airflow-env
   POSTGRES_USER: ${POSTGRES_USER}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
   POSTGRES_DB: ${POSTGRES_DB}
+  # Lakehouse tasks (Phase 5 slice 3): the bronze loader and dbt connect to
+  # Trino over the docker network; defaults live in TrinoConfig/profiles.yml.
+  TRINO_HOST: trino
+  TRINO_PORT: "8080"
 
 x-airflow-volumes: &airflow-volumes
   # DAGs stay thin wrappers (AGENTS §19): helpers and tests are mounted
@@ -26,6 +30,9 @@ x-airflow-volumes: &airflow-volumes
   - ./airflow/dags:/opt/airflow/dags:ro
   - ./airflow/include:/opt/airflow/include:ro
   - ./airflow/tests:/opt/airflow/tests:ro
+  # dbt project for transform_lakehouse (read-only; artifacts go to a per-run
+  # temp dir via --target-path/--log-path).
+  - ./dbt:/opt/airflow/dbt:ro
   - airflow-logs:/opt/airflow/logs
 
 services:
@@ -136,6 +143,10 @@ services:
       POLARIS_REALM_CONTEXT_REALMS: POLARIS
       POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,${POLARIS_CLIENT_ID},${POLARIS_CLIENT_SECRET}
       polaris.features."ALLOW_INSECURE_STORAGE_TYPES": "true"
+      # Trino 483 always issues dropTable(purge=true) on REST catalogs, and
+      # Polaris purge-drops (tables AND views) require this flag; without it
+      # every DROP from Trino fails authorization/feature checks.
+      polaris.features."DROP_WITH_PURGE_ENABLED": "true"
       polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES": '["FILE","S3","GCS","AZURE"]'
       polaris.readiness.ignore-severe-issues: "true"
       # Polaris resolves S3 credentials from the default AWS chain;
@@ -179,6 +190,12 @@ services:
     restart: "no"
 
   trino:
+    # NOTE (known upstream issue, fixed by trinodb/trino#30816 in the
+    # unreleased 484): each catalog operation may fetch a fresh OAuth2 token
+    # against Polaris; under rapid write sequences some requests lose auth
+    # and Polaris answers empty-body 401s. The Bronze loader retries this
+    # transient class (see lakehouse/bronze/loader.py). Bump to 484+ when
+    # the image is published.
     image: trinodb/trino:483
     profiles: ["core"]
     depends_on:

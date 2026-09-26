@@ -14,6 +14,7 @@ test cross-checks the seven OLTP Bronze specs against the snapshot specs so
 the two cannot drift apart silently.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -66,6 +67,38 @@ class BronzeTableSpec:
     def batch_id(self, logical_date: date) -> str:
         """Deterministic logical batch id: ``<source_name>-<yyyymmdd>``."""
         return f"{self.source_name}-{logical_date:%Y%m%d}"
+
+    @property
+    def root_prefix(self) -> str:
+        """Archive-bucket prefix holding every raw object of the source (all dates)."""
+        if self.kind == "postgres":
+            return f"postgres/{self.name}/"
+        return f"api/{self.source_name}/"
+
+    def logical_date_from_key(self, key: str) -> date | None:
+        """Parse the logical date of a raw data-object key under :attr:`root_prefix`.
+
+        Returns ``None`` for keys that do not match the source layout or carry
+        an invalid date (e.g., foreign objects dropped under the prefix): such
+        keys simply do not address a loadable logical date.
+        """
+        prefix = self.root_prefix
+        relative = key[len(prefix) :] if key.startswith(prefix) else key
+        if self.kind == "postgres":
+            match = re.fullmatch(r"(\d{4})/(\d{2})/(\d{2})/.+", relative)
+            if match is None:
+                return None
+            year, month, day = (int(part) for part in match.groups())
+        else:
+            match = re.fullmatch(r"(\d{8})/.+", relative)
+            if match is None:
+                return None
+            stamped = int(match.group(1))
+            year, month, day = stamped // 10000, stamped // 100 % 100, stamped % 100
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
 
     def object_prefix(self, logical_date: date) -> str:
         """Archive-bucket prefix holding the raw objects of one logical date."""

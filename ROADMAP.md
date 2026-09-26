@@ -2,7 +2,7 @@
 
 **Назначение:** pet-project уровня production-like для отработки проектирования DWH/Lakehouse и ETL/ELT-процессов на Windows 11 + WSL2 с 32 GB RAM.
 
-**Основной стек:** Apache Airflow 2.11.2, dbt Core, Trino 476+ (целевой pinned release — 483), Apache Iceberg, PostgreSQL 16+, ClickHouse, Apache Superset, MinIO (S3 API), Apache Kafka, Debezium, Apache Spark, Apache Polaris, OpenLineage + Marquez, Prometheus + Grafana, Docker Compose, GitHub + GitHub Actions. Позже — GitLab CI и Kubernetes.
+**Основной стек:** Apache Airflow 2.11.2, dbt Core 1.10.x (адаптер dbt-trino 1.9.x), Trino 476+ (целевой pinned release — 483), Apache Iceberg, PostgreSQL 16+, ClickHouse, Apache Superset, MinIO (S3 API), Apache Kafka, Debezium, Apache Spark, Apache Polaris, OpenLineage + Marquez, Prometheus + Grafana, Docker Compose, GitHub + GitHub Actions. Позже — GitLab CI и Kubernetes.
 
 > Принцип проекта: сначала рабочая вертикаль end-to-end, затем усложнение. Каждая новая технология должна решать конкретную инженерную задачу, а не добавляться «для галочки».
 
@@ -108,91 +108,73 @@ swap=8GB
 
 Не запускать весь стек постоянно. Docker Compose разбить на profiles:
 
-- `core`: PostgreSQL, MinIO, Polaris, Trino, ClickHouse;
+- `core`: PostgreSQL, MinIO, Polaris, Trino;
 - `orchestration`: Airflow + metadata PostgreSQL + Redis при необходимости;
 - `streaming`: Kafka + Kafka Connect/Debezium;
 - `spark`: Spark master/worker;
 - `observability`: Prometheus, Grafana, Marquez;
-- `bi`: Superset.
+- `bi`: ClickHouse + Superset.
 
 ## 5. Структура репозитория
+
+Фактическая структура репозитория (src-layout: Python-код живет в пакете `src/omni_retail`):
 
 ```text
 omni-retail-data-platform/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml
-│       ├── integration.yml
-│       ├── docker-images.yml
-│       └── release.yml
+│       └── ci.yml
 ├── airflow/
 │   ├── dags/
 │   ├── include/
-│   ├── plugins/
 │   └── tests/
 ├── dbt/
+│   ├── macros/
 │   ├── models/
 │   │   ├── staging/
 │   │   ├── intermediate/
 │   │   ├── core/
 │   │   └── marts/
-│   ├── macros/
-│   ├── seeds/
-│   ├── snapshots/
 │   └── tests/
-├── ingestion/
-│   ├── api/
-│   ├── files/
-│   ├── postgres/
-│   └── common/
-├── generators/
-│   ├── oltp/
-│   ├── clickstream/
-│   └── vendor_files/
-├── spark/
-│   ├── jobs/
-│   └── tests/
-├── kafka/
-│   ├── producers/
-│   ├── schemas/
-│   └── connect/
-├── trino/
-│   └── catalogs/
-├── clickhouse/
-│   ├── migrations/
-│   └── tests/
-├── postgres/
-│   ├── init/
-│   └── migrations/
-├── superset/
-│   ├── dashboards/
-│   └── config/
-├── observability/
-│   ├── prometheus/
-│   ├── grafana/
-│   └── marquez/
 ├── infrastructure/
-│   ├── compose/
-│   └── scripts/
+│   ├── airflow/            # кастомный образ Airflow (Dockerfile, ADR 0003)
+│   ├── mock_api/           # mock API сервис (ADR 0002)
+│   └── scripts/            # minio/polaris init, smoke-тесты
+├── postgres/
+│   └── init/               # идемпотентный OLTP DDL
+├── src/
+│   └── omni_retail/        # Python-пакет (src-layout)
+│       ├── generators/     # oltp/, vendor_files/
+│       ├── ingestion/      # api/, files/, postgres_snapshot/, common/
+│       └── lakehouse/      # bronze/
 ├── tests/
-│   ├── unit/
+│   ├── fakes/
 │   ├── integration/
-│   └── e2e/
+│   └── unit/
+├── trino/
+│   └── etc/                # конфигурация Trino
 ├── docs/
-│   ├── architecture.md
-│   ├── data-model.md
 │   ├── adr/
 │   ├── runbooks/
-│   └── diagrams/
+│   └── ...                 # data-model.md, data-contracts.md и т.д.
 ├── docker-compose.yml
-├── docker-compose.override.yml
 ├── Makefile
 ├── pyproject.toml
+├── uv.lock
 ├── .env.example
 ├── AGENTS.md
 ├── ROADMAP.md
 └── README.md
 ```
+
+Каталоги будущих фаз создаются только при наступлении соответствующей фазы, не заранее:
+
+- Phase 6: `clickhouse/` (migrations, tests);
+- Phase 7: `superset/` (dashboards, config);
+- Phase 8: `kafka/` (producers, schemas, connect);
+- Phase 9: `spark/` (jobs, tests) + `src/omni_retail/generators/clickstream/`;
+- Phase 12: `observability/` (prometheus, grafana, marquez);
+- `postgres/migrations/` — при появлении версионных миграций OLTP-схемы.
 
 ## 6. Правила работы с AI-агентом
 
@@ -1125,6 +1107,7 @@ Before finishing:
 - Container registry: GHCR.
 - GitLab CI: отдельный поздний migration exercise.
 - Airflow baseline: 2.11.2; затем отдельная миграция на Airflow 3.
+- dbt Core: baseline 1.10.x, адаптер dbt-trino 1.9.x; диапазоны закреплены в `pyproject.toml`, точные версии — в `uv.lock`.
 - Trino: требование 476+, конкретный release pin фиксируется в compose и Dependabot/Renovate обновляет через PR; initial target — 483.
 - ClickHouse: serving layer, не master storage.
 - Iceberg: source of truth.

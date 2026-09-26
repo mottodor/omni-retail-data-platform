@@ -54,6 +54,31 @@ def test_object_prefixes_match_raw_layout() -> None:
     assert TABLES["fx_rates"].object_prefix(LOGICAL_DATE) == "api/fx-rates/20260918/"
 
 
+def test_root_prefixes_address_every_date_of_a_source() -> None:
+    assert TABLES["orders"].root_prefix == "postgres/orders/"
+    assert TABLES["order_items"].root_prefix == "postgres/order_items/"
+    assert TABLES["fx_rates"].root_prefix == "api/fx-rates/"
+
+
+def test_logical_date_from_key_parses_both_layouts() -> None:
+    assert (
+        TABLES["orders"].logical_date_from_key("postgres/orders/2026/09/18/data.parquet")
+        == LOGICAL_DATE
+    )
+    assert (
+        TABLES["fx_rates"].logical_date_from_key("api/fx-rates/20260918/page_0001.json")
+        == LOGICAL_DATE
+    )
+
+
+def test_logical_date_from_key_ignores_foreign_and_malformed_keys() -> None:
+    spec = TABLES["orders"]
+    assert spec.logical_date_from_key("postgres/orders/notes.txt") is None
+    assert spec.logical_date_from_key("postgres/orders/2026/13/45/data.parquet") is None
+    assert spec.logical_date_from_key("postgres/shipments/2026/09/18/data.parquet") is None
+    assert TABLES["fx_rates"].logical_date_from_key("api/fx-rates/20261345/page_0001.json") is None
+
+
 def test_service_columns_are_last_and_partition_on_batch_date() -> None:
     assert [column.name for column in SERVICE_COLUMNS] == [
         "_batch_id",

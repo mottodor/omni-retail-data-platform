@@ -22,6 +22,15 @@ from typing import Any
 
 REQUEST_TIMEOUT_SECONDS = 15
 
+#: Role auto-created by Polaris for every catalog; the grant target.
+CATALOG_ADMIN_ROLE = "catalog_admin"
+
+#: Content privileges the Trino principal needs for the full table/view
+#: lifecycle (create, drop, purge-drop). The auto-created catalog_admin only
+#: carries CATALOG_MANAGE_ACCESS/METADATA, which does not cover Trino's
+#: dropTable(purge=true) — root cause of the slice-1 teardown workaround.
+REQUIRED_CATALOG_PRIVILEGES = ("CATALOG_MANAGE_CONTENT",)
+
 
 def build_catalog_payload(
     *,
@@ -141,6 +150,75 @@ def create_catalog(
         )
 
 
+def list_catalog_role_grants(
+    *,
+    base_url: str,
+    token: str,
+    realm: str,
+    catalog_name: str,
+    catalog_role_name: str = CATALOG_ADMIN_ROLE,
+) -> list[dict[str, Any]]:
+    """List grants held by a catalog role (management API)."""
+    status, payload = _management_request(
+        method="GET",
+        url=(
+            f"{base_url}/api/management/v1/catalogs/{catalog_name}"
+            f"/catalog-roles/{catalog_role_name}/grants"
+        ),
+        token=token,
+        realm=realm,
+    )
+    if status != 200 or payload is None:
+        raise RuntimeError(
+            f"failed to list grants of {catalog_role_name!r} in {catalog_name}: "
+            f"status={status} body={payload}"
+        )
+    grants = payload.get("grants")
+    if not isinstance(grants, list):
+        raise RuntimeError(f"unexpected grants payload for {catalog_role_name!r}: {payload}")
+    return grants
+
+
+def decide_grant_action(grants: list[dict[str, Any]]) -> str:
+    """Return the grant step action: grant missing privileges or skip."""
+    present = {
+        (grant.get("type"), grant.get("privilege")) for grant in grants if isinstance(grant, dict)
+    }
+    missing = [
+        privilege
+        for privilege in REQUIRED_CATALOG_PRIVILEGES
+        if ("catalog", privilege) not in present
+    ]
+    return "skip" if not missing else "grant"
+
+
+def grant_catalog_privilege(
+    *,
+    base_url: str,
+    token: str,
+    realm: str,
+    catalog_name: str,
+    privilege: str,
+    catalog_role_name: str = CATALOG_ADMIN_ROLE,
+) -> None:
+    """Add one catalog-level privilege to a catalog role (PUT adds, POST revokes)."""
+    status, response = _management_request(
+        method="PUT",
+        url=(
+            f"{base_url}/api/management/v1/catalogs/{catalog_name}"
+            f"/catalog-roles/{catalog_role_name}/grants"
+        ),
+        token=token,
+        realm=realm,
+        body={"type": "catalog", "privilege": privilege},
+    )
+    if status not in (200, 201, 409):
+        raise RuntimeError(
+            f"failed to grant {privilege} to {catalog_role_name!r} in {catalog_name}: "
+            f"status={status} body={response}"
+        )
+
+
 def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -176,9 +254,23 @@ def main() -> int:
             base_url=base_url, token=token, realm=realm, payload=payload, catalog_name=catalog_name
         )
 
+    grants = list_catalog_role_grants(
+        base_url=base_url, token=token, realm=realm, catalog_name=catalog_name
+    )
+    grant_action = decide_grant_action(grants)
+    if grant_action == "grant":
+        for privilege in REQUIRED_CATALOG_PRIVILEGES:
+            grant_catalog_privilege(
+                base_url=base_url,
+                token=token,
+                realm=realm,
+                catalog_name=catalog_name,
+                privilege=privilege,
+            )
+
     print(
         f"polaris_init: catalog={catalog_name} base_location={base_location} "
-        f"storage_endpoint={endpoint} action={action}"
+        f"storage_endpoint={endpoint} action={action} content_grant={grant_action}"
     )
     return 0
 
