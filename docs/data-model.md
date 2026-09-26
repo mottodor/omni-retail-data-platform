@@ -172,3 +172,80 @@ downstream facts/dimensions.
   `int_fx_rates_daily`; facts keep source currency;
 - snapshot extracts hide hard deletes until CDC (Phase 8);
 - SCD2 versions have daily granularity (see above).
+
+## Analytics marts (Phase 5 slice 3)
+
+The `analytics` schema holds the business-facing marts for the four planned
+dashboards. All EUR measures are normalized through `int_orders_fx` — an
+order-grain intermediate view shared by the marts: `rate_to_eur` is the latest
+`int_fx_rates_daily` rate on or before the order date ("latest", not "exact
+day", so ingestion gaps do not strand orders), in units of the order currency
+per 1 EUR; the fx API quotes no EUR row, so EUR orders carry rate 1.0. An
+order older than every rate keeps `rate_to_eur` NULL and is surfaced by the
+`marts_fx_rate_coverage` business test (fail-loud policy). Facts keep source
+currency.
+
+| Mart | Grain | PK | Measures | Notes |
+|---|---|---|---|---|
+| `mart_daily_sales` | one row per (order date, product category, customer region) | the combination (order_date, category_name, region) | `orders_count`, `items_sold`, `revenue_eur`, `margin_eur` | realized-revenue policy; `orders_count` additivity caveat (below) |
+| `mart_customer_ltv` | one row per customer with at least one order | `customer_id` | `orders_count`, `gmv_eur`, `avg_order_value_eur` | `region`/`segment` from the customer's **current** SCD2 version |
+| `mart_marketing_roi` | one row per campaign (current API snapshot) | `campaign_id` | `spend_eur`, `budget_eur`, `impressions`, `clicks`, `ctr`, `cpc_eur`, `cpm_eur`, `budget_utilization` | no ROAS — campaigns are not linked to orders (see below) |
+| `mart_delivery_performance` | one row per carrier (delivery-partner API feed) | `carrier` | `delivery_count`, per-status counts, `avg_transit_hours`, `last_update_at` | independent of `fact_shipments` (see below) |
+
+Per-mart semantics (source of truth: `dbt/models/marts/schema.yml`):
+
+- `mart_daily_sales` — GMV/revenue/margin roll-ups for the Revenue and Sales
+  dashboards. Financial measures (`items_sold`, `revenue_eur`, `margin_eur`)
+  cover realized orders only (cancelled/refunded excluded); `orders_count`
+  includes all orders. **`orders_count` is additive across dates but NOT
+  across category/region** — a multi-category order counts once per row.
+  `revenue_eur` is item-line revenue excluding shipping (shipping is
+  order-grain and stays in `fact_orders`/`int_orders_fx`). `region` is the
+  customer's point-in-time version (order `customer_key` → `dim_customer`).
+  Known simplification (mock source): product prices are currency-naive; line
+  amounts are normalized with the order currency's FX rate.
+- `mart_customer_ltv` — retention/LTV/activation analysis. `gmv_eur` is
+  realized order value (`order_total` incl. shipping, EUR); `orders_count`
+  counts every order (activity); `avg_order_value_eur` = `gmv_eur` / realized
+  orders — NULL only for customers whose every order is cancelled/refunded.
+  Reporting today's segmentation, not point-in-time, is a documented choice.
+- `mart_marketing_roi` — spend/CTR/CPC/CPM monitoring. Derived media KPIs are
+  null-safe (zero impressions/clicks → NULL, never an error);
+  `budget_utilization` can exceed 1.0 (the source overspends up to 5 %).
+  LIMITATION (spec §2): campaigns are not linked to orders, so revenue
+  attribution is impossible with current data — no ROAS is computed and none
+  may be faked; ROAS arrives with clickstream attribution (Phase 9).
+- `mart_delivery_performance` — carrier scorecard (transit times, status mix).
+  Fixed status columns follow the API status domain; the counts-sum business
+  test makes an unknown new status loud instead of silently dropped.
+  `avg_transit_hours` averages deliveries with both `shipped_at` and
+  `delivered_at` (NULL only when the carrier has no completed deliveries
+  yet). The feed's `order_id` values are the partner's synthetic references
+  ("ORD-…") and never join OLTP orders — this mart is independent of
+  `fact_shipments`, which serves OLTP shipments.
+
+## Serving layer (ClickHouse, Phase 6)
+
+The `analytics` database in ClickHouse holds derived serving copies of the
+Gold marts ([ADR 0004](adr/0004-clickhouse-serving-publication.md)). Iceberg
+stays the source of truth; every serving table is a 1:1 mirror of its Gold
+mart — same columns, no ClickHouse-only business logic — and is rebuildable
+with one command (`make serving-rebuild ARGS="--mart mart_daily_sales"`).
+
+| Serving table | Mirrors (Trino) | ORDER BY | Engine |
+|---|---|---|---|
+| `analytics.mart_daily_sales` (+ `_staging` twin) | `iceberg.analytics.mart_daily_sales` | `(order_date, category_name, region)` — the mart grain | MergeTree |
+
+Type mapping for the slice-1 mart: Trino `integer` → `Int32`, `date` →
+`Date`, `varchar` → `String`, `bigint` counts → `UInt64`; money columns
+mirror the Gold types exactly (`revenue_eur` `decimal(38,21)` →
+`Decimal(38, 21)`, `margin_eur` `decimal(38,6)` → `Decimal(38, 6)`) so
+values round-trip 1:1 — the scales are Trino decimal-division artifacts,
+and normalizing them would be a deliberate slice 2 decision taken with a
+migration. Engine, partitioning, and TTL choices are re-evaluated per mart
+in Phase 6 slice 2 (none yet). Publication mode for every mart is a
+**full snapshot swap**: `TRUNCATE staging` → insert → `EXCHANGE TABLES`
+(see `src/omni_retail/serving/clickhouse/publisher.py`). `superset_reader`
+has SELECT-only access; `omni_publisher` holds the write grants;
+`analytics.schema_migrations` tracks the applied files from
+`clickhouse/migrations/`.

@@ -55,8 +55,9 @@ Detailed current state — slice-level status, current focus, deferred follow-up
 - [x] Phase 2 — OLTP model and deterministic data generator
 - [x] Phase 3 — batch ingestion (CSV/JSON/Parquet/XLSX files, mock API service, retries, backfill, live integration tests)
 - [x] Phase 4 — Airflow orchestration (LocalExecutor, 5 ingestion DAGs, PG snapshot extraction, DAG tests in CI)
-- [ ] Phase 5 — dbt + Trino lakehouse (in progress — see [PROGRESS.md](PROGRESS.md) for slice detail)
-- [ ] Phases 6+ — not started (serving, BI, CDC, Spark, data quality, observability)
+- [x] Phase 5 — dbt + Trino lakehouse (Bronze → Silver → Gold, analytics marts, dataset-triggered orchestration)
+- [ ] Phase 6 — ClickHouse serving layer (in progress — slice 1: `mart_daily_sales` published via atomic staging swap)
+- [ ] Phases 7+ — not started (BI, CDC, Spark, data quality, observability)
 
 ## Prerequisites
 
@@ -329,6 +330,78 @@ contract (grain, PK, measures, upstream) and is covered by built-in and
 singular business tests, including the orders ↔ payments reconciliation.
 Run against the live core stack with `make dbt-build`; the model reference
 lives in `docs/data-model.md`.
+
+## Lakehouse orchestration (Phase 5 slice 3)
+
+The same `dbt build` also produces the `analytics` marts (`mart_daily_sales`,
+`mart_customer_ltv`, `mart_marketing_roi`, `mart_delivery_performance`; grain
+and measures in `docs/data-model.md`), and the lakehouse transforms are wired
+into Airflow with **Datasets** (data-aware scheduling) instead of a wall-clock
+schedule:
+
+```text
+ingest_postgres_snapshot | ingest_fx_api | ingest_marketing_api | ingest_delivery_api
+        │  outlets: raw://<source>
+        ▼
+load_bronze            watermark-driven sweep: per source, every archived
+                       logical date > max(_batch_date), ascending
+        │  outlet: lakehouse://bronze
+        ▼
+transform_lakehouse    full dbt build (staging → intermediate → core →
+                       marts, plus built-in and singular tests)
+```
+
+- `load_bronze` never relies on its own logical date (which does not equal the
+  producer's), so a dataset re-trigger between ingestion batches is an
+  idempotent no-op;
+- `transform_lakehouse` runs the dbt CLI in the worker process —
+  transformation SQL lives in the dbt project, never in the DAG;
+- both DAGs use bounded task retries (safe to re-run: per-day loads are
+  partition-scoped, dbt tables rebuild), `max_active_runs=1`, and start paused;
+- supplier files reach the raw archive but are not loaded into Bronze yet
+  (deferred follow-up), so `ingest_supplier_files` emits none of the consumed
+  `raw://` datasets.
+
+Dataset wiring is asserted by the DAG structure tests (`make airflow-test`);
+the exact task code paths — watermark sweep, idempotent re-trigger, full
+build — by the live integration test
+`tests/integration/test_lakehouse_orchestration.py` (`make integration`).
+
+```bash
+make up             # core profile first (postgres, minio, mock-api)
+make airflow-up     # orchestration profile; UI at http://127.0.0.1:8081
+# unpause load_bronze / transform_lakehouse, trigger any ingestion DAG,
+# then watch Datasets -> lakehouse://bronze in the Airflow UI
+make airflow-dag-test ARGS="load_bronze 2026-09-18"
+make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"
+```
+
+## ClickHouse serving layer (Phase 6, slice 1)
+
+Gold marts are published from Iceberg to ClickHouse as a rebuildable,
+read-only-for-BI serving copy ([ADR 0004](docs/adr/0004-clickhouse-serving-publication.md)):
+the publisher reads a full mart snapshot through Trino, inserts it into a
+`_staging` twin, and atomically swaps the pair with `EXCHANGE TABLES` — BI
+never sees a partial publish, and re-running a publish can never duplicate
+rows. Routine refresh, retry after failure, and rebuild share this one code
+path.
+
+```bash
+make bi-up            # profile bi: ClickHouse + one-shot versioned migrations
+make serving-publish ARGS="--mart mart_daily_sales"
+make serving-rebuild ARGS="--mart mart_daily_sales"   # drop-safe: recreate DDL + republish
+```
+
+Schema changes are versioned migrations under `clickhouse/migrations/`,
+applied by the `clickhouse-init` container and tracked in the
+`analytics.schema_migrations` ledger. Service accounts follow least
+privilege: `omni_publisher` (write grants on `analytics.*` only) and
+`superset_reader` (SELECT-only; Superset connects in Phase 7). Only the
+HTTP interface is published to the host (`127.0.0.1:8123`); the native
+port stays docker-network-only. Idempotency, rebuild-from-Gold parity,
+and reader permissions are asserted by
+`tests/integration/test_serving_publication.py`
+(`make up && make bi-up && make integration`).
 
 ## CI
 
