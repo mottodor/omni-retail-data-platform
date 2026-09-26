@@ -97,20 +97,26 @@ def dataset_uris(dag_bag: DagBag, dag_id: str) -> set[str]:
     """URIs of the datasets a dataset-scheduled DAG is triggered by."""
     timetable = dag_bag.dags[dag_id].timetable
     assert isinstance(timetable, DatasetTriggeredTimetable), f"{dag_id} is not dataset-scheduled"
-    return {dataset.uri for dataset in timetable.dataset_condition.iter_datasets()}
+    # Airflow 2.11: iter_datasets() yields (name, Dataset) tuples.
+    return {name for name, _dataset in timetable.dataset_condition.iter_datasets()}
 
 
 def test_load_bronze_is_triggered_by_raw_datasets(dag_bag: DagBag) -> None:
+    # Expected URIs go through Dataset() because Airflow 2.11 normalizes
+    # URIs (e.g. appends a trailing slash) inside the constructor.
     assert dataset_uris(dag_bag, "load_bronze") == {
-        "raw://postgres-snapshot",
-        "raw://fx-rates",
-        "raw://marketing-campaigns",
-        "raw://deliveries",
+        Dataset(uri).uri
+        for uri in (
+            "raw://postgres-snapshot",
+            "raw://fx-rates",
+            "raw://marketing-campaigns",
+            "raw://deliveries",
+        )
     }
 
 
 def test_transform_lakehouse_is_triggered_by_bronze_dataset(dag_bag: DagBag) -> None:
-    assert dataset_uris(dag_bag, "transform_lakehouse") == {"lakehouse://bronze"}
+    assert dataset_uris(dag_bag, "transform_lakehouse") == {Dataset("lakehouse://bronze").uri}
 
 
 @pytest.mark.parametrize("dag_id", sorted(INGESTION_DAG_IDS))
