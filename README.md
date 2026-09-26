@@ -404,7 +404,7 @@ view of the Airflow UI.
 
 ```text
 src/omni_retail/    Python package: ingestion (files, api, postgres_snapshot),
-                   generators, lakehouse (bronze)
+                   generators, lakehouse (bronze), serving (clickhouse publisher)
 dbt/               dbt project: staging → intermediate → core → marts
 airflow/           DAGs, dataset definitions, shared policy and runners
 postgres/          OLTP schema DDL (idempotent, applied on first volume init)
@@ -413,6 +413,27 @@ trino/             Trino configuration
 tests/             unit tests + opt-in integration tests (OMNI_INTEGRATION=1)
 docs/              data model, data contracts, ADRs, runbooks, agent guides
 ```
+
+## Documentation map
+
+Each documentation artifact has a single role:
+
+| Document | Owns |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Core rules for AI coding agents: invariants, workflow, Definition of Done, prohibitions, phase gates; routes to the topical guides |
+| [docs/agent/](docs/agent/) | Normative topical guides (ingestion, dbt modeling, lakehouse, Airflow, reliability, testing, …) — read on demand via the AGENTS.md routing table |
+| [docs/adr/](docs/adr/README.md) | Architecture Decision Records (index, template); significant decisions only |
+| [ROADMAP.md](ROADMAP.md) | Phases, scope, acceptance criteria, target architecture, repository structure |
+| [PROGRESS.md](PROGRESS.md) | Current state only: phase/slice status, current focus, deferred follow-ups |
+| [docs/plans/active.md](docs/plans/active.md) | Execution detail of the single active task (session-resume checklist; removed when the phase closes) |
+| [docs/data-model.md](docs/data-model.md) | Table documentation, grain, source metrics |
+| [docs/data-contracts.md](docs/data-contracts.md) | Source data contracts |
+| [docs/runbooks/](docs/runbooks/) | Operational failure runbooks |
+
+Precedence on conflict: explicit request > AGENTS.md (core + guides) > accepted
+ADRs > ROADMAP.md > existing conventions. The audit trail of *when* things
+changed is git history — these documents describe only the current state and
+the rules that govern changing it.
 
 ## ClickHouse serving layer
 

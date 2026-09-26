@@ -10,9 +10,9 @@ Contract:
 - status only — no narratives, no plan copies; keep under ~100 lines;
 - updated in the same PR/commit as the work it reflects (AGENTS.md §6, DoD);
 - read at session start (AGENTS.md §5.1); updated whenever a task changes
-  phase/slice status, the current focus, or the deferred list (AGENTS.md §49).
-
-Last updated: 2026-09-25.
+  phase/slice status, the current focus, or the deferred list (AGENTS.md §49);
+- no manually maintained "last updated" date: the date of any change is the
+  commit date (`git log -1 --date=short -- PROGRESS.md`).
 
 ## Current focus
 

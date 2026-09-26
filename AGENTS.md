@@ -18,7 +18,7 @@ Before changing code, always read:
 1. `AGENTS.md` (this file) — mandatory engineering and agent rules.
 2. The topical guide(s) under `docs/agent/` that match the task — routing table below.
 3. `ROADMAP.md` — implementation order, scope, acceptance criteria, and target architecture.
-4. Relevant files under `docs/adr/` — architectural decisions already made.
+4. Relevant files under `docs/adr/` (index: `docs/adr/README.md`) — architectural decisions already made.
 5. Relevant tests and current implementation.
 
 When instructions conflict, use this precedence:
@@ -71,36 +71,15 @@ Sections that remain in this core file: §1–8, §10–11, §43, §47–49, §5
 
 ## 2. Project objective
 
-OmniRetail is a production-like e-commerce data platform intended to demonstrate practical Data Engineering skills:
+OmniRetail is a production-like e-commerce data platform intended to
+demonstrate commercial-grade Data Engineering practices: reproducible,
+testable, observable, and explainable.
 
-- batch ingestion;
-- REST API ingestion;
-- file/S3 ingestion;
-- PostgreSQL OLTP extraction;
-- CDC;
-- event streaming;
-- lakehouse architecture;
-- Iceberg table management;
-- SQL transformation with dbt;
-- analytical modeling;
-- ClickHouse serving;
-- BI with Apache Superset;
-- orchestration with Apache Airflow;
-- distributed processing with Spark where justified;
-- data quality;
-- observability;
-- lineage;
-- CI/CD;
-- failure recovery;
-- idempotency and backfills;
-- performance engineering.
+What the platform must deliver — the capability list, business scenario, and
+target architecture — is defined in `ROADMAP.md` §1–§3.
 
-The project must remain suitable for a local workstation:
-
-- Windows 11;
-- WSL2;
-- 32 GB physical RAM;
-- Docker Compose as the primary runtime.
+The platform must remain suitable for a single local workstation; environment
+constraints are defined in `ROADMAP.md` §4.
 
 ---
 
@@ -110,33 +89,18 @@ The following decisions are already accepted and MUST NOT be changed without an 
 
 ### 3.1 Core stack
 
-- Python 3.12 baseline.
-- Apache Airflow 2.11.2 baseline.
-- dbt Core 1.10.x baseline; dbt-trino adapter 1.9.x; exact versions locked in `uv.lock`.
-- Trino 476+; initial pinned target is Trino 483.
-- Apache Iceberg.
-- Apache Polaris as Iceberg REST catalog.
-- PostgreSQL 16+.
-- ClickHouse.
-- Apache Superset.
-- MinIO as local S3-compatible object storage.
-- Apache Kafka.
-- Debezium.
-- Apache Spark.
-- Prometheus.
-- Grafana.
-- OpenLineage.
-- Marquez.
-- Docker Compose.
-- GitHub.
-- GitHub Actions.
-- GHCR.
+The technology stack is fixed: it is defined in `ROADMAP.md` §3 (final
+architecture and component responsibilities); pinned baselines are recorded in
+`ROADMAP.md` ("Технические решения, зафиксированные на старте") and
+ADR 0001; exact Python versions live in the committed `uv.lock` (§11).
 
-Later exercises:
+Any change to the stack requires an ADR (§42,
+`docs/agent/engineering-practices.md`).
 
-- Airflow 2 -> Airflow 3 migration;
-- GitHub Actions -> GitLab CI migration;
-- Kubernetes only after the Docker Compose platform is complete.
+Later exercises — Airflow 2 -> 3 migration, GitHub Actions -> GitLab CI,
+Kubernetes only after the Docker Compose platform is complete — are scheduled
+by `ROADMAP.md` (phases 16–17 and the "Later" section) and must not be started
+early.
 
 ### 3.2 Storage and serving responsibilities
 
@@ -182,31 +146,17 @@ Use:
 
 Do not build the final architecture all at once.
 
-The project follows a **vertical-slice-first** strategy.
+The project follows a **vertical-slice-first** strategy: the first slice must
+work end-to-end — source -> Bronze -> dbt Silver/Gold -> serving -> BI
+(diagram in ADR 0001) — before any later-phase technology enters.
 
-The first working end-to-end slice is:
+Phase sequence, scope, and acceptance criteria are owned by `ROADMAP.md`; the
+issue sequence follows its backlog.
 
-```text
-PostgreSQL
-    ->
-batch extraction
-    ->
-MinIO
-    ->
-Iceberg Bronze
-    ->
-Trino + dbt
-    ->
-Gold mart
-    ->
-ClickHouse
-    ->
-Superset
-```
-
-Do not introduce Kafka, Debezium, Spark, Marquez, or full observability before the first slice works end-to-end unless the current GitHub issue explicitly belongs to those later phases.
-
-The initial issue sequence is expected to follow the backlog in `ROADMAP.md`.
+Do not introduce Kafka, Debezium, Spark, Marquez, or full observability
+before the current roadmap phase requires them, unless the current GitHub
+issue explicitly belongs to those later phases (see also the phase gates,
+§51).
 
 ---
 
@@ -302,40 +252,19 @@ A change is complete when all applicable conditions are satisfied:
 
 ## 7. Repository structure
 
-Follow the repository structure defined by `ROADMAP.md`.
+The repository layout (src-layout) is defined and kept current in
+`ROADMAP.md` §5 — do not duplicate the tree here.
 
-Expected top-level layout (src-layout: Python code lives in the `src/omni_retail` package):
+Rules:
 
-```text
-.github/
-airflow/
-dbt/
-infrastructure/
-postgres/
-src/
-trino/
-tests/
-docs/
-docker-compose.yml
-Makefile
-pyproject.toml
-uv.lock
-.env.example
-AGENTS.md
-PROGRESS.md
-ROADMAP.md
-README.md
-```
-
-Python code lives under `src/omni_retail/` (`ingestion/`, `generators/`, `lakehouse/`); custom Dockerfiles and init scripts live under `infrastructure/` (`airflow/`, `mock_api/`, `scripts/`).
-
-Agent topical guides live under `docs/agent/` (see routing table above).
-
-Directories for later phases (`clickhouse/`, `superset/`, `kafka/`, `spark/`, `observability/`) are created only when their roadmap phase is reached, not in advance.
-
-Do not create alternative top-level directories for existing concerns without a clear reason.
-
-Prefer grouping configuration with its owning component.
+- Python code lives under `src/omni_retail/`;
+- custom Dockerfiles and init scripts live under `infrastructure/`;
+- agent topical guides live under `docs/agent/` (see the routing table above);
+- directories for later phases are created only when their roadmap phase is
+  reached, not in advance (the per-phase list is in `ROADMAP.md` §5);
+- do not create alternative top-level directories for existing concerns
+  without a clear reason;
+- prefer grouping configuration with its owning component.
 
 ---
 
@@ -546,7 +475,8 @@ This rule is especially important for AI-generated refactors.
 
 ## 48. Prohibited patterns
 
-Agents MUST NOT:
+Agents MUST NOT (consolidated enforcement checklist — some items intentionally
+restate rules from earlier sections):
 
 - rewrite the repository without need;
 - add technologies for novelty;

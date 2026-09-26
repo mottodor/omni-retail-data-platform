@@ -136,6 +136,7 @@ omni-retail-data-platform/
 │   │   ├── core/
 │   │   └── marts/
 │   └── tests/
+├── clickhouse/             # ClickHouse migrations и тесты (Phase 6, ADR 0004)
 ├── infrastructure/
 │   ├── airflow/            # кастомный образ Airflow (Dockerfile, ADR 0003)
 │   ├── mock_api/           # mock API сервис (ADR 0002)
@@ -146,7 +147,8 @@ omni-retail-data-platform/
 │   └── omni_retail/        # Python-пакет (src-layout)
 │       ├── generators/     # oltp/, vendor_files/
 │       ├── ingestion/      # api/, files/, postgres_snapshot/, common/
-│       └── lakehouse/      # bronze/
+│       ├── lakehouse/      # bronze/
+│       └── serving/        # clickhouse/ (публикация Gold, Phase 6)
 ├── tests/
 │   ├── fakes/
 │   ├── integration/

@@ -1,7 +1,5 @@
 # ADR NNNN — <Short decision title>
 
-## Title
-
 ## Status
 
 <!-- Proposed | Accepted | Deprecated | Superseded by ADR-NNNN -->
