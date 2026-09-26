@@ -16,10 +16,13 @@ Last updated: 2026-09-26.
 
 ## Current focus
 
-Active plan: `docs/plans/active.md` — task 4 of slice 3: README slice-3
-section (dataset-triggered lakehouse orchestration) and `docs/data-model.md`
-marts tables. Task 3 (live integration test over the `run_bronze_load` ->
-`run_dbt_build` runners, incl. idempotency leg) is done.
+Active plan: `docs/plans/active.md` — task 4 of slice 3, tail:
+`docs/data-model.md` marts tables. The README half is done: restructured
+2026-09-26 by user request into a capability-oriented, phase-free document
+(state as of today; target architecture marked "target"; grouped Commands;
+new Project layout section; slice-3 lakehouse orchestration and marts
+content included). Task 3 (live integration test over the `run_bronze_load`
+-> `run_dbt_build` runners, incl. idempotency leg) is done.
 
 Phase 5 slice 3 tail — lakehouse orchestration. All pipeline work merged:
 `int_orders_fx` + four analytics marts with EUR normalization;
