@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration bi-up bi-down serving-publish serving-rebuild airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -70,8 +70,22 @@ dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select
 dbt-test: ## Run dbt tests. ARGS="--select staging"
 	@bash -c 'set -a; source .env; set +a; $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
 
-integration: ## Run integration tests against the live core stack (requires `make up`)
+integration: ## Run integration tests against the live stacks (requires `make up`; ClickHouse tests also need `make bi-up`)
 	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'
+
+BI_COMPOSE := docker compose --profile bi
+
+bi-up: ## Start the ClickHouse serving layer (profile bi; requires the core profile up)
+	$(BI_COMPOSE) up -d --wait
+
+bi-down: ## Stop the bi profile services (the clickhouse-data volume is preserved)
+	$(BI_COMPOSE) down
+
+serving-publish: ## Publish a Gold mart to ClickHouse. ARGS="--mart mart_daily_sales"
+	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
+
+serving-rebuild: ## Rebuild a serving mart from Iceberg Gold. ARGS="--mart mart_daily_sales"
+	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.serving.clickhouse rebuild $(ARGS)'
 
 AIRFLOW_COMPOSE := docker compose --profile orchestration
 

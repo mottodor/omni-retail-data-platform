@@ -90,7 +90,13 @@ EXPECTED_ORCHESTRATION_SERVICES = {
 }
 
 # Services that run to completion and therefore must not have healthchecks.
-ONE_SHOT_SERVICES = {"minio-init", "polaris-bootstrap", "polaris-init", "airflow-init"}
+ONE_SHOT_SERVICES = {
+    "minio-init",
+    "polaris-bootstrap",
+    "polaris-init",
+    "airflow-init",
+    "clickhouse-init",
+}
 
 
 def _load_compose() -> dict[str, Any]:
