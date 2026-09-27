@@ -94,9 +94,22 @@ Dashboard/dataset metadata built in the UI is exported (ZIP bundle via the
 Superset import/export v1 format) and committed under `superset/assets/`;
 `superset-init` re-imports it on every bootstrap, so the repository stays the
 source of truth for BI assets and a clean clone converges to the same BI
-state. Connection objects are the only secret-bearing entities and are never
-exported — they are always created from `.env` by the init script
-(AGENTS.md §10).
+state. Two mechanisms keep that loop safe and deterministic:
+
+- exported bundles are sanitized before committing
+  (`infrastructure/scripts/superset_bundle_sanitize.py`): the exporter
+  includes a `databases/` YAML with the full SQLAlchemy URI (credentials
+  included) — it is stripped, `metadata.yaml` is canonicalized to the
+  `type: assets` form the assets importer requires, and the archive is
+  rewritten deterministically (stable root folder, fixed timestamps);
+- the two connections carry **fixed UUIDs** pinned in the init script.
+  Dataset exports reference their database by UUID; at import time the init
+  script injects an env-built database config with that UUID into the
+  in-memory contents, so imports resolve against the `.env`-created
+  connection instead of a YAML file. Connection objects are the only
+  secret-bearing entities: they are never exported and always re-created
+  from `.env` (AGENTS.md §10) — the committed `superset/assets/` tree is
+  guarded by unit tests.
 
 ### Secrets and configuration
 

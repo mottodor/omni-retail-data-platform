@@ -32,6 +32,14 @@ from urllib.parse import quote_plus
 CLICKHOUSE_CONNECTION_NAME = "ClickHouse analytics"
 TRINO_CONNECTION_NAME = "Trino iceberg"
 
+#: Fixed connection identities. Exported BI bundles reference databases by
+#: UUID, so every environment must converge on the same UUIDs for imports to
+#: resolve against the connections this script creates from ``.env`` — that
+#: is what keeps credentials out of the committed bundles (they are stripped
+#: from exports and never re-created from YAML).
+CLICKHOUSE_CONNECTION_UUID = "7c1a6c2e-9b3d-4f5a-8e42-1b0d5c9a3f70"
+TRINO_CONNECTION_UUID = "3e8f4b1a-6d2c-4a9e-b75f-9c2a1d8e4b63"
+
 #: Committed BI assets (import/export v1 ZIP bundles) are imported from here.
 DEFAULT_ASSETS_DIR = "/app/superset_home/repo/assets"
 
@@ -129,14 +137,25 @@ def upsert_admin(appbuilder: Any, *, username: str, password: str) -> str:
     return action
 
 
-def upsert_database(*, name: str, sqlalchemy_uri: str, session: Any) -> str:
-    """Upsert one database connection keyed by its display name."""
-    from superset.models.core import Database
+def upsert_database(*, name: str, sqlalchemy_uri: str, uuid_value: str, session: Any) -> str:
+    """Upsert one database connection keyed by its display name.
+
+    The connection always converges on its fixed UUID (see
+    ``CLICKHOUSE_CONNECTION_UUID``): exported bundles reference it, and the
+    import step relies on resolving against the env-created connection
+    instead of creating a secret-bearing Database object from YAML.
+    """
+    # superset lives only in the custom container image; host-side type
+    # checkers cannot resolve it (module-level imports stay stdlib-only).
+    from superset.models.core import Database  # type: ignore[import-not-found]
 
     existing = session.query(Database).filter_by(database_name=name).one_or_none()
+    # ``sqlalchemy_uri`` is stored masked once the assets import has run
+    # (Superset moves the password into its encrypted column); the decrypted
+    # form is what an env-built URI must compare against.
     action = decide_database_action(
         exists=existing is not None,
-        uri_matches=existing is not None and existing.sqlalchemy_uri == sqlalchemy_uri,
+        uri_matches=existing is not None and existing.sqlalchemy_uri_decrypted == sqlalchemy_uri,
     )
     if action == "create":
         session.add(
@@ -144,25 +163,85 @@ def upsert_database(*, name: str, sqlalchemy_uri: str, session: Any) -> str:
                 database_name=name,
                 sqlalchemy_uri=sqlalchemy_uri,
                 impersonate_user=False,
+                uuid=uuid_value,
             )
         )
         session.commit()
-    elif action == "update":
-        assert existing is not None
+        return action
+    assert existing is not None
+    if action == "update":
         existing.sqlalchemy_uri = sqlalchemy_uri
-        session.commit()
+    if str(existing.uuid) != uuid_value:
+        existing.uuid = uuid_value
+        print(f"superset_init: connection uuid aligned name={name!r} uuid={uuid_value}")
+    session.commit()
     return action
 
 
-def import_assets(*, assets_dir: Path) -> str:
-    """Import committed BI assets; an empty tree is a documented skip."""
+def _injected_clickhouse_database_config(sqlalchemy_uri: str) -> dict[str, Any]:
+    """In-memory database config injected into imported bundles.
+
+    Committed bundles have their ``databases/`` entries stripped (secrets —
+    AGENTS.md §10), so the import injects this env-built config at runtime;
+    ``ImportAssetsCommand`` then resolves every dataset's ``database_uuid``
+    against it instead of a YAML file.
+    """
+    return {
+        "database_name": CLICKHOUSE_CONNECTION_NAME,
+        "sqlalchemy_uri": sqlalchemy_uri,
+        "cache_timeout": None,
+        "expose_in_sqllab": True,
+        "allow_run_async": False,
+        "allow_ctas": False,
+        "allow_cvas": False,
+        "allow_dml": False,
+        "allow_file_upload": False,
+        "extra": {
+            "metadata_params": {},
+            "engine_params": {},
+            "metadata_cache_timeout": {},
+            "schemas_allowed_for_file_upload": [],
+        },
+        "impersonate_user": False,
+        "uuid": CLICKHOUSE_CONNECTION_UUID,
+        "version": "1.0.0",
+    }
+
+
+def import_assets(*, assets_dir: Path, clickhouse_uri: str, admin_username: str) -> str:
+    """Import committed BI assets; an empty tree is a documented skip.
+
+    Uses ``ImportAssetsCommand`` (the /api/v1/assets import path): datasets,
+    charts and dashboards are upserted by UUID with overwrite semantics, so
+    the repository stays the source of truth for BI content. The secret-
+    bearing database config never touches disk — it is injected into the
+    in-memory contents from the env-built URI.
+    """
     bundles = find_asset_bundles(assets_dir)
     if not bundles:
         return "skip"
-    from superset.commands.importers.v1 import ImportV1Command
+    from zipfile import ZipFile
 
+    import yaml
+    from flask import g
+    from superset import security_manager  # type: ignore[attr-defined]
+    from superset.commands.importers.v1.assets import (  # type: ignore[import-not-found]
+        ImportAssetsCommand,
+    )
+    from superset.commands.importers.v1.utils import (  # type: ignore[import-not-found]
+        get_contents_from_bundle,
+    )
+
+    g.user = security_manager.find_user(username=admin_username)
+    if g.user is None:
+        raise RuntimeError(f"admin user {admin_username!r} not found for asset import")
     for bundle in bundles:
-        ImportV1Command(str(bundle), overwrite=True).run()
+        with ZipFile(bundle) as archive:
+            contents = get_contents_from_bundle(archive)
+        contents[f"databases/{CLICKHOUSE_CONNECTION_NAME}.yaml"] = yaml.safe_dump(
+            _injected_clickhouse_database_config(clickhouse_uri)
+        )
+        ImportAssetsCommand(contents).run()
     return f"imported:{len(bundles)}"
 
 
@@ -187,19 +266,27 @@ def main() -> int:
     _run_cli("db", "upgrade")
     _run_cli("init")
 
-    from superset import db
-    from superset.app import create_app
+    from superset import db  # type: ignore[attr-defined]
+    from superset.app import create_app  # type: ignore[import-not-found]
 
     app = create_app()
     with app.app_context():
         admin_action = upsert_admin(app.appbuilder, username=admin_user, password=admin_password)
         clickhouse_action = upsert_database(
-            name=CLICKHOUSE_CONNECTION_NAME, sqlalchemy_uri=clickhouse_uri, session=db.session
+            name=CLICKHOUSE_CONNECTION_NAME,
+            sqlalchemy_uri=clickhouse_uri,
+            uuid_value=CLICKHOUSE_CONNECTION_UUID,
+            session=db.session,
         )
         trino_action = upsert_database(
-            name=TRINO_CONNECTION_NAME, sqlalchemy_uri=trino_uri, session=db.session
+            name=TRINO_CONNECTION_NAME,
+            sqlalchemy_uri=trino_uri,
+            uuid_value=TRINO_CONNECTION_UUID,
+            session=db.session,
         )
-        assets_action = import_assets(assets_dir=assets_dir)
+        assets_action = import_assets(
+            assets_dir=assets_dir, clickhouse_uri=clickhouse_uri, admin_username=admin_user
+        )
 
     print(
         "superset_init: bootstrap complete "
