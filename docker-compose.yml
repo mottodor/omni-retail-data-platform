@@ -23,6 +23,13 @@ x-airflow-env: &airflow-env
   # Trino over the docker network; defaults live in TrinoConfig/profiles.yml.
   TRINO_HOST: trino
   TRINO_PORT: "8080"
+  # Serving publication runs inside the Docker network; do not use the
+  # host-loopback defaults used by the local CLI.
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: analytics
+  CLICKHOUSE_PUBLISHER_USER: ${CLICKHOUSE_PUBLISHER_USER}
+  CLICKHOUSE_PUBLISHER_PASSWORD: ${CLICKHOUSE_PUBLISHER_PASSWORD}
 
 x-airflow-volumes: &airflow-volumes
   # DAGs stay thin wrappers (AGENTS §19): helpers and tests are mounted

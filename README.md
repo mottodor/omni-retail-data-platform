@@ -450,6 +450,7 @@ make bi-up            # profile bi: ClickHouse + one-shot versioned migrations
 make serving-publish ARGS="--mart mart_daily_sales"
 make serving-rebuild   # every mart, drop-safe: recreate DDL + republish from Gold
 make serving-rebuild ARGS="--mart mart_daily_sales"   # ...or a single mart
+make serving-benchmark                            # Trino vs ClickHouse report
 ```
 
 Schema changes are versioned migrations under `clickhouse/migrations/`,
@@ -461,7 +462,12 @@ HTTP interface is published to the host (`127.0.0.1:8123`); the native
 port stays docker-network-only. Idempotency, rebuild-from-Gold parity,
 and reader permissions are asserted by
 `tests/integration/test_serving_publication.py`
-(`make up && make bi-up && make integration`).
+(`make up && make bi-up && make integration`). After a successful
+`transform_lakehouse` run, the dataset-triggered `publish_serving` DAG
+rebuilds all four marts from Gold. Compare the representative query with
+`make serving-benchmark`; the report is written to
+`docs/benchmarks/phase6-trino-vs-clickhouse.md`. Outage recovery is documented
+in [`docs/runbooks/clickhouse-outage.md`](docs/runbooks/clickhouse-outage.md).
 
 ## CI
 
