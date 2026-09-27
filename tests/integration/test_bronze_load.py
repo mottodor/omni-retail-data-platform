@@ -83,17 +83,16 @@ def purge_raw(storage: BotoObjectStorage) -> None:
 def clean_bronze(live_storage: BotoObjectStorage) -> Generator[None, None, None]:
     purge_raw(live_storage)
     yield
-    # Polaris does not grant the bootstrap principal DROP_TABLE_WITH_PURGE or
-    # DROP_VIEW, so teardown removes the loaded DATA by partition instead of
-    # dropping the table/view objects (see task-9 report; infra grant follow-up).
-    # On a fresh stack a test can run before its table ever existed, so each
-    # DELETE is guarded by an existence check.
+    # Teardown: remove the loaded DATA by partition (a shared local stack may
+    # hold other partitions of the same bronze tables) and drop the dbt-built
+    # staging view — Trino purge-drops work since the Phase 5 infra follow-up
+    # (CATALOG_MANAGE_CONTENT grant + DROP_WITH_PURGE_ENABLED).
     partition = f"\"_batch_date\" = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
     next_partition = f"\"_batch_date\" = DATE '{NEXT_LOGICAL_DATE:%Y-%m-%d}'"
     for table in ("orders", "fx_rates"):
         if bronze_table_exists(table):
             trino_scalar(f"delete from iceberg.bronze.{table} where {partition}")
-            trino_scalar(f"delete from iceberg.bronze.{table} where {next_partition}")
+    trino_scalar("drop view if exists iceberg.silver.stg_orders")
     purge_raw(live_storage)
 
 

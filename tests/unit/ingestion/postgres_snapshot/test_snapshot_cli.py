@@ -34,3 +34,21 @@ def test_run_rejects_malformed_dates() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--table", "orders", "--date", "13.09.2026"])
+
+
+def test_purge_watermarks_defaults_to_all_tables() -> None:
+    args = build_parser().parse_args(["purge-watermarks"])
+
+    assert args.command == "purge-watermarks"
+    assert args.table is None
+
+
+def test_purge_watermarks_parses_known_table() -> None:
+    args = build_parser().parse_args(["purge-watermarks", "--table", "orders"])
+
+    assert args.table == "orders"
+
+
+def test_purge_watermarks_rejects_unknown_table() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["purge-watermarks", "--table", "nope"])

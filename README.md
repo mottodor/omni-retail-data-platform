@@ -367,6 +367,20 @@ of the http-level retries inside the API client, `execution_timeout=5min`,
 date (`ds`) is the only date input — wall-clock `now()` never appears in
 paths or identifiers.
 
+PostgreSQL snapshots (`omni_retail.ingestion.postgres_snapshot`) extract
+each OLTP table as Parquet with an explicit pyarrow schema:
+`archive/postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet`, manifest in the
+shared registry (`source_kind="postgres"`), and a durable watermark
+`archive/_watermarks/postgres/<table>.json`. Keyset pagination on
+`(updated_at, pk)` makes same-second events safe; the watermark moves only
+after a successful upload, so interruptions re-extract and overwrite the
+same window. After re-seeding the source (`make generate-oltp` with a
+truncate), purge the stale watermarks first: `uv run python -m
+omni_retail.ingestion.postgres_snapshot purge-watermarks` (all tables) or
+`… purge-watermarks --table orders` (one table). Limitations (closed by CDC
+in Phase 8): hard deletes are invisible and historical backfill is
+impossible (snapshots hold current state).
+
 ```bash
 make up                  # core profile first (postgres, minio, mock-api)
 make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081

@@ -4,15 +4,20 @@ The watermark is the ``(updated_at, pk)`` pair of the last row of the last
 successfully extracted window. It moves **only after** a successful upload,
 so an interruption between upload and watermark save simply re-extracts the
 same window and overwrites the same object — duplicates cannot appear.
+
+Watermarks survive an OLTP re-seed (truncate + reload), which would make
+subsequent incremental extracts silently skip freshly generated rows;
+:func:`purge_watermarks` is the explicit operator action for that case.
 """
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from omni_retail.ingestion.common.paths import BUCKET_ARCHIVE, postgres_watermark_key
 from omni_retail.ingestion.common.storage import ObjectNotFoundError, ObjectStorage
-from omni_retail.ingestion.postgres_snapshot.tables import TableSpec
+from omni_retail.ingestion.postgres_snapshot.tables import TABLES, TableSpec
 
 
 @dataclass(frozen=True)
@@ -56,3 +61,27 @@ def save_watermark(storage: ObjectStorage, watermark: Watermark) -> None:
         postgres_watermark_key(watermark.table),
         json.dumps(payload, sort_keys=True).encode(),
     )
+
+
+def purge_watermarks(
+    storage: ObjectStorage, tables: Sequence[str] | None = None
+) -> tuple[str, ...]:
+    """Delete durable watermarks (operator action, e.g. after re-seeding OLTP).
+
+    Missing watermarks are skipped, so the operation is idempotent. With
+    ``tables=None`` every snapshot table's watermark is addressed. Returns the
+    purged object keys in registry order.
+    """
+    names = tuple(TABLES) if tables is None else tuple(tables)
+    unknown = [name for name in names if name not in TABLES]
+    if unknown:
+        known = ", ".join(sorted(TABLES))
+        raise ValueError(f"unknown snapshot table(s) {unknown} (known: {known})")
+
+    purged: list[str] = []
+    for name in names:
+        key = postgres_watermark_key(name)
+        if storage.object_exists(BUCKET_ARCHIVE, key):
+            storage.delete_object(BUCKET_ARCHIVE, key)
+            purged.append(key)
+    return tuple(purged)
