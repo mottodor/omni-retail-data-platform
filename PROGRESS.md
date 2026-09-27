@@ -16,13 +16,15 @@ Contract:
 
 ## Current focus
 
-Phase 7 (Apache Superset) — planned. The active task plan
-(`docs/plans/active.md`) owns the slice breakdown and checklists: slice 1 —
-superset service + custom pinned image + connections (ClickHouse primary,
-Trino ad-hoc); slice 2 — BI-as-code loop (assets exported to/imported from
-`superset/`) + Sales dashboard; slice 3 — Executive/Customer/Marketing
-dashboards, Trino exploration path, runbook, README screenshots. Funnel
-dashboard and conversion/ROAS metrics are deferred to Phase 9 (no
+Phase 7 (Apache Superset) — in flight; execution detail and checklists live
+in `docs/plans/active.md`. Slice 1 (platform) is done: custom pinned image
+`omni-retail/superset:0.1.0` (drivers from `uv.lock`), `bi`-profile services
+`superset-postgres`/`superset`/`superset-init`, idempotent bootstrap (schema,
+admin, ClickHouse+Trino connections, asset import), guard/unit/integration
+tests, ADR 0005. Note: `make bi-up` is two-phase — docker compose v5 `--wait`
+treats exited-0 one-shot containers as a failure. Next: slice 2 — BI-as-code
+loop (datasets/dashboards exported to `superset/assets/`) + Sales dashboard.
+Funnel dashboard and conversion/ROAS metrics are deferred to Phase 9 (no
 clickstream/attribution data yet).
 
 Phase 6 delivered the `bi` profile and migrations ledger, least-privilege
@@ -49,7 +51,7 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 4 | Airflow orchestration | done |
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
 | 6 | ClickHouse serving layer | done |
-| 7 | Apache Superset | next |
+| 7 | Apache Superset | in flight (slice 1 done) |
 | 8 | CDC: Debezium -> Kafka -> Iceberg | not started |
 | 9 | Clickstream + Spark | not started |
 | 10 | Data quality, contracts, failure engineering | not started |
@@ -76,6 +78,14 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 1 | ClickHouse service (`bi` profile), users, migrations, idempotent publisher for `mart_daily_sales` | done |
 | 2 | Remaining 3 marts, engine/ORDER BY/partitioning design, reconciliation + full rebuild | done |
 | 3 | Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark, runbook | done |
+
+### Phase 7 slice detail
+
+| Slice | Scope | Status |
+|---|---|---|
+| 1 | Superset platform: custom image, `bi`-profile services, connections, idempotent bootstrap (ADR 0005) | done |
+| 2 | BI-as-code loop + Sales dashboard | next |
+| 3 | Executive/Customer/Marketing dashboards, Trino ad-hoc path, runbook, README | not started |
 
 ## Deferred / follow-ups
 

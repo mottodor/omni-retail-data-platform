@@ -114,39 +114,39 @@ Vertical slices; each closes with its own validation and PROGRESS update.
 
 ### Slice 1 — Superset platform slice (service + connections, no dashboards)
 
-- [ ] 1.1 Write and accept `docs/adr/0005-superset-deployment.md`.
-- [ ] 1.2 Custom image: `infrastructure/superset/Dockerfile` — pinned base
+- [x] 1.1 Write and accept `docs/adr/0005-superset-deployment.md`.
+- [x] 1.2 Custom image: `infrastructure/superset/Dockerfile` — pinned base
   `apache/superset:5.0.0`, pinned `uv` binary, `uv export --frozen` +
   install of only the two BI drivers (full requirements export is not needed
   — the image already carries Superset's own deps; document the reason),
   non-root user preserved. Compose: `omni-retail/superset:0.1.0`.
-- [ ] 1.3 Compose services (profile `bi`):
+- [x] 1.3 Compose services (profile `bi`):
   - `superset-postgres`: postgres 16.15-alpine, named volume, healthcheck
     (mirror `airflow-postgres`);
   - `superset`: depends on healthy metadata DB; ports
     `127.0.0.1:${SUPERSET_PORT:-8088}:8088`; healthcheck on `/health`;
-    mounts `./superset:/app/superset-home/repo:ro` for config + assets;
+    mounts `./superset:/app/superset_home/repo:ro` for config + assets;
     `SUPERSET_CONFIG_PATH` pointing at the mounted config;
   - `superset-init`: one-shot, `depends_on: superset: service_healthy`,
     runs `infrastructure/scripts/superset_init.py` with env-provided
     credentials; idempotent (safe on every `make bi-up`).
-- [ ] 1.4 `superset/superset_config.py`: metadata URI to `superset-postgres`,
+- [x] 1.4 `superset/superset_config.py`: metadata URI to `superset-postgres`,
   `SECRET_KEY` from env (fail loudly if unset), examples off, mapbox off,
   `TALISMAN_ENABLED = False` (local loopback only — documented), feature
   flags conservative.
-- [ ] 1.5 `infrastructure/scripts/superset_init.py` (typed, structured logs):
+- [x] 1.5 `infrastructure/scripts/superset_init.py` (typed, structured logs):
   `db upgrade` → admin upsert (no duplicate on re-run) → upsert Database
   connection "ClickHouse analytics" (`clickhousedb://…@clickhouse:8123/analytics`,
   driver `connect`, `superset_reader` creds from env, impersonate off) →
   upsert "Trino iceberg" (`trino://omni_superset@trino:8080/iceberg`) →
   import assets from the mounted `superset/assets/` if present (empty tree
   in this slice — the import step itself is tested).
-- [ ] 1.6 `.env.example`: SUPERSET_* block (port, secret key, admin
+- [x] 1.6 `.env.example`: SUPERSET_* block (port, secret key, admin
   user/password, metadata DB creds) with comments mirroring Phase 6 style.
-- [ ] 1.7 Makefile: `bi-up` builds the superset image alongside ClickHouse;
+- [x] 1.7 Makefile: `bi-up` builds the superset image alongside ClickHouse;
   `bi-down` unchanged semantics (superset metadata volume preserved);
   help text updated.
-- [ ] 1.8 Tests:
+- [x] 1.8 Tests:
   - extend `tests/test_compose_guards.py`: superset image pinned + built,
     healthcheck present, loopback-only ports, env vars documented;
   - unit tests for the init script's decision logic (connection upsert
@@ -156,8 +156,37 @@ Vertical slices; each closes with its own validation and PROGRESS update.
     database connections exist with correct hostnames and the reader
     account; ClickHouse connection test-query succeeds through
     `superset_reader`.
-- [ ] 1.9 Validation: `make lint`, `make test`, `docker compose config`,
+- [x] 1.9 Validation: `make lint`, `make test`, `docker compose config`,
   `make bi-up` from clean volumes; close with PROGRESS focus update.
+
+#### Slice 1 implementation notes (facts discovered, binding for slices 2–3)
+
+- **Superset 5.0.0 runtime facts** (verified live in the image):
+  - `python` on PATH is the `/app/.venv` interpreter; `uv pip install
+    --system` targets `/usr/local` instead — the Dockerfile passes
+    `--python /app/.venv/bin/python` explicitly.
+  - The WSGI target is the factory `superset.app:create_app()` (`FLASK_APP`),
+    not `superset.app:app`; the compose service uses the image's own CMD
+    (`run-server.sh`, env-tunable), no hand-written gunicorn command.
+  - The security manager has no `bcrypt` attribute: password hashing is
+    `werkzeug.security` (`check_password_hash` / FAB's `reset_password`).
+  - The base image ships `zstandard==0.23.0` (excluded from the driver
+    whitelist) but no postgres driver — `psycopg2-binary==2.9.13` was added
+    to `pyproject.toml`/`uv.lock` (metadata-DB driver only; the platform
+    itself stays on psycopg v3).
+- **Docker Compose v5.5.1**: `up --wait` treats exited-0 one-shot containers
+  as a wait failure (this also affects the Phase 6 shape of `bi-up`).
+  `make bi-up` is now two-phase: `up -d --wait --build clickhouse
+  superset-postgres superset` (services targeted by name, no `--profile`,
+  so one-shots stay out of the wait set), then `docker compose run --rm`
+  for each one-shot initializer (blocking, exit code propagates).
+- **Superset REST API**: list/detail `/api/v1/database/` mask/hide the
+  SQLAlchemy URI; `GET /api/v1/database/<pk>/connection` returns it — the
+  integration test uses that endpoint.
+- Bootstrap idempotency verified live twice: re-run over existing state
+  prints `admin=skip clickhouse_connection=skip trino_connection=skip
+  assets=skip`; from a removed metadata volume it prints `*=create` and
+  the integration suite passes afterwards.
 
 ### Slice 2 — BI-as-code loop + Sales dashboard (first dashboard end-to-end)
 

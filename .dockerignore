@@ -1,7 +1,8 @@
-# Whitelist build context for the custom Airflow image
-# (infrastructure/airflow/Dockerfile, context = repo root): only files the
-# image build actually needs enter the context, keeping it small and the
-# build independent of local tooling state (.venv, caches, git history).
+# Whitelist build context for the custom Airflow and Superset images
+# (infrastructure/{airflow,superset}/Dockerfile, context = repo root): only
+# files the image builds actually need enter the context, keeping it small
+# and the builds independent of local tooling state (.venv, caches, git
+# history).
 *
 !pyproject.toml
 !uv.lock
