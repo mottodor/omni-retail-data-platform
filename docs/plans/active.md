@@ -189,37 +189,60 @@ Facts established at planning time (2026-09-27):
   drops and recreates the table pair with the partition clause — serving
   data is derived, republish afterwards, no data migration.
 
-- [ ] 2.1 `specs.py` — `MartSpec`: add optional `partition_by` (expression
+- [x] 2.1 `specs.py` — `MartSpec`: add optional `partition_by` (expression
   string, e.g. `toYYYYMM(order_date)`) with `PARTITION BY` emitted by
   `create_table_sql`; unpartitioned marts emit no clause (slice-1 DDL for
   the other tables stays byte-identical).
-- [ ] 2.2 Migrations `0004_mart_customer_ltv.sql`,
+  Note: exact Trino types confirmed against the live schema
+  (`SHOW COLUMNS FROM iceberg.analytics.<mart>`), incl. the empirical NULL
+  check that fixed the Nullability set (avg_order_value_eur is NULL for
+  real rows; DateTime64(6, 'UTC') for timestamptz).
+- [x] 2.2 Migrations `0004_mart_customer_ltv.sql`,
   `0005_mart_marketing_roi.sql`, `0006_mart_delivery_performance.sql` —
   serving + `_staging` twins each, engine/ORDER BY rationale in comments.
-- [ ] 2.3 Migration `0007_mart_daily_sales_monthly_partition.sql` — drop +
+- [x] 2.3 Migration `0007_mart_daily_sales_monthly_partition.sql` — drop +
   recreate both `mart_daily_sales` tables with
   `PARTITION BY toYYYYMM(order_date)`; update the `MART_DAILY_SALES` spec;
   note the required republish in the migration comment.
-- [ ] 2.4 `specs.py`: add the three new specs (exact Trino types confirmed
+- [x] 2.4 `specs.py`: add the three new specs (exact Trino types confirmed
   live in 2.1–2.2); `MARTS` registry holds all 4 marts; money-scale
   decision documented next to the specs.
-- [ ] 2.5 Unit tests (`tests/unit/serving/clickhouse/`): registry holds 4
+  Note: decision = keep the exact mirror (round-trip 1:1 makes
+  reconciliation provable); documented in specs.py + data-model.md.
+- [x] 2.5 Unit tests (`tests/unit/serving/clickhouse/`): registry holds 4
   marts; specs↔migrations cross-check extended to every mart including the
   partition clause; DDL generation for partitioned vs plain tables.
-- [ ] 2.6 Integration tests (`tests/integration/test_serving_publication.py`):
+  Note: cross-check reads the CURRENT-DDL carrier per mart (0007 for
+  mart_daily_sales; 0003 stays in the ledger as history); also added a
+  Nullability-set test and a registry-order test.
+- [x] 2.6 Integration tests (`tests/integration/test_serving_publication.py`):
   publish all four marts; per-mart Gold-vs-CH reconciliation (row count +
   ordered row-wise equality); republish idempotency for one new mart
   (pattern proven in slice 1); teardown → rebuild → reconcile everything.
-- [ ] 2.7 CLI + Makefile: `rebuild --all` (publish stays per-mart);
+  Note: reconciliation compares Python-side sorted multisets (normalized
+  values; tz-aware Trino timestamptz vs naive-UTC CH DateTime64) — no
+  cross-engine SQL checksums; full rebuild goes through the real
+  `cli.main(["rebuild", "--all"])` entrypoint.
+- [x] 2.7 CLI + Makefile: `rebuild --all` (publish stays per-mart);
   `make serving-rebuild` without ARGS rebuilds every mart; help text.
-- [ ] 2.8 Docs: `docs/data-model.md` — per-mart physical design table
+  Note: fail-fast semantics documented in `run_command`; the Makefile
+  passes `--all` explicitly when ARGS is empty (no implicit CLI default);
+  both serving Makefile targets now set `no_proxy=127.0.0.1,localhost`
+  like the integration target (wildcard `127.*` in the ambient no_proxy
+  is not understood by Python HTTP clients → HTTP 403 via proxy).
+- [x] 2.8 Docs: `docs/data-model.md` — per-mart physical design table
   (engine / ORDER BY / partitioning / TTL rationale) + money-scale note;
   README serving-rebuild usage if it documents ARGS; `PROGRESS.md` slice 2
   status + funnel-mart deferral entry in the deferred list.
-- [ ] 2.9 Validation: `make lint`, `make test`, `docker compose config`,
+- [x] 2.9 Validation: `make lint`, `make test`, `docker compose config`,
   `make up && make bi-up` (0004–0007 apply cleanly on the existing ledger),
   `make integration` (CH tests incl. reconciliation), completion report
   (AGENTS §49).
+  Note: all executed and passing; bi profile was already up —
+  `clickhouse-init` re-run applied 0004–0007 (applied=4 skipped=3); one
+  env hiccup: the stopped init container had a stale WSL bind mount and
+  needed `docker compose --profile bi rm -f clickhouse-init` before
+  `make bi-up` (Docker Desktop quirk, not a repo defect).
 
 ### Slice 3 — orchestration + benchmark
 
