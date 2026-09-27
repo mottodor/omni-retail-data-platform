@@ -16,17 +16,14 @@ Contract:
 
 ## Current focus
 
-Phase 6 (ClickHouse serving layer) — sliced into three vertical slices per
-`docs/plans/active.md` (read it first and resume from its checklist).
-ADR 0004 accepted. **Slices 1–2 are done**: compose `bi` profile +
-migrations ledger, `omni_publisher`/`superset_reader` accounts, idempotent
-staging-swap publisher + CLI for all four marts, per-mart physical design
-(MergeTree, ORDER BY per BI access pattern, monthly partitioning only for
-`mart_daily_sales`, no TTL), exact-mirror type mapping incl. Nullability
-rules, Gold-vs-CH row-wise reconciliation tests, and the one-command full
-rebuild (`make serving-rebuild` → `rebuild --all`). Next: slice 3 —
-Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark,
-runbook, phase close.
+Phase 7 (Apache Superset) — ClickHouse serving is complete. ADR 0004
+accepted. Phase 6 delivered the `bi` profile and migrations ledger,
+least-privilege `omni_publisher`/`superset_reader` accounts, idempotent
+staging-swap publication for all four available marts, per-mart physical
+design, Gold-vs-ClickHouse reconciliation, one-command rebuild, dataset-
+triggered Airflow publication, Trino-vs-ClickHouse benchmark, and the
+ClickHouse outage runbook. Next: Superset connections and the first BI
+dashboard.
 
 Phase 5 delivered end to end: Bronze loader (Iceberg via Polaris), Silver/Gold
 Kimball model with SCD2 `dim_customer`, `int_orders_fx` + four EUR-normalized
@@ -44,8 +41,8 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 3 | Batch ingestion: REST APIs + files/S3 | done |
 | 4 | Airflow orchestration | done |
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
-| 6 | ClickHouse serving layer | in progress (slice 3 of 3) |
-| 7 | Apache Superset | not started |
+| 6 | ClickHouse serving layer | done |
+| 7 | Apache Superset | next |
 | 8 | CDC: Debezium -> Kafka -> Iceberg | not started |
 | 9 | Clickstream + Spark | not started |
 | 10 | Data quality, contracts, failure engineering | not started |
@@ -65,13 +62,13 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 2 | Silver/Gold Kimball model, SCD2 `dim_customer`, reconciliation tests | done |
 | 3 | Analytics marts + dataset-triggered orchestration | done |
 
-### Phase 6 slice detail (plan: `docs/plans/active.md`)
+### Phase 6 slice detail
 
 | Slice | Scope | Status |
 |---|---|---|
 | 1 | ClickHouse service (`bi` profile), users, migrations, idempotent publisher for `mart_daily_sales` | done |
 | 2 | Remaining 3 marts, engine/ORDER BY/partitioning design, reconciliation + full rebuild | done |
-| 3 | Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark, runbook | next |
+| 3 | Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark, runbook | done |
 
 ## Deferred / follow-ups
 

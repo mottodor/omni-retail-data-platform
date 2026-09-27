@@ -1,5 +1,7 @@
 """Unit tests for the serving publisher CLI (fakes; no network)."""
 
+from pathlib import Path
+
 import pytest
 
 from fakes.clickhouse import FakeClickHouseExecutor
@@ -87,8 +89,25 @@ def test_run_command_rebuild_all_processes_every_mart_in_registry_order() -> Non
     assert [table for table, _, _ in ch.inserts] == [spec.staging_table for spec in MARTS.values()]
 
 
-def test_main_unknown_mart_returns_one() -> None:
+def test_main_unknown_mart_returns_one_without_building_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec resolution must fail before any client is constructed."""
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("clients must not be built for an unknown mart")
+
+    monkeypatch.setattr(cli, "DbapiTrinoExecutor", forbidden)
+    monkeypatch.setattr(cli, "ClickHouseConnectClient", forbidden)
     assert main(["publish", "--mart", "nope"]) == 1
+    assert main(["rebuild", "--mart", "nope"]) == 1
+
+
+def test_parser_benchmark_defaults() -> None:
+    args = build_parser().parse_args(["benchmark"])
+    assert args.command == "benchmark"
+    assert args.repetitions == 5
+    assert args.output == Path("docs/benchmarks/phase6-trino-vs-clickhouse.md")
 
 
 def test_main_publish_error_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:

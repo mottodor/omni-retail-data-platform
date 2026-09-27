@@ -37,3 +37,12 @@ TRANSFORM_TASK_DEFAULT_ARGS: dict[str, object] = {
     "max_retry_delay": timedelta(minutes=30),
     "execution_timeout": timedelta(minutes=60),
 }
+
+#: Applied to the idempotent full-snapshot Gold -> ClickHouse publication.
+SERVING_TASK_DEFAULT_ARGS: dict[str, object] = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=15),
+    "execution_timeout": timedelta(minutes=30),
+}

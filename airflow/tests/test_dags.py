@@ -24,6 +24,7 @@ EXPECTED_DAG_IDS = {
     "ingest_postgres_snapshot",
     "load_bronze",
     "transform_lakehouse",
+    "publish_serving",
 }
 
 INGESTION_DAG_IDS = {
@@ -34,7 +35,7 @@ INGESTION_DAG_IDS = {
     "ingest_postgres_snapshot",
 }
 
-LAKEHOUSE_DAG_IDS = {"load_bronze", "transform_lakehouse"}
+LAKEHOUSE_DAG_IDS = {"load_bronze", "transform_lakehouse", "publish_serving"}
 
 #: dag_id -> raw dataset URI emitted by the API ingestion task.
 API_DAG_DATASET_URIS = {
@@ -197,7 +198,7 @@ def test_postgres_snapshot_dag_params_defaults(dag_bag: DagBag) -> None:
     assert dag.params["full_refresh"] is False
 
 
-@pytest.mark.parametrize("dag_id", ["load_bronze", "transform_lakehouse"])
+@pytest.mark.parametrize("dag_id", ["load_bronze", "transform_lakehouse", "publish_serving"])
 def test_lakehouse_task_policy(dag_bag: DagBag, dag_id: str) -> None:
     """Lakehouse tasks retry the whole idempotent step with wider budgets."""
     expected = {
@@ -208,6 +209,7 @@ def test_lakehouse_task_policy(dag_bag: DagBag, dag_id: str) -> None:
             timedelta(minutes=30),
             timedelta(minutes=60),
         ),
+        "publish_serving": (2, timedelta(minutes=2), timedelta(minutes=15), timedelta(minutes=30)),
     }
     retries, delay, cap, timeout = expected[dag_id]
     tasks = dag_bag.dags[dag_id].tasks
@@ -223,6 +225,7 @@ def test_lakehouse_task_policy(dag_bag: DagBag, dag_id: str) -> None:
 def test_lakehouse_dags_have_single_task(dag_bag: DagBag) -> None:
     assert [task.task_id for task in dag_bag.dags["load_bronze"].tasks] == ["load_new"]
     assert [task.task_id for task in dag_bag.dags["transform_lakehouse"].tasks] == ["dbt_build"]
+    assert [task.task_id for task in dag_bag.dags["publish_serving"].tasks] == ["publish"]
 
 
 def test_lakehouse_tasks_use_default_pool(dag_bag: DagBag) -> None:
@@ -256,7 +259,10 @@ def test_load_bronze_task_emits_bronze_dataset(dag_bag: DagBag) -> None:
     assert task.outlets == [Dataset("lakehouse://bronze")]
 
 
-def test_transform_lakehouse_task_emits_no_dataset(dag_bag: DagBag) -> None:
-    """Gold serving publication arrives in Phase 6; no outlet yet."""
+def test_transform_lakehouse_task_emits_gold_dataset(dag_bag: DagBag) -> None:
     task = dag_bag.dags["transform_lakehouse"].get_task("dbt_build")
-    assert not task.outlets
+    assert task.outlets == [Dataset("lakehouse://gold")]
+
+
+def test_publish_serving_is_triggered_by_gold_dataset(dag_bag: DagBag) -> None:
+    assert dataset_uris(dag_bag, "publish_serving") == {Dataset("lakehouse://gold").uri}

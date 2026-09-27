@@ -5,11 +5,13 @@ import contextlib
 import logging
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from clickhouse_connect.driver.exceptions import Error as ClickHouseError
 
 from omni_retail.ingestion.common.logging import configure_logging, context_logger
 from omni_retail.lakehouse.bronze.loader import DbapiTrinoExecutor, TrinoConfig, TrinoExecutor
+from omni_retail.serving.clickhouse.benchmark import run_benchmark, write_report
 from omni_retail.serving.clickhouse.client import ClickHouseConnectClient, ClickHouseExecutor
 from omni_retail.serving.clickhouse.config import ClickHouseConfig
 from omni_retail.serving.clickhouse.publisher import PublishError, publish, rebuild
@@ -43,6 +45,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="rebuild every registered mart (registry order; fails fast)",
     )
+
+    benchmark_parser = subparsers.add_parser(
+        "benchmark", help="compare one representative Gold query with ClickHouse"
+    )
+    benchmark_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("docs/benchmarks/phase6-trino-vs-clickhouse.md"),
+        help="Markdown report path",
+    )
+    benchmark_parser.add_argument(
+        "--repetitions", type=int, default=5, help="runs per engine (minimum 2)"
+    )
     return parser
 
 
@@ -71,13 +86,26 @@ def main(argv: list[str] | None = None) -> int:
     mart_label = getattr(args, "mart", None) or "all"
     log = context_logger(__name__, command=args.command, mart=mart_label)
     try:
-        # Resolve the specs first so unknown marts fail before any client is
-        # built; `rebuild --all` covers the whole registry in order.
-        specs = [mart_by_name(args.mart)] if args.mart else list(MARTS.values())
+        specs: list[MartSpec] = []
+        if args.command != "benchmark":
+            # Resolve the specs first so unknown marts fail before any client
+            # is built; `rebuild --all` covers the whole registry in order.
+            mart = getattr(args, "mart", None)
+            specs = [mart_by_name(mart)] if mart else list(MARTS.values())
         with (
             contextlib.closing(DbapiTrinoExecutor(TrinoConfig.from_env())) as trino_executor,
             contextlib.closing(ClickHouseConnectClient(ClickHouseConfig.from_env())) as ch_executor,
         ):
+            if args.command == "benchmark":
+                results = run_benchmark(
+                    trino_executor,
+                    ch_executor,
+                    repetitions=args.repetitions,
+                )
+                write_report(args.output, results, repetitions=args.repetitions)
+                log.info("benchmark report written: %s", args.output)
+                return 0
+
             exit_code = run_command(args.command, specs, trino_executor, ch_executor)
         log.info("command completed with exit_code=%d", exit_code)
         return exit_code
