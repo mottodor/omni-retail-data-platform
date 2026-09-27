@@ -16,14 +16,21 @@ Contract:
 
 ## Current focus
 
-Phase 7 (Apache Superset) — ClickHouse serving is complete. ADR 0004
-accepted. Phase 6 delivered the `bi` profile and migrations ledger,
-least-privilege `omni_publisher`/`superset_reader` accounts, idempotent
-staging-swap publication for all four available marts, per-mart physical
-design, Gold-vs-ClickHouse reconciliation, one-command rebuild, dataset-
-triggered Airflow publication, Trino-vs-ClickHouse benchmark, and the
-ClickHouse outage runbook. Next: Superset connections and the first BI
-dashboard.
+Phase 7 (Apache Superset) — planned. The active task plan
+(`docs/plans/active.md`) owns the slice breakdown and checklists: slice 1 —
+superset service + custom pinned image + connections (ClickHouse primary,
+Trino ad-hoc); slice 2 — BI-as-code loop (assets exported to/imported from
+`superset/`) + Sales dashboard; slice 3 — Executive/Customer/Marketing
+dashboards, Trino exploration path, runbook, README screenshots. Funnel
+dashboard and conversion/ROAS metrics are deferred to Phase 9 (no
+clickstream/attribution data yet).
+
+Phase 6 delivered the `bi` profile and migrations ledger, least-privilege
+`omni_publisher`/`superset_reader` accounts, idempotent staging-swap
+publication for all four available marts, per-mart physical design,
+Gold-vs-ClickHouse reconciliation, one-command rebuild, dataset-triggered
+Airflow publication, Trino-vs-ClickHouse benchmark, and the ClickHouse
+outage runbook.
 
 Phase 5 delivered end to end: Bronze loader (Iceberg via Polaris), Silver/Gold
 Kimball model with SCD2 `dim_customer`, `int_orders_fx` + four EUR-normalized
