@@ -16,16 +16,19 @@ Contract:
 
 ## Current focus
 
-Phase 7 (Apache Superset) — in flight; execution detail and checklists live
-in `docs/plans/active.md`. Slice 1 (platform) is done: custom pinned image
-`omni-retail/superset:0.1.0` (drivers from `uv.lock`), `bi`-profile services
-`superset-postgres`/`superset`/`superset-init`, idempotent bootstrap (schema,
-admin, ClickHouse+Trino connections, asset import), guard/unit/integration
-tests, ADR 0005. Note: `make bi-up` is two-phase — docker compose v5 `--wait`
-treats exited-0 one-shot containers as a failure. Next: slice 2 — BI-as-code
-loop (datasets/dashboards exported to `superset/assets/`) + Sales dashboard.
-Funnel dashboard and conversion/ROAS metrics are deferred to Phase 9 (no
-clickstream/attribution data yet).
+Phase 7 (Apache Superset) is **done**; next up is Phase 8 (CDC: Debezium ->
+Kafka -> Iceberg). Phase 7 delivered end to end: custom pinned image
+`omni-retail/superset:0.1.0`, `bi`-profile services with dedicated metadata
+PostgreSQL, idempotent bootstrap (ADR 0005) with fixed connection UUIDs, and
+BI-as-code — the four mart datasets plus the Sales, Executive, Customer and
+Marketing dashboards committed as sanitized import/export v1 bundles under
+`superset/assets/` and re-imported on every `make bi-up` (verified by a
+metadata-volume-wipe round-trip). Dashboard URLs are slug-based. The Trino
+SQL Lab ad-hoc path (Superset -> Trino -> Iceberg) is verified by an
+integration test. Remaining manual step: dashboard screenshots for the
+README gallery (procedure in `docs/screenshots/README.md`; no browser in
+the agent environment). Funnel dashboard and conversion/ROAS metrics are
+deferred to Phase 9 (no clickstream/attribution data yet).
 
 Phase 6 delivered the `bi` profile and migrations ledger, least-privilege
 `omni_publisher`/`superset_reader` accounts, idempotent staging-swap
@@ -51,8 +54,8 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 4 | Airflow orchestration | done |
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
 | 6 | ClickHouse serving layer | done |
-| 7 | Apache Superset | in flight (slice 1 done) |
-| 8 | CDC: Debezium -> Kafka -> Iceberg | not started |
+| 7 | Apache Superset | done |
+| 8 | CDC: Debezium -> Kafka -> Iceberg | next |
 | 9 | Clickstream + Spark | not started |
 | 10 | Data quality, contracts, failure engineering | not started |
 | 11 | Iceberg maintenance and performance | not started |
@@ -84,11 +87,14 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | Slice | Scope | Status |
 |---|---|---|
 | 1 | Superset platform: custom image, `bi`-profile services, connections, idempotent bootstrap (ADR 0005) | done |
-| 2 | BI-as-code loop + Sales dashboard | next |
-| 3 | Executive/Customer/Marketing dashboards, Trino ad-hoc path, runbook, README | not started |
+| 2 | BI-as-code loop (sanitized bundles, fixed connection UUIDs) + Sales dashboard + canary test | done |
+| 3 | Executive/Customer/Marketing dashboards, Trino ad-hoc path, runbook completion, README gallery scaffolding | done; screenshots are a manual follow-up (no browser in the agent environment) |
 
 ## Deferred / follow-ups
 
+- Superset dashboard screenshots: the README gallery table and capture
+  procedure are in place (`docs/screenshots/README.md`); the PNG files are
+  a manual step — no browser exists in the agent environment.
 - Funnel mart in ClickHouse: deferred until Phase 9 clickstream data
   exists — Phase 6 publishes the four existing Gold marts only (plan
   decision, recorded at slice-2 completion).
