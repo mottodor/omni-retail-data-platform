@@ -75,10 +75,17 @@ integration: ## Run integration tests against the live stacks (requires `make up
 
 BI_COMPOSE := docker compose --profile bi
 
-bi-up: ## Start the ClickHouse serving layer (profile bi; requires the core profile up)
-	$(BI_COMPOSE) up -d --wait
+bi-up: ## Start the BI profile (ClickHouse + Superset; builds the custom image; requires core up)
+	# Two phases (docker compose v5 `--wait` treats exited-0 one-shot
+	# containers in the wait set as a failure): health-gate the long-running
+	# services, then run the idempotent one-shot initializers to completion.
+	# Services are targeted by name (no --profile) so the wait set stays
+	# free of one-shot containers.
+	docker compose up -d --wait --build clickhouse superset-postgres superset
+	docker compose run --rm clickhouse-init
+	docker compose run --rm superset-init
 
-bi-down: ## Stop the bi profile services (the clickhouse-data volume is preserved)
+bi-down: ## Stop the bi profile services (clickhouse-data and superset metadata volumes are preserved)
 	$(BI_COMPOSE) down
 
 serving-publish: ## Publish a Gold mart to ClickHouse. ARGS="--mart mart_daily_sales"

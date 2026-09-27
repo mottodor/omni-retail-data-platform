@@ -29,6 +29,26 @@ AIRFLOW_DOCKERFILE = REPO_ROOT / "infrastructure" / "airflow" / "Dockerfile"
 AIRFLOW_TEST_SCRIPT = REPO_ROOT / "infrastructure" / "scripts" / "airflow_tests.sh"
 AIRFLOW_IMAGE = "omni-retail/airflow:0.1.0"
 
+SUPERSET_DOCKERFILE = REPO_ROOT / "infrastructure" / "superset" / "Dockerfile"
+SUPERSET_IMAGE = "omni-retail/superset:0.1.0"
+SUPERSET_INIT_SCRIPT = REPO_ROOT / "infrastructure" / "scripts" / "superset_init.py"
+SUPERSET_CONFIG_FILE = REPO_ROOT / "superset" / "superset_config.py"
+
+# BI driver closure exported from uv.lock: clickhouse-connect + trino
+# transitives minus the packages the base image venv already ships
+# (notably zstandard==0.23.0 — unbounded requirement of both drivers),
+# plus psycopg2-binary for the PostgreSQL metadata DB (the base image
+# defaults to sqlite and ships no postgres driver) — ADR 0005.
+EXPECTED_BI_DRIVER_WHITELIST = {
+    "clickhouse-connect",
+    "trino",
+    "backports-zstd",
+    "lz4",
+    "orjson",
+    "tzlocal",
+    "psycopg2-binary",
+}
+
 # Environment documented for the ingestion pipeline (Phase 3 design spec §11).
 EXPECTED_INGESTION_ENV_KEYS = {
     "S3_ENDPOINT_URL",
@@ -56,6 +76,8 @@ DBT_STAGING_MODELS = {
     "stg_shipments.sql",
 }
 
+FORBIDDEN_IMAGE_TAGS = {"latest", "stable", "edge", "nightly"}
+
 # Airflow configuration documented for Phase 4 (design spec §11, ADR 0003).
 EXPECTED_AIRFLOW_ENV_KEYS = {
     "AIRFLOW_UID",
@@ -68,7 +90,16 @@ EXPECTED_AIRFLOW_ENV_KEYS = {
     "AIRFLOW_POSTGRES_DB",
 }
 
-FORBIDDEN_IMAGE_TAGS = {"latest", "stable", "edge", "nightly"}
+# Superset configuration documented for Phase 7 (ADR 0005).
+EXPECTED_SUPERSET_ENV_KEYS = {
+    "SUPERSET_PORT",
+    "SUPERSET_SECRET_KEY",
+    "SUPERSET_ADMIN_USER",
+    "SUPERSET_ADMIN_PASSWORD",
+    "SUPERSET_POSTGRES_USER",
+    "SUPERSET_POSTGRES_PASSWORD",
+    "SUPERSET_POSTGRES_DB",
+}
 
 EXPECTED_CORE_SERVICES = {
     "postgres",
@@ -96,6 +127,15 @@ ONE_SHOT_SERVICES = {
     "polaris-init",
     "airflow-init",
     "clickhouse-init",
+    "superset-init",
+}
+
+EXPECTED_BI_SERVICES = {
+    "clickhouse",
+    "clickhouse-init",
+    "superset-postgres",
+    "superset",
+    "superset-init",
 }
 
 
@@ -247,6 +287,96 @@ def test_orchestration_profile_contains_expected_services() -> None:
 def test_env_example_documents_airflow_variables() -> None:
     missing = EXPECTED_AIRFLOW_ENV_KEYS - _env_example_keys()
     assert not missing, f"airflow env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_bi_profile_contains_expected_services() -> None:
+    services = _load_compose()["services"]
+    missing = EXPECTED_BI_SERVICES - set(services)
+    assert not missing, f"bi services missing from compose: {sorted(missing)}"
+    for name in EXPECTED_BI_SERVICES:
+        profiles = services[name].get("profiles", [])
+        assert "bi" in profiles, f"{name} is not in the 'bi' profile"
+        assert "core" not in profiles, f"{name} must not be in the 'core' profile"
+
+
+def test_env_example_documents_superset_variables() -> None:
+    missing = EXPECTED_SUPERSET_ENV_KEYS - _env_example_keys()
+    assert not missing, f"superset env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_superset_services_use_custom_pinned_image() -> None:
+    services = _load_compose()["services"]
+    for name in ("superset", "superset-init"):
+        assert services[name]["image"] == SUPERSET_IMAGE, f"{name} must use {SUPERSET_IMAGE}"
+    assert services["superset"]["build"]["dockerfile"].endswith(
+        "infrastructure/superset/Dockerfile"
+    )
+
+
+def test_superset_port_is_loopback_only() -> None:
+    services = _load_compose()["services"]
+    entry = str(services["superset"]["ports"][0])
+    assert entry.startswith("127.0.0.1:"), f"superset port must bind loopback: {entry}"
+
+
+def test_superset_metadata_db_has_no_host_ports() -> None:
+    services = _load_compose()["services"]
+    assert not services["superset-postgres"].get("ports"), (
+        "superset metadata must stay Docker-network-local (ADR 0005)"
+    )
+
+
+def test_superset_healthcheck_targets_health_endpoint() -> None:
+    services = _load_compose()["services"]
+    assert "/health" in str(services["superset"]["healthcheck"]["test"]), (
+        "superset healthcheck must hit /health"
+    )
+
+
+def test_superset_mounts_config_and_assets_readonly() -> None:
+    services = _load_compose()["services"]
+    for name in ("superset", "superset-init"):
+        mounts = [str(m) for m in services[name].get("volumes", [])]
+        assert "./superset:/app/superset_home/repo:ro" in mounts, (
+            f"{name} must mount the superset tree read-only"
+        )
+    init_mounts = [str(m) for m in services["superset-init"].get("volumes", [])]
+    assert any(m.startswith("./infrastructure/scripts/superset_init.py:") for m in init_mounts), (
+        "superset-init must mount its bootstrap script"
+    )
+
+
+def test_superset_dockerfile_pinned_base_and_frozen_drivers() -> None:
+    assert SUPERSET_DOCKERFILE.is_file(), "superset Dockerfile is missing"
+    text = SUPERSET_DOCKERFILE.read_text(encoding="utf-8")
+    assert "FROM apache/superset:5.0.0" in text, "base image must be pinned"
+    assert "ghcr.io/astral-sh/uv:" in text, "uv must be copied from a pinned tag"
+    assert "uv export --frozen --no-dev" in text, "versions must come from the lockfile"
+    assert "--no-deps" in text, "driver install must not touch Superset's own pins"
+    assert text.rstrip().endswith("USER superset"), "image must end as the superset user"
+
+
+def test_superset_dockerfile_driver_whitelist_covers_closure() -> None:
+    """The grep whitelist must equal the clickhouse-connect+trino closure.
+
+    ADR 0005: drivers are pinned from uv.lock via a frozen export filtered by
+    this whitelist — editing it silently changes what gets installed.
+    """
+    text = SUPERSET_DOCKERFILE.read_text(encoding="utf-8")
+    match = re.search(r'ARG BI_DRIVER_NAMES="\^\(([^)]+)\)=="', text)
+    assert match, "BI_DRIVER_NAMES whitelist not found in the superset Dockerfile"
+    names = {part.strip() for part in match.group(1).split("|")}
+    assert names == EXPECTED_BI_DRIVER_WHITELIST, (
+        f"BI driver whitelist changed: {sorted(names)} != {sorted(EXPECTED_BI_DRIVER_WHITELIST)}"
+    )
+
+
+def test_superset_config_fails_loudly_without_secret_key() -> None:
+    assert SUPERSET_CONFIG_FILE.is_file(), "superset_config.py is missing"
+    text = SUPERSET_CONFIG_FILE.read_text(encoding="utf-8")
+    assert "SUPERSET_SECRET_KEY" in text, "config must read SUPERSET_SECRET_KEY"
+    assert "superset-postgres:5432" in text, "metadata DB must use the docker-network name"
+    assert "TALISMAN_ENABLED = False" in text, "Talisman-off must be documented, not implicit"
 
 
 def test_airflow_services_use_custom_pinned_image() -> None:
