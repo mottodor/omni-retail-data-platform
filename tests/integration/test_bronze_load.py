@@ -92,6 +92,7 @@ def clean_bronze(live_storage: BotoObjectStorage) -> Generator[None, None, None]
     for table in ("orders", "fx_rates"):
         if bronze_table_exists(table):
             trino_scalar(f"delete from iceberg.bronze.{table} where {partition}")
+            trino_scalar(f"delete from iceberg.bronze.{table} where {next_partition}")
     trino_scalar("drop view if exists iceberg.silver.stg_orders")
     purge_raw(live_storage)
 
