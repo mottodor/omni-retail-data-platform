@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from omni_retail.serving.clickhouse.specs import (
+    MART_CUSTOMER_LTV,
     MART_DAILY_SALES,
+    MART_DELIVERY_PERFORMANCE,
+    MART_MARKETING_ROI,
     MARTS,
     MartColumnSpec,
     MartSpec,
@@ -14,7 +17,17 @@ from omni_retail.serving.clickhouse.specs import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-MIGRATION_0003 = REPO_ROOT / "clickhouse" / "migrations" / "0003_mart_daily_sales.sql"
+MIGRATION_DIR = REPO_ROOT / "clickhouse" / "migrations"
+
+#: Migration file that carries the CURRENT DDL of each mart. For
+#: mart_daily_sales that is 0007 (the slice-2 re-partitioning recreation);
+#: 0003 remains in the ledger as history only.
+DDL_CARRIERS = {
+    "mart_daily_sales": "0007_mart_daily_sales_monthly_partition.sql",
+    "mart_customer_ltv": "0004_mart_customer_ltv.sql",
+    "mart_marketing_roi": "0005_mart_marketing_roi.sql",
+    "mart_delivery_performance": "0006_mart_delivery_performance.sql",
+}
 
 
 def _normalize(sql: str) -> str:
@@ -23,9 +36,27 @@ def _normalize(sql: str) -> str:
 
 
 class TestRegistry:
-    def test_registry_holds_the_slice_one_mart(self) -> None:
-        assert set(MARTS) == {"mart_daily_sales"}
+    def test_registry_holds_every_registered_mart(self) -> None:
+        assert set(MARTS) == {
+            "mart_daily_sales",
+            "mart_customer_ltv",
+            "mart_marketing_roi",
+            "mart_delivery_performance",
+        }
         assert MARTS["mart_daily_sales"] is MART_DAILY_SALES
+        assert MARTS["mart_customer_ltv"] is MART_CUSTOMER_LTV
+        assert MARTS["mart_marketing_roi"] is MART_MARKETING_ROI
+        assert MARTS["mart_delivery_performance"] is MART_DELIVERY_PERFORMANCE
+
+    def test_registry_order_is_stable(self) -> None:
+        # rebuild --all (and its logs) follows registry order; dict literals
+        # preserve insertion order, asserted here so reordering is conscious.
+        assert list(MARTS) == [
+            "mart_daily_sales",
+            "mart_customer_ltv",
+            "mart_marketing_roi",
+            "mart_delivery_performance",
+        ]
 
     def test_mart_by_name_returns_spec(self) -> None:
         assert mart_by_name("mart_daily_sales") is MART_DAILY_SALES
@@ -60,6 +91,32 @@ class TestMartSpec:
         assert "engine = MergeTree" in sql
         assert "order by (order_date, category_name, region)" in sql
 
+    def test_partitioned_mart_emits_partition_by(self) -> None:
+        sql = MART_DAILY_SALES.serving_create_sql
+        assert "partition by toYYYYMM(order_date)" in sql
+        assert sql.index("order by") < sql.index("partition by")
+
+    @pytest.mark.parametrize(
+        "spec", [MART_CUSTOMER_LTV, MART_MARKETING_ROI, MART_DELIVERY_PERFORMANCE]
+    )
+    def test_unpartitioned_marts_emit_no_partition_clause(self, spec: MartSpec) -> None:
+        assert "partition by" not in spec.serving_create_sql
+
+    def test_single_column_order_by(self) -> None:
+        assert "order by (carrier)" in MART_DELIVERY_PERFORMANCE.serving_create_sql
+
+    def test_nullable_columns_only_where_the_model_can_produce_nulls(self) -> None:
+        nullable = {
+            spec.name: {c.name for c in spec.columns if c.clickhouse_type.startswith("Nullable")}
+            for spec in MARTS.values()
+        }
+        assert nullable == {
+            "mart_daily_sales": set(),
+            "mart_customer_ltv": {"avg_order_value_eur"},
+            "mart_marketing_roi": {"end_date", "ctr", "cpc_eur", "cpm_eur", "budget_utilization"},
+            "mart_delivery_performance": {"avg_transit_hours"},
+        }
+
     def test_staging_twin_has_identical_ddl_modulo_table_name(self) -> None:
         serving = MART_DAILY_SALES.serving_create_sql
         staging = MART_DAILY_SALES.staging_create_sql
@@ -87,9 +144,11 @@ class TestMartSpec:
 
 
 class TestMigrationCrossCheck:
-    """The migration file and the generated rebuild DDL must not drift apart."""
+    """The current-DDL migration file and the generated rebuild DDL must not drift."""
 
-    def test_migration_carries_the_generated_serving_and_staging_ddl(self) -> None:
-        migration = _normalize(MIGRATION_0003.read_text())
-        assert _normalize(MART_DAILY_SALES.serving_create_sql) in migration
-        assert _normalize(MART_DAILY_SALES.staging_create_sql) in migration
+    @pytest.mark.parametrize("mart_name", sorted(DDL_CARRIERS))
+    def test_migration_carries_the_generated_serving_and_staging_ddl(self, mart_name: str) -> None:
+        migration = _normalize((MIGRATION_DIR / DDL_CARRIERS[mart_name]).read_text())
+        spec = MARTS[mart_name]
+        assert _normalize(spec.serving_create_sql) in migration
+        assert _normalize(spec.staging_create_sql) in migration

@@ -82,10 +82,10 @@ bi-down: ## Stop the bi profile services (the clickhouse-data volume is preserve
 	$(BI_COMPOSE) down
 
 serving-publish: ## Publish a Gold mart to ClickHouse. ARGS="--mart mart_daily_sales"
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
 
-serving-rebuild: ## Rebuild a serving mart from Iceberg Gold. ARGS="--mart mart_daily_sales"
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.serving.clickhouse rebuild $(ARGS)'
+serving-rebuild: ## Rebuild serving marts from Iceberg Gold. No ARGS = every mart; ARGS="--mart mart_daily_sales" = one mart
+	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse rebuild $(if $(ARGS),$(ARGS),--all)'
 
 AIRFLOW_COMPOSE := docker compose --profile orchestration
 

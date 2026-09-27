@@ -448,7 +448,8 @@ path.
 ```bash
 make bi-up            # profile bi: ClickHouse + one-shot versioned migrations
 make serving-publish ARGS="--mart mart_daily_sales"
-make serving-rebuild ARGS="--mart mart_daily_sales"   # drop-safe: recreate DDL + republish
+make serving-rebuild   # every mart, drop-safe: recreate DDL + republish from Gold
+make serving-rebuild ARGS="--mart mart_daily_sales"   # ...or a single mart
 ```
 
 Schema changes are versioned migrations under `clickhouse/migrations/`,
