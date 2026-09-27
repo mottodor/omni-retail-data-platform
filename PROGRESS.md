@@ -92,6 +92,24 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 
 ## Deferred / follow-ups
 
+Issues from the 2026-09-27 restart-verification postmortem (milestone
+"Reliability debt (post-Phase 7)"):
+
+- #14 (P1, testing): integration suite is not hermetic on a
+  long-lived stack — fixtures purge shared namespaces too broadly,
+  teardown is not guaranteed on failure, and a failed orchestration run
+  left Bronze/Silver/Gold wiped until a manual rebuild.
+- #15 (P1, infra): full Bronze rebuild is not a supported path —
+  Polaris REST degrades (401) after ~5 min of continuous catalog traffic,
+  Trino OOMs at the Phase-1 heap (local `-Xmx2g` fix uncommitted), and the
+  loader cannot resume mid-day.
+- #16 (P2, chore): Makefile targets `ingest-api`, `bronze-load`,
+  `dbt-build` lack `no_proxy` for localhost and fail on proxied hosts.
+
+- Bronze daily loads leave Iceberg snapshot history unbounded (order_items
+  hit metadata v194 during the 2026-09-27 rebuild churn); expiration and
+  maintenance stay Phase 11 scope — recorded there as an early trigger
+  example.
 - Superset dashboard screenshots: the README gallery table and capture
   procedure are in place (`docs/screenshots/README.md`); the PNG files are
   a manual step — no browser exists in the agent environment.
