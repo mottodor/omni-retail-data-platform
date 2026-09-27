@@ -161,7 +161,7 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: us-east-1
-      JAVA_OPTIONS: -Xmx768m
+      JAVA_OPTIONS: -Xmx2g
     ports:
       - "127.0.0.1:8181:8181"
     healthcheck:
