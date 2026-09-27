@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. Today it ingests a PostgreSQL OLTP database, supplier files, and REST APIs into an Iceberg lakehouse (MinIO + Polaris + Trino), models the data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, orchestrates everything with Airflow, and publishes Gold marts to a ClickHouse serving layer. Planned next on the same foundation: Superset BI, CDC via Debezium + Kafka, Spark, observability and lineage — see [ROADMAP.md](ROADMAP.md).
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. Today it ingests a PostgreSQL OLTP database, supplier files, and REST APIs into an Iceberg lakehouse (MinIO + Polaris + Trino), models the data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, orchestrates everything with Airflow, publishes Gold marts to a ClickHouse serving layer, and serves BI dashboards in Apache Superset. Planned next on the same foundation: CDC via Debezium + Kafka, Spark, observability and lineage — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -46,7 +46,7 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: GitLab CI, Kubernetes, Airflow 3 migration
 ```
 
-Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, CI. Not yet built: Superset, Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.
+Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.
 
 Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
 
@@ -367,6 +367,20 @@ of the http-level retries inside the API client, `execution_timeout=5min`,
 date (`ds`) is the only date input — wall-clock `now()` never appears in
 paths or identifiers.
 
+PostgreSQL snapshots (`omni_retail.ingestion.postgres_snapshot`) extract
+each OLTP table as Parquet with an explicit pyarrow schema:
+`archive/postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet`, manifest in the
+shared registry (`source_kind="postgres"`), and a durable watermark
+`archive/_watermarks/postgres/<table>.json`. Keyset pagination on
+`(updated_at, pk)` makes same-second events safe; the watermark moves only
+after a successful upload, so interruptions re-extract and overwrite the
+same window. After re-seeding the source (`make generate-oltp` with a
+truncate), purge the stale watermarks first: `uv run python -m
+omni_retail.ingestion.postgres_snapshot purge-watermarks` (all tables) or
+`… purge-watermarks --table orders` (one table). Limitations (closed by CDC
+in Phase 8): hard deletes are invisible and historical backfill is
+impossible (snapshots hold current state).
+
 ```bash
 make up                  # core profile first (postgres, minio, mock-api)
 make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081
@@ -448,7 +462,9 @@ path.
 ```bash
 make bi-up            # profile bi: ClickHouse + one-shot versioned migrations
 make serving-publish ARGS="--mart mart_daily_sales"
-make serving-rebuild ARGS="--mart mart_daily_sales"   # drop-safe: recreate DDL + republish
+make serving-rebuild   # every mart, drop-safe: recreate DDL + republish from Gold
+make serving-rebuild ARGS="--mart mart_daily_sales"   # ...or a single mart
+make serving-benchmark                            # Trino vs ClickHouse report
 ```
 
 Schema changes are versioned migrations under `clickhouse/migrations/`,
@@ -460,7 +476,65 @@ HTTP interface is published to the host (`127.0.0.1:8123`); the native
 port stays docker-network-only. Idempotency, rebuild-from-Gold parity,
 and reader permissions are asserted by
 `tests/integration/test_serving_publication.py`
-(`make up && make bi-up && make integration`).
+(`make up && make bi-up && make integration`). After a successful
+`transform_lakehouse` run, the dataset-triggered `publish_serving` DAG
+rebuilds all four marts from Gold. Compare the representative query with
+`make serving-benchmark`; the report is written to
+`docs/benchmarks/phase6-trino-vs-clickhouse.md`. Outage recovery is documented
+in [`docs/runbooks/clickhouse-outage.md`](docs/runbooks/clickhouse-outage.md).
+
+## Superset BI
+
+The `bi` profile also runs Apache Superset ([ADR 0005](docs/adr/0005-superset-deployment.md))
+as a custom pinned image (`omni-retail/superset:0.1.0`) with a dedicated
+metadata PostgreSQL and an idempotent one-shot bootstrap: schema migrations,
+admin user, the two connections (`ClickHouse analytics` over the docker
+network with the read-only `superset_reader` account, and `Trino iceberg`
+for ad-hoc exploration), and an import of the BI assets committed under
+[`superset/`](superset/). Web UI: `http://127.0.0.1:8088` (loopback only).
+
+BI assets are code: the four mart datasets with their documented metrics and
+four dashboards — **Sales** (KPI tiles, revenue/margin and AOV trends,
+category/region breakdowns), **Executive** (monthly revenue/margin/orders
+trends, GMV, region/category mix, delivery operations), **Customer**
+(acquisition cohorts by first-order month, new-vs-repeat composition, repeat
+rate, LTV by segment/region, AOV distribution, top customers) and
+**Marketing** (spend vs budget, CTR, CPC/CPM, budget utilization, campaign
+scorecard) — live in `superset/assets/*.zip` and are re-imported on every
+`make bi-up`: a clean clone converges to the same BI state from the
+repository plus `.env`, with no manual UI steps. Bundle exports are
+sanitized before committing (`infrastructure/scripts/superset_bundle_sanitize.py`):
+connection credentials never enter Git. The round-trip loop and operational
+procedures live in [`docs/runbooks/superset.md`](docs/runbooks/superset.md);
+bootstrap invariants, a Superset-vs-ClickHouse canary reconciliation and the
+Trino SQL Lab ad-hoc path are asserted by `tests/integration/test_superset_bootstrap.py`.
+
+### Dashboard gallery
+
+Screenshots of every delivered dashboard belong in the README (ROADMAP
+Phase 7 acceptance); capture steps live in
+[`docs/screenshots/README.md`](docs/screenshots/README.md):
+
+| Dashboard | Screenshot |
+| --- | --- |
+| Sales | `docs/screenshots/sales-dashboard.png` |
+| Executive | `docs/screenshots/executive-dashboard.png` |
+| Customer | `docs/screenshots/customer-dashboard.png` |
+| Marketing | `docs/screenshots/marketing-dashboard.png` |
+
+The Funnel dashboard and conversion/ROAS metrics wait for Phase 9
+clickstream data (see `PROGRESS.md`).
+
+### Ad-hoc exploration: Superset → Trino → Iceberg
+
+Dashboards always read the published ClickHouse marts (low latency,
+read-only serving copy). For ad-hoc exploration over the full lakehouse —
+Bronze/Silver internals, Gold history, or queries the marts do not cover —
+switch the SQL Lab database to **Trino iceberg** and query Iceberg directly
+(`SELECT count(*) FROM gold.fact_orders`). Prefer ClickHouse for repeated
+dashboard-style aggregation; prefer the Trino path when you need the whole
+modeled history or non-mart grains. The path is exercised by
+`tests/integration/test_superset_bootstrap.py::test_sqllab_trino_adhoc_path`.
 
 ## CI
 

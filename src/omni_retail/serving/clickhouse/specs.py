@@ -32,6 +32,7 @@ class MartSpec:
     columns: tuple[MartColumnSpec, ...]
     order_by: tuple[str, ...]
     engine: str = "MergeTree"
+    partition_by: str | None = None
     source_schema: str = SCHEMA_SOURCE
     serving_schema: str = SCHEMA_SERVING
 
@@ -52,10 +53,13 @@ class MartSpec:
     def create_table_sql(self, table: str) -> str:
         columns = ",\n    ".join(f"{c.name} {c.clickhouse_type}" for c in self.columns)
         order_by = ", ".join(self.order_by)
-        return (
+        sql = (
             f"create table if not exists {table}\n(\n    {columns}\n)\n"
             f"engine = {self.engine}\norder by ({order_by})"
         )
+        if self.partition_by is not None:
+            sql += f"\npartition by {self.partition_by}"
+        return sql
 
     @property
     def serving_create_sql(self) -> str:
@@ -91,13 +95,95 @@ MART_DAILY_SALES = MartSpec(
         MartColumnSpec("margin_eur", "Decimal(38, 6)"),  # Trino decimal(38,6)
     ),
     order_by=("order_date", "category_name", "region"),
+    partition_by="toYYYYMM(order_date)",
 )
-# Physical design note (guide §26.2, ADR 0004): MergeTree with the mart
-# grain as ORDER BY is the interim choice — the per-mart ORDER BY /
-# partitioning / TTL design is deliberately re-evaluated in Phase 6
-# slice 2 via a new migration (serving data is derived; republish only).
+# Physical design (guide §26.2, ratified in slice 2 — ADR 0004 deferral):
+# MergeTree for every mart — the swap-based publication makes dedup engines
+# unnecessary. The only partitioned mart is the one with a natural date
+# filter/grain: monthly toYYYYMM(order_date) keeps the slice-3
+# REPLACE PARTITION option open for mart_daily_sales; the other three are
+# small full-history snapshots — unpartitioned. No TTL anywhere: historical
+# portfolio data, expiry has no meaning.
 
-MARTS: dict[str, MartSpec] = {spec.name: spec for spec in (MART_DAILY_SALES,)}
+MART_CUSTOMER_LTV = MartSpec(
+    name="mart_customer_ltv",
+    columns=(
+        MartColumnSpec("customer_id", "Int64"),  # Trino bigint (OLTP identifier)
+        MartColumnSpec("customer_key", "String"),  # Trino varchar (SCD2 surrogate)
+        MartColumnSpec("region", "String"),
+        MartColumnSpec("segment", "String"),
+        MartColumnSpec("first_order_date", "Date"),  # Trino date
+        MartColumnSpec("last_order_date", "Date"),
+        MartColumnSpec("orders_count", "UInt64"),  # Trino bigint count
+        # Money mirrors the Gold types exactly (decimal(38,21) division
+        # artifacts included): the exact round-trip keeps reconciliation
+        # trivially provable — normalizing scales is deliberately rejected.
+        MartColumnSpec("gmv_eur", "Decimal(38, 21)"),
+        # case-without-else: NULL when the customer has no realized orders.
+        MartColumnSpec("avg_order_value_eur", "Nullable(Decimal(38, 21))"),
+    ),
+    # LTV panels filter by region/segment, then locate customers; the grain
+    # column closes the key. Full-history snapshot: no partitioning, no TTL.
+    order_by=("region", "segment", "customer_id"),
+)
+
+MART_MARKETING_ROI = MartSpec(
+    name="mart_marketing_roi",
+    columns=(
+        MartColumnSpec("campaign_id", "String"),
+        MartColumnSpec("campaign_name", "String"),
+        MartColumnSpec("channel", "String"),
+        MartColumnSpec("campaign_status", "String"),
+        MartColumnSpec("start_date", "Date"),
+        MartColumnSpec("end_date", "Nullable(Date)"),  # ongoing campaigns
+        MartColumnSpec("budget_eur", "Decimal(12, 2)"),  # Trino decimal(12,2)
+        MartColumnSpec("spend_eur", "Decimal(12, 2)"),
+        MartColumnSpec("impressions", "UInt64"),  # Trino bigint counts
+        MartColumnSpec("clicks", "UInt64"),
+        MartColumnSpec("ctr", "Nullable(Float64)"),  # nullif(impressions, 0)
+        MartColumnSpec("cpc_eur", "Nullable(Float64)"),  # nullif(clicks, 0)
+        MartColumnSpec("cpm_eur", "Nullable(Float64)"),  # nullif(impressions, 0)
+        MartColumnSpec("budget_utilization", "Nullable(Decimal(27, 15))"),
+    ),
+    # Campaign panels filter by channel and start_date range; campaign_id
+    # ties the key to the grain. Hundreds of rows: no partitioning, no TTL.
+    order_by=("channel", "start_date", "campaign_id"),
+)
+
+MART_DELIVERY_PERFORMANCE = MartSpec(
+    name="mart_delivery_performance",
+    columns=(
+        MartColumnSpec("carrier", "String"),
+        MartColumnSpec("delivery_count", "UInt64"),
+        MartColumnSpec("delivered_count", "UInt64"),
+        MartColumnSpec("in_transit_count", "UInt64"),
+        MartColumnSpec("delayed_count", "UInt64"),
+        MartColumnSpec("returned_count", "UInt64"),
+        # case-without-else: NULL until the carrier has a completed delivery.
+        MartColumnSpec("avg_transit_hours", "Nullable(Float64)"),
+        # Trino timestamp(6) with time zone; explicit UTC so reads are
+        # deterministic regardless of the server timezone.
+        MartColumnSpec("last_update_at", "DateTime64(6, 'UTC')"),
+    ),
+    # One row per carrier: carrier is the only access key. Dozens of rows:
+    # no partitioning, no TTL.
+    order_by=("carrier",),
+)
+
+#: Nullability rule: Nullable(..) only where the Gold model can produce
+#: NULLs (nullif divisions, case-without-else, optional source attributes);
+#: everything else is NOT NULL by construction — an unexpected NULL fails
+#: the staging insert loudly instead of corrupting the serving copy.
+
+MARTS: dict[str, MartSpec] = {
+    spec.name: spec
+    for spec in (
+        MART_DAILY_SALES,
+        MART_CUSTOMER_LTV,
+        MART_MARKETING_ROI,
+        MART_DELIVERY_PERFORMANCE,
+    )
+}
 
 for _spec in MARTS.values():
     _spec.validate()

@@ -35,6 +35,8 @@ from omni_retail.lakehouse.bronze.loader import (
     load_new,
 )
 from omni_retail.lakehouse.bronze.specs import TABLES
+from omni_retail.serving.clickhouse.cli import main as serving_cli_main
+from omni_retail.serving.clickhouse.specs import MARTS
 
 logger = logging.getLogger(__name__)
 
@@ -192,4 +194,26 @@ def run_dbt_build() -> dict[str, object]:
     summary = summarize_dbt_results(json.loads(results_path.read_text(encoding="utf-8")))
     summary["run_dir"] = str(run_dir)
     logger.info("dbt build completed: %s", summary)
+    return summary
+
+
+def run_serving_rebuild() -> dict[str, object]:
+    """Rebuild every ClickHouse serving mart from the current Gold snapshot.
+
+    The serving CLI owns client construction, publication ordering, and
+    fail-fast behavior. Keeping this runner thin makes Airflow a coordinator
+    rather than a second implementation of the serving boundary.
+    """
+    configure_logging()
+    command = ["rebuild", "--all"]
+    exit_code = serving_cli_main(command)
+    if exit_code != 0:
+        raise RuntimeError(f"ClickHouse serving rebuild failed with exit code {exit_code}")
+    summary = {
+        "status": "success",
+        "command": " ".join(command),
+        "mart_count": len(MARTS),
+        "marts": list(MARTS),
+    }
+    logger.info("ClickHouse serving rebuild completed: %s", summary)
     return summary

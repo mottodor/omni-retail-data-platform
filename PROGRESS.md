@@ -16,15 +16,26 @@ Contract:
 
 ## Current focus
 
-Phase 6 (ClickHouse serving layer) — sliced into three vertical slices per
-`docs/plans/active.md` (read it first and resume from its checklist).
-ADR 0004 (deployment + publication mechanism) is accepted; **slice 1 is
-done** (compose `bi` profile + `clickhouse-init` migrations ledger,
+Phase 7 (Apache Superset) is **done**; next up is Phase 8 (CDC: Debezium ->
+Kafka -> Iceberg). Phase 7 delivered end to end: custom pinned image
+`omni-retail/superset:0.1.0`, `bi`-profile services with dedicated metadata
+PostgreSQL, idempotent bootstrap (ADR 0005) with fixed connection UUIDs, and
+BI-as-code — the four mart datasets plus the Sales, Executive, Customer and
+Marketing dashboards committed as sanitized import/export v1 bundles under
+`superset/assets/` and re-imported on every `make bi-up` (verified by a
+metadata-volume-wipe round-trip). Dashboard URLs are slug-based. The Trino
+SQL Lab ad-hoc path (Superset -> Trino -> Iceberg) is verified by an
+integration test. Remaining manual step: dashboard screenshots for the
+README gallery (procedure in `docs/screenshots/README.md`; no browser in
+the agent environment). Funnel dashboard and conversion/ROAS metrics are
+deferred to Phase 9 (no clickstream/attribution data yet).
+
+Phase 6 delivered the `bi` profile and migrations ledger, least-privilege
 `omni_publisher`/`superset_reader` accounts, idempotent staging-swap
-publisher + CLI for `mart_daily_sales`, unit + live integration tests).
-Next: slice 2 — remaining 3 marts, per-mart engine/ORDER BY/partitioning
-design, Gold-vs-CH reconciliation, one-command full rebuild. Funnel mart is
-deferred until Phase 9 clickstream data exists.
+publication for all four available marts, per-mart physical design,
+Gold-vs-ClickHouse reconciliation, one-command rebuild, dataset-triggered
+Airflow publication, Trino-vs-ClickHouse benchmark, and the ClickHouse
+outage runbook.
 
 Phase 5 delivered end to end: Bronze loader (Iceberg via Polaris), Silver/Gold
 Kimball model with SCD2 `dim_customer`, `int_orders_fx` + four EUR-normalized
@@ -42,9 +53,9 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 3 | Batch ingestion: REST APIs + files/S3 | done |
 | 4 | Airflow orchestration | done |
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
-| 6 | ClickHouse serving layer | in progress (slice 2 of 3) |
-| 7 | Apache Superset | not started |
-| 8 | CDC: Debezium -> Kafka -> Iceberg | not started |
+| 6 | ClickHouse serving layer | done |
+| 7 | Apache Superset | done |
+| 8 | CDC: Debezium -> Kafka -> Iceberg | next |
 | 9 | Clickstream + Spark | not started |
 | 10 | Data quality, contracts, failure engineering | not started |
 | 11 | Iceberg maintenance and performance | not started |
@@ -63,16 +74,30 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 2 | Silver/Gold Kimball model, SCD2 `dim_customer`, reconciliation tests | done |
 | 3 | Analytics marts + dataset-triggered orchestration | done |
 
-### Phase 6 slice detail (plan: `docs/plans/active.md`)
+### Phase 6 slice detail
 
 | Slice | Scope | Status |
 |---|---|---|
 | 1 | ClickHouse service (`bi` profile), users, migrations, idempotent publisher for `mart_daily_sales` | done |
-| 2 | Remaining 3 marts, engine/ORDER BY/partitioning design, reconciliation + full rebuild | next |
-| 3 | Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark, runbook | not started |
+| 2 | Remaining 3 marts, engine/ORDER BY/partitioning design, reconciliation + full rebuild | done |
+| 3 | Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark, runbook | done |
+
+### Phase 7 slice detail
+
+| Slice | Scope | Status |
+|---|---|---|
+| 1 | Superset platform: custom image, `bi`-profile services, connections, idempotent bootstrap (ADR 0005) | done |
+| 2 | BI-as-code loop (sanitized bundles, fixed connection UUIDs) + Sales dashboard + canary test | done |
+| 3 | Executive/Customer/Marketing dashboards, Trino ad-hoc path, runbook completion, README gallery scaffolding | done; screenshots are a manual follow-up (no browser in the agent environment) |
 
 ## Deferred / follow-ups
 
+- Superset dashboard screenshots: the README gallery table and capture
+  procedure are in place (`docs/screenshots/README.md`); the PNG files are
+  a manual step — no browser exists in the agent environment.
+- Funnel mart in ClickHouse: deferred until Phase 9 clickstream data
+  exists — Phase 6 publishes the four existing Gold marts only (plan
+  decision, recorded at slice-2 completion).
 - Branch reconciliation: `feature/phase5-followups` (forked before slice 2)
   carries a stale-watermark purge CLI, lockfile alignment, and a
   bronze-teardown cleanup; its polaris-init/compose/smoke fix (grant

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 from airflow.decorators import dag, task
-from include.datasets import BRONZE
+from include.datasets import BRONZE, GOLD
 from include.policy import TRANSFORM_TASK_DEFAULT_ARGS
 from include.runners import run_dbt_build
 
@@ -28,7 +28,7 @@ from include.runners import run_dbt_build
     ),
 )
 def build_transform_lakehouse_dag() -> None:
-    @task
+    @task(outlets=[GOLD])
     def dbt_build() -> dict[str, object]:
         return run_dbt_build()
 

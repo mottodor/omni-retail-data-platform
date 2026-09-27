@@ -227,25 +227,58 @@ Per-mart semantics (source of truth: `dbt/models/marts/schema.yml`):
 ## Serving layer (ClickHouse, Phase 6)
 
 The `analytics` database in ClickHouse holds derived serving copies of the
-Gold marts ([ADR 0004](adr/0004-clickhouse-serving-publication.md)). Iceberg
-stays the source of truth; every serving table is a 1:1 mirror of its Gold
-mart — same columns, no ClickHouse-only business logic — and is rebuildable
-with one command (`make serving-rebuild ARGS="--mart mart_daily_sales"`).
+four Gold marts ([ADR 0004](adr/0004-clickhouse-serving-publication.md)).
+Iceberg stays the source of truth; every serving table is a 1:1 mirror of
+its Gold mart — same columns, no ClickHouse-only business logic — and the
+whole layer is rebuildable with one command (`make serving-rebuild`, or
+`ARGS="--mart mart_daily_sales"` for a single mart).
 
-| Serving table | Mirrors (Trino) | ORDER BY | Engine |
+### Physical design (ratified in slice 2, guide §26.2)
+
+MergeTree everywhere: the swap-based publication replaces whole snapshots,
+so dedup engines (`ReplacingMergeTree` etc.) would add semantics without
+adding guarantees. `ORDER BY` follows each mart's BI access pattern;
+partitioning exists only where a date filter/partition-replace makes
+functional sense; no TTL — historical portfolio data, expiry has no
+meaning.
+
+| Serving table (+ `_staging` twin each) | ORDER BY | Partitioning | Rationale |
 |---|---|---|---|
-| `analytics.mart_daily_sales` (+ `_staging` twin) | `iceberg.analytics.mart_daily_sales` | `(order_date, category_name, region)` — the mart grain | MergeTree |
+| `mart_daily_sales` | `(order_date, category_name, region)` | monthly `toYYYYMM(order_date)` (migration 0007) | the single naturally date-filtered mart; monthly partitions keep the slice-3 `REPLACE PARTITION` option open |
+| `mart_customer_ltv` | `(region, segment, customer_id)` | none | full-history snapshot per customer; LTV panels filter region/segment, `first/last_order_date` are attributes, not filters |
+| `mart_marketing_roi` | `(channel, start_date, campaign_id)` | none | campaign panels filter channel + date range; hundreds of rows |
+| `mart_delivery_performance` | `(carrier)` | none | one row per carrier — the grain is the only access key |
 
-Type mapping for the slice-1 mart: Trino `integer` → `Int32`, `date` →
-`Date`, `varchar` → `String`, `bigint` counts → `UInt64`; money columns
-mirror the Gold types exactly (`revenue_eur` `decimal(38,21)` →
-`Decimal(38, 21)`, `margin_eur` `decimal(38,6)` → `Decimal(38, 6)`) so
-values round-trip 1:1 — the scales are Trino decimal-division artifacts,
-and normalizing them would be a deliberate slice 2 decision taken with a
-migration. Engine, partitioning, and TTL choices are re-evaluated per mart
-in Phase 6 slice 2 (none yet). Publication mode for every mart is a
-**full snapshot swap**: `TRUNCATE staging` → insert → `EXCHANGE TABLES`
-(see `src/omni_retail/serving/clickhouse/publisher.py`). `superset_reader`
-has SELECT-only access; `omni_publisher` holds the write grants;
-`analytics.schema_migrations` tracks the applied files from
-`clickhouse/migrations/`.
+### Type mapping and nullability
+
+Type mapping from Trino: `integer` → `Int32`, `bigint` identifiers →
+`Int64`, `bigint` counts → `UInt64`, `date` → `Date`, `varchar` →
+`String`, `double` → `Float64`, `decimal(p,s)` → `Decimal(p,s)`,
+`timestamp(6) with time zone` → `DateTime64(6, 'UTC')`. Money columns
+mirror the Gold types exactly (`Decimal(38, 21)` / `Decimal(38, 6)` —
+Trino decimal-division scales included): the exact round-trip is what
+makes Gold-vs-CH reconciliation trivially provable, so normalizing the
+scales is deliberately rejected (slice 2 decision).
+
+Nullability mirrors the Gold model semantics: `Nullable(..)` only where
+the dbt model can produce NULLs — `nullif`-protected divisions
+(`ctr`, `cpc_eur`, `cpm_eur`, `budget_utilization`), `case`-without-`else`
+(`avg_order_value_eur`, `avg_transit_hours`), optional source attributes
+(`end_date`). Everything else is NOT NULL by construction; an unexpected
+NULL fails the staging insert loudly instead of corrupting the copy.
+
+### Publication and verification
+
+Publication mode for every mart is a **full snapshot swap**:
+`TRUNCATE staging` → insert → `EXCHANGE TABLES` (see
+`src/omni_retail/serving/clickhouse/publisher.py`); the registry of all
+four marts lives in `specs.py`, cross-checked against the migrations by a
+unit test. `superset_reader` has SELECT-only access; `omni_publisher`
+holds the write grants; `analytics.schema_migrations` tracks the applied
+files from `clickhouse/migrations/`. Per-mart reconciliation (row count +
+full row-by-row equality Gold vs serving), republish idempotency, the
+one-command full rebuild, and reader permissions are asserted by
+`tests/integration/test_serving_publication.py`.
+
+The funnel mart is deferred until its clickstream source exists in
+Phase 9.

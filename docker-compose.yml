@@ -23,6 +23,13 @@ x-airflow-env: &airflow-env
   # Trino over the docker network; defaults live in TrinoConfig/profiles.yml.
   TRINO_HOST: trino
   TRINO_PORT: "8080"
+  # Serving publication runs inside the Docker network; do not use the
+  # host-loopback defaults used by the local CLI.
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: analytics
+  CLICKHOUSE_PUBLISHER_USER: ${CLICKHOUSE_PUBLISHER_USER}
+  CLICKHOUSE_PUBLISHER_PASSWORD: ${CLICKHOUSE_PUBLISHER_PASSWORD}
 
 x-airflow-volumes: &airflow-volumes
   # DAGs stay thin wrappers (AGENTS §19): helpers and tests are mounted
@@ -285,6 +292,91 @@ services:
     entrypoint: ["/bin/bash", "/usr/local/bin/clickhouse_init.sh"]
     restart: "no"
 
+  # Superset BI layer (Phase 7, profile `bi`, ADR 0005). The web UI is
+  # published loopback-only; both database connections use docker-network
+  # hostnames (clickhouse:8123, trino:8080), so dashboards need no ClickHouse
+  # exposure beyond the existing loopback HTTP port.
+  superset-postgres:
+    image: postgres:16.15-alpine
+    profiles: ["bi"]
+    environment:
+      POSTGRES_USER: ${SUPERSET_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${SUPERSET_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${SUPERSET_POSTGRES_DB}
+    volumes:
+      - superset-metadata-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SUPERSET_POSTGRES_USER} -d ${SUPERSET_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  superset:
+    image: omni-retail/superset:0.1.0
+    build:
+      context: .
+      dockerfile: infrastructure/superset/Dockerfile
+    profiles: ["bi"]
+    depends_on:
+      superset-postgres:
+        condition: service_healthy
+    environment:
+      SUPERSET_CONFIG_PATH: /app/superset_home/repo/superset_config.py
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_POSTGRES_USER: ${SUPERSET_POSTGRES_USER}
+      SUPERSET_POSTGRES_PASSWORD: ${SUPERSET_POSTGRES_PASSWORD}
+      SUPERSET_POSTGRES_DB: ${SUPERSET_POSTGRES_DB}
+    # The image's own CMD (run-server.sh) starts gunicorn: 1 worker,
+    # gthread, 20 threads, 0.0.0.0:8088 — tunable via SUPERSET_* env and
+    # inside the workstation budget (guide §12.2). In Superset 5.0.0 the
+    # WSGI target is the create_app() factory (FLASK_APP), not an `app`
+    # attribute, so a hand-written gunicorn command is not duplicated here.
+    ports:
+      - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
+    volumes:
+      - ./superset:/app/superset_home/repo:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  superset-init:
+    image: omni-retail/superset:0.1.0
+    profiles: ["bi"]
+    depends_on:
+      superset:
+        condition: service_healthy
+    environment:
+      SUPERSET_CONFIG_PATH: /app/superset_home/repo/superset_config.py
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_POSTGRES_USER: ${SUPERSET_POSTGRES_USER}
+      SUPERSET_POSTGRES_PASSWORD: ${SUPERSET_POSTGRES_PASSWORD}
+      SUPERSET_POSTGRES_DB: ${SUPERSET_POSTGRES_DB}
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      # Reader account + docker-network ClickHouse address (loopback defaults
+      # in .env are for host-side CLI only).
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_READER_USER: ${CLICKHOUSE_READER_USER}
+      CLICKHOUSE_READER_PASSWORD: ${CLICKHOUSE_READER_PASSWORD}
+      # Trino has no local auth (documented local-only posture, ADR 0005).
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_CATALOG: iceberg
+      TRINO_USER: omni_superset
+      SUPERSET_ASSETS_DIR: /app/superset_home/repo/assets
+    volumes:
+      - ./superset:/app/superset_home/repo:ro
+      - ./infrastructure/scripts/superset_init.py:/usr/local/bin/superset_init.py:ro
+    entrypoint: ["python", "/usr/local/bin/superset_init.py"]
+    restart: "no"
+
   airflow-postgres:
     image: postgres:16.15-alpine
     profiles: ["orchestration"]
@@ -379,3 +471,4 @@ volumes:
   airflow-metadata-data:
   airflow-logs:
   clickhouse-data:
+  superset-metadata-data:
