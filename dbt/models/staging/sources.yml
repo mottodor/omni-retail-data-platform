@@ -16,3 +16,6 @@ sources:
       - name: order_items
       - name: payments
       - name: shipments
+      - name: fx_rates
+      - name: campaigns
+      - name: deliveries

@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime
 
 from airflow.decorators import dag, task
 from airflow.models.param import Param
+from include.datasets import RAW_POSTGRES_SNAPSHOT
 from include.policy import INGESTION_TASK_DEFAULT_ARGS
 from include.runners import run_postgres_snapshot
 
@@ -58,7 +59,7 @@ SNAPSHOT_TABLES: tuple[str, ...] = (
 def build_postgres_snapshot_dag() -> None:
     for table in SNAPSHOT_TABLES:
 
-        @task(task_id=f"snapshot_{table}")
+        @task(task_id=f"snapshot_{table}", outlets=[RAW_POSTGRES_SNAPSHOT])
         def snapshot(
             ds: str | None = None,
             params: Mapping[str, object] | None = None,

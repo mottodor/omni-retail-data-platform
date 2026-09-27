@@ -97,3 +97,24 @@ def test_insert_statement_contains_all_columns_in_order() -> None:
 def test_insert_statements_reject_missing_columns() -> None:
     with pytest.raises(ValueError, match="missing columns"):
         insert_statements(TABLES["categories"], [{"category_id": 1}])
+
+
+def test_default_batch_size_limits_catalog_operations() -> None:
+    """5000 rows/statement cap: fewer INSERT commits per load (catalog-auth
+    churn, trinodb/trino#30816) and fewer tiny parquet files per snapshot."""
+    spec = TABLES["categories"]
+    rows = [categories_row(index) for index in range(5001)]
+    statements = insert_statements(spec, rows)
+    assert len(statements) == 2
+
+
+def test_statements_respect_query_text_budget() -> None:
+    """Trino rejects query text over 1MB (QUERY_TEXT_TOO_LARGE); batches must
+    stay well under it even with wide rows."""
+    spec = TABLES["categories"]
+    rows = [categories_row(index) for index in range(200)]
+    rows = [{**row, "name": "x" * 4000} for row in rows]
+    statements = insert_statements(spec, rows)
+    assert len(statements) > 1
+    assert all(len(statement) <= 768_000 for statement in statements)
+    assert sum(statement.count("), (") for statement in statements) == 198

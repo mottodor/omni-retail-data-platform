@@ -60,6 +60,12 @@ jobs:
           file: infrastructure/airflow/Dockerfile
           tags: omni-retail/airflow:0.1.0
           push: false
+          # Export the image into the runner's Docker daemon (type=docker) so
+          # the test step below can `docker run` it; without `load` the result
+          # stays only in the BuildKit cache and the run step fails with
+          # "pull access denied" when AIRFLOW_SKIP_BUILD=1 skips the fallback
+          # `docker build`.
+          load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

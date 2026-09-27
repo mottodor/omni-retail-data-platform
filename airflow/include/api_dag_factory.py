@@ -2,7 +2,8 @@
 
 All three mock-API sources (fx-rates, marketing-campaigns, deliveries) share
 one shape: a single TaskFlow ``ingest`` task in the ``mock_api`` pool that
-returns the batch summary to XCom.
+returns the batch summary to XCom and emits the source's ``raw://`` dataset
+(Phase 5 slice 3) so ``load_bronze`` can be triggered by fresh raw data.
 """
 
 from datetime import date, datetime
@@ -10,6 +11,7 @@ from datetime import date, datetime
 from airflow.decorators import dag, task
 from airflow.models import DAG
 
+from include.datasets import raw_dataset
 from include.policy import INGESTION_TASK_DEFAULT_ARGS
 from include.runners import run_api_ingestion
 
@@ -40,7 +42,7 @@ def build_api_ingestion_dag(
         ),
     )
     def generated() -> None:
-        @task(pool=pool)
+        @task(pool=pool, outlets=[raw_dataset(source_name)])
         def ingest(ds: str | None = None) -> dict[str, object]:
             if ds is None:
                 raise ValueError("expected Airflow to inject the logical date as ds")

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -58,7 +58,7 @@ ingest-files: ## Process pending vendor files (landing -> processing -> archive 
 ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source fx-rates --date 2026-09-11" or "backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"
 	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.ingestion.api $(ARGS)'
 
-bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18" or "run-all --date 2026-09-18"
+bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18", "run-all --date 2026-09-18" or "run-new"
 	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
@@ -70,8 +70,32 @@ dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select
 dbt-test: ## Run dbt tests. ARGS="--select staging"
 	@bash -c 'set -a; source .env; set +a; $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
 
-integration: ## Run integration tests against the live core stack (requires `make up`)
+integration: ## Run integration tests against the live stacks (requires `make up`; ClickHouse tests also need `make bi-up`)
 	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'
+
+BI_COMPOSE := docker compose --profile bi
+
+bi-up: ## Start the BI profile (ClickHouse + Superset; builds the custom image; requires core up)
+	# Two phases (docker compose v5 `--wait` treats exited-0 one-shot
+	# containers in the wait set as a failure): health-gate the long-running
+	# services, then run the idempotent one-shot initializers to completion.
+	# Services are targeted by name (no --profile) so the wait set stays
+	# free of one-shot containers.
+	docker compose up -d --wait --build clickhouse superset-postgres superset
+	docker compose run --rm clickhouse-init
+	docker compose run --rm superset-init
+
+bi-down: ## Stop the bi profile services (clickhouse-data and superset metadata volumes are preserved)
+	$(BI_COMPOSE) down
+
+serving-publish: ## Publish a Gold mart to ClickHouse. ARGS="--mart mart_daily_sales"
+	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
+
+serving-rebuild: ## Rebuild serving marts from Iceberg Gold. No ARGS = every mart; ARGS="--mart mart_daily_sales" = one mart
+	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse rebuild $(if $(ARGS),$(ARGS),--all)'
+
+serving-benchmark: ## Compare a representative Gold query in Trino and ClickHouse. ARGS="--repetitions 5"
+	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse benchmark $(ARGS)'
 
 AIRFLOW_COMPOSE := docker compose --profile orchestration
 

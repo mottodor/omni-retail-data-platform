@@ -11,8 +11,14 @@ from decimal import Decimal
 
 from omni_retail.lakehouse.bronze.specs import BronzeTableSpec
 
-#: Rows per multi-row INSERT statement (Phase 5 design spec §4).
-ROWS_PER_STATEMENT = 500
+#: Rows per multi-row INSERT statement. Larger batches mean fewer catalog
+#: commits per load (per-operation OAuth2 churn, trinodb/trino#30816) and
+#: fewer tiny parquet files per Iceberg snapshot (AGENTS §22/§25).
+ROWS_PER_STATEMENT = 5000
+
+#: Character budget per INSERT statement: Trino rejects query text larger
+#: than 1MB (QUERY_TEXT_TOO_LARGE), so batches must stay well under it.
+MAX_STATEMENT_CHARS = 768_000
 
 Row = Mapping[str, object]
 
@@ -73,8 +79,13 @@ def insert_statements(
     catalog: str = "iceberg",
     schema: str = "bronze",
     rows_per_statement: int = ROWS_PER_STATEMENT,
+    max_statement_chars: int = MAX_STATEMENT_CHARS,
 ) -> list[str]:
-    """Batched multi-row INSERTs covering every row in declaration order."""
+    """Batched multi-row INSERTs covering every row in declaration order.
+
+    A batch is cut at ``rows_per_statement`` rows OR when the rendered
+    statement would exceed ``max_statement_chars`` — whichever comes first.
+    """
     if rows_per_statement < 1:
         raise ValueError(f"rows_per_statement must be >= 1, got {rows_per_statement}")
     columns = spec.all_columns
@@ -88,16 +99,32 @@ def insert_statements(
     header = f"insert into {catalog}.{schema}.{spec.name} ({column_list}) values "
 
     statements: list[str] = []
-    for start in range(0, len(rows), rows_per_statement):
-        chunk = rows[start : start + rows_per_statement]
-        tuples = ", ".join(
+    chunk: list[str] = []
+    chunk_chars = len(header)
+
+    def flush() -> None:
+        nonlocal chunk, chunk_chars
+        if chunk:
+            statements.append(header + ", ".join(chunk))
+            chunk = []
+            chunk_chars = len(header)
+
+    for row in rows:
+        rendered = (
             "("
             + ", ".join(
                 sql_literal(row[name], column.trino_type)
                 for name, column in zip(names, columns, strict=True)
             )
             + ")"
-            for row in chunk
         )
-        statements.append(header + tuples)
+        separator_chars = 2 if chunk else 0
+        if chunk and (
+            chunk_chars + separator_chars + len(rendered) > max_statement_chars
+            or len(chunk) >= rows_per_statement
+        ):
+            flush()
+        chunk.append(rendered)
+        chunk_chars += (2 if len(chunk) > 1 else 0) + len(rendered)
+    flush()
     return statements

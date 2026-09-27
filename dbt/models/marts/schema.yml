@@ -1,0 +1,141 @@
+version: 2
+
+models:
+  - name: mart_daily_sales
+    description: >
+      Daily sales mart. Purpose: GMV/revenue/margin roll-ups for the Revenue
+      and Sales dashboards. Grain: one row per (order_date, category_name,
+      region). PK: the combination (order_date, category_name, region).
+      Measures: orders_count (distinct orders in the group — additive across
+      dates, NOT across category/region: a multi-category order counts once
+      per row), items_sold, revenue_eur (item-line revenue, excl. shipping),
+      margin_eur. Financial measures exclude cancelled and refunded orders
+      (realized-revenue policy); orders_count includes all orders. Shipping
+      is an order-grain measure and stays in fact_orders/int_orders_fx.
+      Upstream: int_orders_fx, fact_order_items, dim_product, dim_customer
+      (point-in-time region), dim_date. Known simplification (mock source):
+      product prices are currency-naive; line amounts are normalized with
+      the order currency's FX rate.
+    columns:
+      - name: date_key
+        description: yyyymmdd integer key; joins dim_date.
+        tests: [not_null]
+      - name: order_date
+        tests: [not_null]
+      - name: category_name
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: orders_count
+        tests: [not_null]
+      - name: items_sold
+        tests: [not_null]
+      - name: revenue_eur
+        tests: [not_null]
+      - name: margin_eur
+        tests: [not_null]
+
+  - name: mart_customer_ltv
+    description: >
+      Customer lifetime value mart. Purpose: retention/LTV/activation
+      analysis; feeds the Customer dashboard. Grain: one row per customer
+      with at least one order. PK: customer_id. Measures: orders_count (all
+      orders), gmv_eur (realized order totals incl. shipping, EUR),
+      avg_order_value_eur. Attributes region/segment are the customer's
+      CURRENT dim_customer version — LTV reports today's segmentation, not
+      point-in-time (documented choice). Upstream: int_orders_fx,
+      dim_customer (current versions).
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: customer_key
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["standard", "premium", "vip"]
+      - name: first_order_date
+        tests: [not_null]
+      - name: last_order_date
+        tests: [not_null]
+      - name: orders_count
+        tests: [not_null]
+      - name: gmv_eur
+        tests: [not_null]
+      - name: avg_order_value_eur
+        description: NULL only for customers whose every order is cancelled/refunded.
+
+  - name: mart_marketing_roi
+    description: >
+      Marketing campaign efficiency mart. Purpose: spend/CTR/CPC/CPM
+      monitoring; feeds the Marketing dashboard. Grain: one row per
+      campaign. PK: campaign_id. Measures: spend/budget/impressions/clicks
+      (current snapshot) and derived ctr, cpc_eur, cpm_eur,
+      budget_utilization (can exceed 1.0: the source overspends up to 5%).
+      LIMITATION (spec §2): campaigns are not linked to orders, so revenue
+      attribution is impossible with current data — no ROAS is computed and
+      none may be faked; ROAS arrives with clickstream attribution
+      (Phase 9). Upstream: dim_campaign.
+    columns:
+      - name: campaign_id
+        tests: [unique, not_null]
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ["search", "display", "social", "email", "video"]
+      - name: campaign_status
+        tests:
+          - accepted_values:
+              values: ["active", "paused", "completed", "scheduled"]
+      - name: impressions
+        tests: [not_null]
+      - name: clicks
+        tests: [not_null]
+      - name: spend_eur
+        tests: [not_null]
+      - name: ctr
+        description: clicks / impressions; NULL while a campaign has 0 impressions.
+        tests:
+          - not_null:
+              config:
+                where: impressions > 0
+      - name: cpc_eur
+        tests:
+          - not_null:
+              config:
+                where: clicks > 0
+      - name: cpm_eur
+        tests:
+          - not_null:
+              config:
+                where: impressions > 0
+
+  - name: mart_delivery_performance
+    description: >
+      Carrier delivery performance mart from the delivery-partner API feed.
+      Purpose: carrier scorecard (transit times, status mix) for the
+      delivery dashboard. Grain: one row per carrier. PK: carrier.
+      Measures: delivery_count, per-status counts (sum-tested), and
+      avg_transit_hours averaged over deliveries with both shipped_at and
+      delivered_at (delivered/returned). NOTE: the feed's order_id values
+      are the partner's synthetic references ("ORD-...") and never join
+      OLTP orders (spec §2); this mart is independent of fact_shipments
+      (OLTP shipments serve fact_shipments). Upstream: int_deliveries.
+    columns:
+      - name: carrier
+        tests: [unique, not_null]
+      - name: delivery_count
+        tests: [not_null]
+      - name: delivered_count
+        tests: [not_null]
+      - name: in_transit_count
+        tests: [not_null]
+      - name: delayed_count
+        tests: [not_null]
+      - name: returned_count
+        tests: [not_null]
+      - name: avg_transit_hours
+        description: NULL only when the carrier has no completed deliveries yet.

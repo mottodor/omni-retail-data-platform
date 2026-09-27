@@ -1,0 +1,154 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: >
+      Calendar dimension. Purpose: standardized date attributes for drill-downs.
+      Grain: one row per calendar day in the observed order-activity window
+      (created_at/updated_at of orders). PK: date_key.
+      Upstream: int_orders (bounds only).
+    columns:
+      - name: date_key
+        description: Integer surrogate key in yyyymmdd form.
+        tests: [unique, not_null]
+      - name: full_date
+        description: The calendar day.
+        tests: [unique, not_null]
+
+  - name: dim_product
+    description: >
+      Product dimension (SCD Type 1: current state; natural key).
+      Grain: one row per product. PK: product_id.
+      Measures carried as attributes: unit_price, unit_cost.
+      Upstream: int_products, int_categories.
+    columns:
+      - name: product_id
+        tests: [unique, not_null]
+      - name: category_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('int_categories')
+              field: category_id
+
+  - name: dim_campaign
+    description: >
+      Marketing campaign dimension from the campaign API snapshot
+      (SCD Type 1). Grain: one row per campaign. PK: campaign_id.
+      Attributes: budget_eur, spend_eur, impressions, clicks (current
+      snapshot; derived KPIs live in mart_marketing_roi, slice 3).
+      Upstream: int_campaigns.
+    columns:
+      - name: campaign_id
+        tests: [unique, not_null]
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ["search", "display", "social", "email", "video"]
+      - name: campaign_status
+        tests:
+          - accepted_values:
+              values: ["active", "paused", "completed", "scheduled"]
+
+  - name: dim_customer
+    description: >
+      Customer dimension, SCD Type 2 with daily version grain.
+      Grain: one row per customer version. PK: customer_key
+      ('<customer_id>_<valid_from>'). Semantics: valid_from = logical batch
+      date carrying the version; valid_to = day before the next version
+      (inclusive; 9999-12-31 while open); is_current marks the single open
+      version. Upstream: stg_customers (full Bronze history).
+    columns:
+      - name: customer_key
+        tests: [unique, not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: customer_status
+        tests:
+          - accepted_values:
+              values: ["active", "inactive", "churned"]
+      - name: segment
+        tests:
+          - accepted_values:
+              values: ["standard", "premium", "vip"]
+
+  - name: fact_orders
+    description: >
+      Order fact (current state). Grain: one row per order. PK: order_id.
+      Measures: shipping_cost, order_total (source currency). Degenerate
+      natural key: customer_id. FK: customer_key — the SCD2 version valid on
+      date(created_at) via point-in-time join with earliest-version
+      fallback. Upstream: int_orders, dim_customer.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: customer_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_key
+      - name: order_status
+        tests:
+          - accepted_values:
+              values: ["pending", "paid", "shipped", "delivered", "cancelled", "refunded"]
+
+  - name: fact_order_items
+    description: >
+      Order-line fact. Grain: one row per order line. PK: order_item_id.
+      Measures: quantity, unit_price, line_total.
+      Upstream: int_order_items; FKs to fact_orders and dim_product.
+    columns:
+      - name: order_item_id
+        tests: [unique, not_null]
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fact_orders')
+              field: order_id
+      - name: product_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_product')
+              field: product_id
+
+  - name: fact_payments
+    description: >
+      Payment fact. Grain: one row per payment. PK: payment_id.
+      Measures: payment_amount. Degenerate: transaction_id.
+      Reconciliation against fact_orders is a singular test.
+      Upstream: int_payments.
+    columns:
+      - name: payment_id
+        tests: [unique, not_null]
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fact_orders')
+              field: order_id
+      - name: payment_status
+        tests:
+          - accepted_values:
+              values: ["pending", "authorized", "captured", "failed", "refunded", "cancelled"]
+
+  - name: fact_shipments
+    description: >
+      Shipment fact. Grain: one row per shipment. PK: shipment_id.
+      Degenerate: tracking_number. shipped_at <= delivered_at is
+      business-tested. Upstream: int_shipments.
+    columns:
+      - name: shipment_id
+        tests: [unique, not_null]
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fact_orders')
+              field: order_id
+      - name: shipment_status
+        tests:
+          - accepted_values:
+              values: ["pending", "in_transit", "delivered", "cancelled"]

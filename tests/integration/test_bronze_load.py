@@ -29,11 +29,17 @@ from omni_retail.ingestion.common.paths import (
 )
 from omni_retail.ingestion.common.storage import BotoObjectStorage
 from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
-from omni_retail.lakehouse.bronze.loader import DbapiTrinoExecutor, TrinoConfig, load
+from omni_retail.lakehouse.bronze.loader import (
+    DbapiTrinoExecutor,
+    TrinoConfig,
+    load,
+    load_new,
+)
 from omni_retail.lakehouse.bronze.specs import spec_by_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGICAL_DATE = date(2026, 9, 10)
+NEXT_LOGICAL_DATE = date(2026, 9, 11)
 ORDERS_SNAPSHOT = table_by_name("orders")
 
 
@@ -64,6 +70,7 @@ def bronze_table_exists(table: str) -> bool:
 def purge_raw(storage: BotoObjectStorage) -> None:
     for prefix in (
         f"postgres/orders/{LOGICAL_DATE:%Y/%m/%d}/",
+        f"postgres/orders/{NEXT_LOGICAL_DATE:%Y/%m/%d}/",
         "_manifests/postgres-orders/",
         f"api/fx-rates/{LOGICAL_DATE:%Y%m%d}/",
         "_manifests/fx-rates/",
@@ -81,6 +88,7 @@ def clean_bronze(live_storage: BotoObjectStorage) -> Generator[None, None, None]
     # staging view — Trino purge-drops work since the Phase 5 infra follow-up
     # (CATALOG_MANAGE_CONTENT grant + DROP_WITH_PURGE_ENABLED).
     partition = f"\"_batch_date\" = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
+    next_partition = f"\"_batch_date\" = DATE '{NEXT_LOGICAL_DATE:%Y-%m-%d}'"
     for table in ("orders", "fx_rates"):
         if bronze_table_exists(table):
             trino_scalar(f"delete from iceberg.bronze.{table} where {partition}")
@@ -104,7 +112,7 @@ def orders_rows(count: int) -> list[tuple[object, ...]]:
     ]
 
 
-def seed_orders(storage: BotoObjectStorage, rows: int) -> None:
+def seed_orders(storage: BotoObjectStorage, rows: int, logical_date: date = LOGICAL_DATE) -> None:
     data = orders_rows(rows)
     arrays = [
         pa.array([row[index] for row in data], type=column.type)
@@ -114,17 +122,17 @@ def seed_orders(storage: BotoObjectStorage, rows: int) -> None:
     sink = pa.BufferOutputStream()
     pq.write_table(table, sink)
     body = sink.getvalue().to_pybytes()
-    storage.put_object(BUCKET_ARCHIVE, postgres_snapshot_key("orders", LOGICAL_DATE), body)
+    storage.put_object(BUCKET_ARCHIVE, postgres_snapshot_key("orders", logical_date), body)
     manifest = BatchManifest(
-        batch_id=f"postgres-orders-{LOGICAL_DATE:%Y%m%d}",
+        batch_id=f"postgres-orders-{logical_date:%Y%m%d}",
         source="postgres-orders",
         source_kind="postgres",
         status="completed",
-        object_key=postgres_snapshot_key("orders", LOGICAL_DATE),
+        object_key=postgres_snapshot_key("orders", logical_date),
         checksum=hashlib.sha256(body).hexdigest(),
         size_bytes=len(body),
         ingested_at=datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
-        logical_date=LOGICAL_DATE,
+        logical_date=logical_date,
         row_count=rows,
         rejected_row_count=0,
         schema_version="1.0",
@@ -225,3 +233,32 @@ def test_dbt_staging_view_builds_from_bronze(
     )
 
     assert trino_scalar("select count(*) from iceberg.silver.stg_orders") == 3
+
+
+def test_bronze_load_new_loads_dates_past_watermark(
+    live_storage: BotoObjectStorage, clean_bronze: None
+) -> None:
+    seed_orders(live_storage, rows=3, logical_date=LOGICAL_DATE)
+    seed_orders(live_storage, rows=4, logical_date=NEXT_LOGICAL_DATE)
+
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        first_day = load(
+            live_storage, executor, spec_by_source("orders"), logical_date=LOGICAL_DATE
+        )
+        assert first_day.row_count == 3
+
+        results = load_new(live_storage, executor, spec_by_source("orders"))
+
+    # only the day past the watermark was loaded, and a re-run is a no-op
+    assert [result.logical_date for result in results] == [NEXT_LOGICAL_DATE]
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        assert load_new(live_storage, executor, spec_by_source("orders")) == []
+
+    counts = {
+        day: trino_scalar(
+            f"select count(*) from iceberg.bronze.orders "
+            f"where \"_batch_date\" = DATE '{day:%Y-%m-%d}'"
+        )
+        for day in (LOGICAL_DATE, NEXT_LOGICAL_DATE)
+    }
+    assert counts == {LOGICAL_DATE: 3, NEXT_LOGICAL_DATE: 4}
