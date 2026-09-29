@@ -97,10 +97,10 @@ ADR 0001; exact Python versions live in the committed `uv.lock` (§11).
 Any change to the stack requires an ADR (§42,
 `docs/agent/engineering-practices.md`).
 
-Later exercises — Airflow 2 -> 3 migration, GitHub Actions -> GitLab CI,
-Kubernetes only after the Docker Compose platform is complete — are scheduled
-by `ROADMAP.md` (phases 16–17 and the "Later" section) and must not be started
-early.
+Later exercises — Airflow 2 -> 3 migration, dbt Core 1.10 -> dbt v2
+migration, GitHub Actions -> GitLab CI, and Kubernetes only after the Docker
+Compose platform is complete — are scheduled by `ROADMAP.md` (phases 16–18
+and the "Later" section) and must not be started early.
 
 ### 3.2 Storage and serving responsibilities
 

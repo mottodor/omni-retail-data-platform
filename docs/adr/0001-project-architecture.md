@@ -53,4 +53,4 @@ Only after the first slice works end-to-end do Kafka/Debezium CDC, Spark, observ
 
 - Compose profiles allow disabling a subsystem without rework.
 - ClickHouse can always be rebuilt from Iceberg Gold if its state is lost or corrupted.
-- The roadmap reserves migration exercises (Airflow 2 → 3, GitHub Actions → GitLab CI) as later phases; those will be preceded by their own ADRs.
+- The roadmap reserves migration exercises (Airflow 2 → 3, dbt Core 1.10 → dbt v2, GitHub Actions → GitLab CI) as later phases; those will be preceded by their own ADRs.

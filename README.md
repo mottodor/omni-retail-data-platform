@@ -43,7 +43,7 @@ QUALITY: dbt tests + custom SQL/Python reconciliation
 LINEAGE: OpenLineage + Marquez
 MONITORING: Prometheus + Grafana
 DEVOPS: GitHub + GitHub Actions + Docker Compose
-LATER: GitLab CI, Kubernetes, Airflow 3 migration
+LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
 ```
 
 Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.

@@ -71,7 +71,8 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 14 | Data Vault 2.0 mini-domain | not started |
 | 15 | Production simulation / capstone | not started |
 | 16 | Airflow 2 -> 3 migration exercise | not started |
-| 17 | GitLab CI migration | not started |
+| 17 | dbt Core 1.10 -> dbt v2 migration exercise | deferred until stable dbt v2 + confirmed Trino compatibility |
+| 18 | GitLab CI migration | not started |
 
 ### Phase 5 slice detail
 
@@ -98,6 +99,11 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 3 | Executive/Customer/Marketing dashboards, Trino ad-hoc path, runbook completion, README gallery scaffolding | done; screenshots are a manual follow-up (no browser in the agent environment) |
 
 ## Deferred / follow-ups
+
+- dbt v2 migration is scheduled for Phase 17 after a stable release and a
+  confirmed Trino path. Preparation includes migrating 16 generic-test
+  definitions to the required `arguments` property and clearing dbt
+  deprecation warnings on the v1 baseline.
 
 Open follow-ups from the 2026-09-27 restart-verification postmortem
 (milestone "Reliability debt (post-Phase 7)"):

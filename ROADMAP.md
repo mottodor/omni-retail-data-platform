@@ -2,7 +2,7 @@
 
 **Назначение:** pet-project уровня production-like для отработки проектирования DWH/Lakehouse и ETL/ELT-процессов на Windows 11 + WSL2 с 32 GB RAM.
 
-**Основной стек:** Apache Airflow 2.11.2, dbt Core 1.10.x (адаптер dbt-trino 1.9.x), Trino 476+ (целевой pinned release — 483), Apache Iceberg, PostgreSQL 16+, ClickHouse, Apache Superset, MinIO (S3 API), Apache Kafka, Debezium, Apache Spark, Apache Polaris, OpenLineage + Marquez, Prometheus + Grafana, Docker Compose, GitHub + GitHub Actions. Позже — GitLab CI и Kubernetes.
+**Основной стек:** Apache Airflow 2.11.2, dbt Core 1.10.x (адаптер dbt-trino 1.9.x), Trino 476+ (целевой pinned release — 483), Apache Iceberg, PostgreSQL 16+, ClickHouse, Apache Superset, MinIO (S3 API), Apache Kafka, Debezium, Apache Spark, Apache Polaris, OpenLineage + Marquez, Prometheus + Grafana, Docker Compose, GitHub + GitHub Actions. Позже — миграция на dbt v2, GitLab CI и Kubernetes.
 
 > Принцип проекта: сначала рабочая вертикаль end-to-end, затем усложнение. Каждая новая технология должна решать конкретную инженерную задачу, а не добавляться «для галочки».
 
@@ -27,7 +27,7 @@
 - observability, lineage и SLA/SLO;
 - GitHub Actions CI, контейнеризация и воспроизводимое локальное окружение;
 - документирование архитектурных решений (ADR) и runbooks;
-- финальная миграционная задача Airflow 2 -> Airflow 3 и позже GitHub Actions -> GitLab CI.
+- финальные миграционные задачи Airflow 2 -> Airflow 3, dbt Core 1.10 -> dbt v2 и позже GitHub Actions -> GitLab CI.
 
 ## 2. Бизнес-сценарий
 
@@ -70,7 +70,7 @@ QUALITY: dbt tests + custom SQL/Python reconciliation
 LINEAGE: OpenLineage + Marquez
 MONITORING: Prometheus + Grafana
 DEVOPS: GitHub + GitHub Actions + Docker Compose
-LATER: GitLab CI, Kubernetes, Airflow 3 migration
+LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
 ```
 
 ### 3.1 Разделение ответственности
@@ -838,7 +838,52 @@ Airflow 2.11.2 остается baseline проекта, migration фиксир�
 
 ---
 
-## Phase 17 — GitLab CI migration (позже)
+## Phase 17 — dbt Core 1.10 -> dbt v2 migration exercise
+
+**Цель:** убрать накопленные deprecations и перевести аналитический проект на
+воспроизводимый dbt v2 runtime без изменения бизнес-семантики моделей.
+
+Миграция начинается только после появления стабильного dbt v2 release и
+подтвержденного пути работы с Trino; dbt Core 1.10.x остается baseline до
+отдельного migration release/branch.
+
+### Задачи
+
+- inventory всех dbt deprecations и behavior flags на последнем поддерживаемом
+  dbt v1;
+- перенести аргументы generic tests под `arguments` и добиться parse без
+  `MissingArgumentsPropertyInGenericTestDeprecation`;
+- выбрать и зафиксировать ADR для dbt v2 distribution (`dbt` или `dbt OSS`),
+  способа установки/pinning и совместимости с локальной Apache 2.0 stack;
+- проверить поддержку Trino, Iceberg REST catalog/Polaris и используемых
+  materializations/macros;
+- обновить reproducible dependency/install path, CI и runtime images без
+  floating versions;
+- проверить совместимость `manifest.json` и `run_results.json` с Airflow
+  runner, документацией и тестовыми инструментами;
+- сравнить результаты dbt v1 и v2 на deterministic fixture: модели, тесты,
+  row counts и ключевые business reconciliation;
+- выполнить полный regression run и задокументировать rollback на закрепленный
+  dbt Core 1.x baseline.
+
+### Acceptance criteria
+
+- `dbt parse`, `dbt compile`, `dbt build` и `dbt test` проходят на dbt v2 с
+  Trino против disposable lakehouse schemas;
+- проект не использует удаленные в dbt v2 deprecated features и не выдает
+  migration deprecation warnings;
+- Airflow runner корректно читает dbt v2 artifacts и сохраняет прежний
+  failure/success contract;
+- generated SQL и бизнес-результаты эквивалентны зафиксированному dbt v1
+  baseline либо каждое намеренное отличие документировано;
+- CI, lock/pin и инструкции clean-clone setup воспроизводят выбранный dbt v2
+  runtime;
+- ADR содержит compatibility matrix, breaking changes и проверенный rollback
+  plan.
+
+---
+
+## Phase 18 — GitLab CI migration (позже)
 
 **Цель:** перенести существующую CI-модель, не переписывая инженерные правила.
 
@@ -879,7 +924,8 @@ Roadmap лучше выполнять не по календарю, а по за
 | 13 | Data Vault mini-domain |
 | 14 | Capstone production simulation |
 | 15 | Airflow 3 migration |
-| 16 | GitLab CI migration / Kubernetes optional |
+| 16 | dbt v2 migration |
+| 17 | GitLab CI migration / Kubernetes optional |
 
 Если работать по 8-12 часов в неделю, не привязывать качество к жесткому сроку: каждая итерация завершается только после acceptance criteria.
 
@@ -919,6 +965,7 @@ Roadmap лучше выполнять не по календарю, а по за
 
 - Data Vault mini-domain;
 - Airflow 3 migration;
+- dbt v2 migration после stable release и подтверждения Trino compatibility;
 - GitLab CI;
 - Kubernetes;
 - Terraform только при появлении реальной cloud-инфраструктуры.
@@ -1110,6 +1157,7 @@ Before finishing:
 - GitLab CI: отдельный поздний migration exercise.
 - Airflow baseline: 2.11.2; затем отдельная миграция на Airflow 3.
 - dbt Core: baseline 1.10.x, адаптер dbt-trino 1.9.x; диапазоны закреплены в `pyproject.toml`, точные версии — в `uv.lock`.
+- dbt v2: отдельная Phase 17 migration exercise после stable release и подтверждения Trino compatibility; выбор distribution и rollback оформляются ADR, а dbt Core 1.10.x остается baseline до migration release.
 - Trino: требование 476+, конкретный release pin фиксируется в compose и Dependabot/Renovate обновляет через PR; initial target — 483.
 - ClickHouse: serving layer, не master storage.
 - Iceberg: source of truth.
