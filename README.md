@@ -296,11 +296,18 @@ the raw manifest row count before any DML is issued. Empty days are warnings;
 schema drift and row-count mismatches fail before touching the partition.
 
 CLI modes: `run --source --date` (one day), `run-all --date` (every source),
-and `run-new` — a watermark-driven sweep that loads, per source, every
-archived logical date past `max(_batch_date)` in ascending order, so
-re-running it is an idempotent no-op. This is the mode the `load_bronze`
-DAG uses. Supplier files currently stop at the raw archive — loading them
-into Bronze is a tracked follow-up ([PROGRESS.md](PROGRESS.md)).
+and `run-new`. Explicit-date modes replace their entire day partition.
+`run-new` uses a deterministic `(_source_object, _source_object_row_position)`
+coordinate to replace and resume only incomplete INSERT chunks, including a
+partially committed watermark day; it verifies manifest count and coordinate
+uniqueness at completion. `make bronze-rebuild` is the explicit destructive
+entry point: it clears only the configured Bronze schema, rebuilds from the
+immutable archive, and performs bounded Polaris or Trino recovery for the
+known Trino 483 catalog failure and a failed Trino connection. See [the Bronze
+rebuild runbook](docs/runbooks/bronze-rebuild.md).
+This is the mode the `load_bronze` DAG uses. Supplier files currently stop at
+the raw archive — loading them into Bronze is a tracked follow-up
+([PROGRESS.md](PROGRESS.md)).
 
 ### Silver and Gold
 
