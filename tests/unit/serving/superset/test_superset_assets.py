@@ -15,6 +15,8 @@ import zipfile
 from pathlib import Path
 from types import ModuleType
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ASSETS_DIR = REPO_ROOT / "superset" / "assets"
 SANITIZER_PATH = REPO_ROOT / "infrastructure" / "scripts" / "superset_bundle_sanitize.py"
@@ -55,7 +57,20 @@ def _make_export_zip(path: Path) -> None:
         )
         archive.writestr(
             f"{root}/dashboards/Sales.yaml",
-            b"dashboard_title: Sales\nuuid: c6573898-eca4-44f9-a7e7-180f01217be7\n",
+            b"dashboard_title: Sales\n"
+            b"uuid: c6573898-eca4-44f9-a7e7-180f01217be7\n"
+            b"position:\n"
+            b"  ROOT_ID: {id: ROOT_ID, type: ROOT}\n"
+            b"  GRID_ID: {id: GRID_ID, type: GRID, isRoot: true, children: []}\n"
+            b"  CHART-1:\n"
+            b"    id: CHART-1\n"
+            b"    type: CHART\n"
+            b"    meta: {chartId: 7, uuid: 62b2db2a-a8c4-4049-821c-9223f4f5f848}\n"
+            b"metadata:\n"
+            b"  native_filter_configuration:\n"
+            b"  - filterType: filter_time_range\n"
+            b"    scope: {rootPath: [ROOT_ID], excluded: []}\n"
+            b"    chartsInScope: [99]\n",
         )
 
 
@@ -76,7 +91,7 @@ class TestSanitizeBundle:
 
         changed, kept = sanitizer.sanitize_bundle(bundle)
 
-        assert changed == 3  # databases yaml + metadata + dropped dir marker
+        assert changed == 4  # database + metadata + dashboard + dropped dir marker
         assert kept == 3
         names = _entry_names(bundle)
         assert all("databases" not in name for name in names), names
@@ -88,6 +103,42 @@ class TestSanitizeBundle:
         assert b"sqlalchemy_uri" not in _read_entry(
             bundle, "sales_dashboard/datasets/ClickHouse_analytics/mart_daily_sales.yaml"
         ) + _read_entry(bundle, "sales_dashboard/dashboards/Sales.yaml")
+        dashboard = yaml.safe_load(_read_entry(bundle, "sales_dashboard/dashboards/Sales.yaml"))
+        assert dashboard["position"]["ROOT_ID"]["children"] == ["GRID_ID"]
+        native_filter = dashboard["metadata"]["native_filter_configuration"][0]
+        assert native_filter["filterType"] == "filter_time"
+        assert native_filter["chartsInScope"] == [7]
+
+    def test_normalizes_superset_5_chart_control_fields(self) -> None:
+        categorical = yaml.safe_dump(
+            {
+                "viz_type": "echarts_timeseries_bar",
+                "params": {
+                    "viz_type": "echarts_timeseries_bar",
+                    "metrics": ["revenue"],
+                    "groupby": ["category_name"],
+                },
+            },
+            sort_keys=False,
+        ).encode()
+        histogram = yaml.safe_dump(
+            {
+                "viz_type": "histogram_v2",
+                "params": {
+                    "viz_type": "histogram_v2",
+                    "all_columns": ["avg_order_value_eur"],
+                },
+            },
+            sort_keys=False,
+        ).encode()
+
+        categorical_result = yaml.safe_load(sanitizer._normalize_chart(categorical))
+        histogram_result = yaml.safe_load(sanitizer._normalize_chart(histogram))
+
+        assert categorical_result["params"]["x_axis"] == "category_name"
+        assert categorical_result["params"]["groupby"] == []
+        assert histogram_result["params"]["column"] == "avg_order_value_eur"
+        assert "all_columns" not in histogram_result["params"]
 
     def test_rewrite_is_deterministic_and_idempotent(self, tmp_path: Path) -> None:
         bundle = tmp_path / "sales_dashboard.zip"
@@ -159,6 +210,65 @@ class TestCommittedBundles:
             assert any(name.startswith(("dashboards/", "datasets/")) for name in rest), (
                 f"{bundle.name}: no dashboard/dataset content"
             )
+
+    def test_committed_dashboard_layouts_and_controls_are_hydratable(self) -> None:
+        for bundle in sorted(ASSETS_DIR.glob("*_dashboard.zip")):
+            with zipfile.ZipFile(bundle) as archive:
+                for name in archive.namelist():
+                    rest = name.split("/", 1)[1]
+                    if rest.startswith("dashboards/"):
+                        dashboard = yaml.safe_load(archive.read(name))
+                        position = dashboard["position"]
+                        assert position["ROOT_ID"]["children"] == ["GRID_ID"], name
+                        chart_ids = sanitizer._dashboard_chart_ids(position)
+                        for native_filter in dashboard.get("metadata", {}).get(
+                            "native_filter_configuration", []
+                        ):
+                            assert native_filter["filterType"] != "filter_time_range", name
+                            scope = native_filter.get("scope", {})
+                            if scope.get("rootPath") == ["ROOT_ID"] and not scope.get("excluded"):
+                                assert native_filter["chartsInScope"] == chart_ids, name
+                    elif rest.startswith("charts/"):
+                        chart = yaml.safe_load(archive.read(name))
+                        params = chart["params"]
+                        if str(chart["viz_type"]).startswith("echarts_timeseries_"):
+                            assert params.get("x_axis"), name
+                        if chart["viz_type"] == "histogram_v2":
+                            assert params.get("column"), name
+
+    def test_customer_histogram_uses_a_numeric_calculated_column(self) -> None:
+        """ClickHouse DECIMAL metadata is not accepted by Histogram v2 controls."""
+        bundle = ASSETS_DIR / "customer_dashboard.zip"
+        with zipfile.ZipFile(bundle) as archive:
+            chart = yaml.safe_load(
+                archive.read("customer_dashboard/charts/Avg_order_value_distribution_1.yaml")
+            )
+            dataset = yaml.safe_load(
+                archive.read(
+                    "customer_dashboard/datasets/ClickHouse_analytics/mart_customer_ltv.yaml"
+                )
+            )
+
+        assert chart["params"]["column"] == "avg_order_value_eur_numeric"
+        assert chart["params"]["adhoc_filters"] == [
+            {
+                "clause": "WHERE",
+                "comparator": None,
+                "expressionType": "SIMPLE",
+                "filterOptionName": None,
+                "isExtra": False,
+                "operator": "IS NOT NULL",
+                "sqlExpression": None,
+                "subject": "avg_order_value_eur_numeric",
+            }
+        ]
+        calculated_column = next(
+            column
+            for column in dataset["columns"]
+            if column["column_name"] == "avg_order_value_eur_numeric"
+        )
+        assert calculated_column["type"] == "FLOAT"
+        assert calculated_column["expression"] == "CAST(avg_order_value_eur AS Nullable(Float64))"
 
 
 class TestConnectionIdentity:
