@@ -108,10 +108,6 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 Open follow-ups from the 2026-09-27 restart-verification postmortem
 (milestone "Reliability debt (post-Phase 7)"):
 
-- #15 (P1, infra): full Bronze rebuild is not a supported path —
-  Polaris REST degrades (401) after ~5 min of continuous catalog traffic,
-  Trino OOMs at the Phase-1 heap (local `-Xmx2g` fix uncommitted), and the
-  loader cannot resume mid-day.
 - #16 (P2, chore): Makefile targets `ingest-api`, `bronze-load`,
   `dbt-build` lack `no_proxy` for localhost and fail on proxied hosts.
 
