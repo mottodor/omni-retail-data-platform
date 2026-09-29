@@ -6,6 +6,8 @@ import logging
 import sys
 from datetime import date
 
+import trino
+
 from omni_retail.ingestion.common.logging import configure_logging, context_logger
 from omni_retail.ingestion.common.storage import (
     BotoObjectStorage,
@@ -19,6 +21,8 @@ from omni_retail.lakehouse.bronze.loader import (
     TrinoConfig,
     TrinoExecutor,
     bronze_schema_from_env,
+    is_transient_catalog_error,
+    is_transient_trino_error,
     load_new,
     load_with_retry,
 )
@@ -26,6 +30,10 @@ from omni_retail.lakehouse.bronze.readers import BronzeReadError
 from omni_retail.lakehouse.bronze.specs import TABLES, BronzeTableSpec, spec_by_source
 
 logger = logging.getLogger(__name__)
+
+#: Shell orchestration treats these as safe-to-resume infrastructure failures.
+EXIT_TRANSIENT_CATALOG_FAILURE = 75
+EXIT_TRANSIENT_TRINO_FAILURE = 76
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -141,6 +149,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "run-all":
                 return run_all(storage, executor, args.date, schema=schema)
             return run_new(storage, executor, schema=schema)
+    except trino.exceptions.Error as error:
+        if is_transient_catalog_error(error):
+            logger.error("%s stopped after transient catalog failure: %s", args.command, error)
+            return EXIT_TRANSIENT_CATALOG_FAILURE
+        if is_transient_trino_error(error):
+            logger.error("%s stopped after transient Trino failure: %s", args.command, error)
+            return EXIT_TRANSIENT_TRINO_FAILURE
+        logger.error("%s failed with Trino error: %s", args.command, error)
+        return 1
     except (LoadError, BronzeReadError, StorageError, ValueError) as error:
         logger.error("%s failed: %s", args.command, error)
         return 1

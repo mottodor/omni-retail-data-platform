@@ -197,12 +197,11 @@ services:
     restart: "no"
 
   trino:
-    # NOTE (known upstream issue, fixed by trinodb/trino#30816 in the
-    # unreleased 484): each catalog operation may fetch a fresh OAuth2 token
-    # against Polaris; under rapid write sequences some requests lose auth
-    # and Polaris answers empty-body 401s. The Bronze loader retries this
-    # transient class (see lakehouse/bronze/loader.py). Bump to 484+ when
-    # the image is published.
+    # NOTE: Trino 483 is affected by trinodb/trino#30816 (merged after this
+    # release; no released image contains the fix yet). Each catalog operation
+    # may fetch a fresh OAuth2 token against Polaris; rapid writes can lose auth
+    # and yield empty-body 401s. Bronze uses bounded chunk retries and the
+    # explicit rebuild command can restart Polaris before resuming.
     image: trinodb/trino:483
     profiles: ["core"]
     depends_on:
@@ -218,7 +217,9 @@ services:
     volumes:
       - ./trino/etc:/etc/trino:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/status >/dev/null || exit 1"]
+      # A status endpoint can turn green while the coordinator still rejects
+      # SQL during catalog initialization; require an executable query instead.
+      test: ["CMD-SHELL", "trino --execute 'select 1' >/dev/null 2>&1"]
       interval: 5s
       timeout: 10s
       retries: 12

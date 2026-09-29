@@ -4,6 +4,7 @@ from datetime import date
 from typing import Literal
 
 import pytest
+from trino.exceptions import TrinoConnectionError
 
 from fakes.storage import FakeStorage
 from fakes.trino import FakeTrinoExecutor
@@ -116,6 +117,20 @@ def test_run_new_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_main_unknown_source_returns_one() -> None:
     assert main(["run", "--source", "nope", "--date", "2026-09-18"]) == 1
+
+
+def test_main_returns_recoverable_exit_when_trino_connection_resets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S3_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "test")
+
+    def connection_reset(*args: object, **kwargs: object) -> int:
+        raise TrinoConnectionError("Connection reset by peer")
+
+    monkeypatch.setattr(cli, "run_new", connection_reset)
+
+    assert main(["run-new"]) == cli.EXIT_TRANSIENT_TRINO_FAILURE
 
 
 def _result(status: Literal["loaded", "empty"]) -> LoadResult:

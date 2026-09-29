@@ -101,6 +101,7 @@ make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-
 
 # --- Lakehouse ---
 make bronze-load # load raw archive data into Iceberg Bronze (ARGS="run --source orders --date 2026-09-18" / "run-all --date ..." / "run-new")
+make bronze-rebuild # DESTRUCTIVE for Bronze only: rebuild it from immutable archive with bounded Polaris recovery
 make dbt-parse   # offline dbt manifest check
 make dbt-build   # run dbt models + tests against the live stack (ARGS="--select staging")
 make dbt-test    # run dbt tests

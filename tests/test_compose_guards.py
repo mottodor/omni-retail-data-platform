@@ -19,6 +19,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 TRINO_CATALOG_FILE = REPO_ROOT / "trino" / "etc" / "catalog" / "iceberg.properties"
+TRINO_JVM_FILE = REPO_ROOT / "trino" / "etc" / "jvm.config"
+TRINO_CONFIG_FILE = REPO_ROOT / "trino" / "etc" / "config.properties"
 ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
 MINIO_INIT_FILE = REPO_ROOT / "infrastructure" / "scripts" / "minio_init.sh"
 MOCK_API_DIR = REPO_ROOT / "infrastructure" / "mock_api"
@@ -242,6 +244,19 @@ def test_stateful_services_use_named_volumes() -> None:
     assert any(
         "airflow-metadata-data" in str(services["airflow-postgres"].get("volumes", [])) for _ in [0]
     ), "airflow-postgres must mount airflow-metadata-data (ADR 0003)"
+
+
+def test_trino_jvm_heap_is_the_committed_workstation_baseline() -> None:
+    assert TRINO_JVM_FILE.is_file(), "trino/etc/jvm.config is missing"
+    assert "-Xmx2g" in TRINO_JVM_FILE.read_text(encoding="utf-8")
+
+
+def test_trino_rebuild_memory_and_query_text_limits_fit_the_jvm() -> None:
+    assert TRINO_CONFIG_FILE.is_file(), "trino/etc/config.properties is missing"
+    props = TRINO_CONFIG_FILE.read_text(encoding="utf-8")
+    assert "query.max-memory=1GB" in props
+    assert "query.max-total-memory=1536MB" in props
+    assert "query.max-length=2000000" in props
 
 
 def test_trino_catalog_targets_polaris_rest_api() -> None:

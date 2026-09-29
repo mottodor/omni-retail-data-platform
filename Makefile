@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 UV := uv
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load integration bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -60,6 +60,9 @@ ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source f
 
 bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18", "run-all --date 2026-09-18" or "run-new"
 	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
+
+bronze-rebuild: ## DESTRUCTIVE: clear only the configured Bronze schema, then rebuild it from archive with bounded Polaris recovery
+	bash infrastructure/scripts/bronze_rebuild.sh
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
 	$(UV) run dbt parse --project-dir dbt --profiles-dir dbt

@@ -2,13 +2,14 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from trino.exceptions import TrinoQueryError
+from trino.exceptions import TrinoConnectionError, TrinoExternalError, TrinoQueryError
 
 from fakes.storage import FakeStorage
 from fakes.trino import FakeTrinoExecutor
@@ -29,6 +30,8 @@ from omni_retail.lakehouse.bronze.loader import (
     create_table_sql,
     delete_partition_sql,
     discover_archive_dates,
+    is_transient_catalog_error,
+    is_transient_trino_error,
     load,
     load_new,
     load_with_retry,
@@ -40,6 +43,25 @@ from omni_retail.lakehouse.bronze.loader import (
 from omni_retail.lakehouse.bronze.specs import TABLES
 
 LOGICAL_DATE = date(2026, 9, 18)
+
+
+def test_trino_connection_errors_are_recoverable_for_rebuild() -> None:
+    assert is_transient_trino_error(TrinoConnectionError("Connection reset by peer"))
+    assert is_transient_catalog_error(
+        TrinoExternalError(
+            {
+                "type": "EXTERNAL",
+                "name": "ICEBERG_CATALOG_ERROR",
+                "message": "Failed to load table: fx_rates in bronze namespace",
+            },
+            "test-query",
+        )
+    )
+    assert not is_transient_trino_error(
+        TrinoQueryError(
+            {"type": "USER_ERROR", "name": "SYNTAX_ERROR", "message": "bad SQL"}, "test-query"
+        )
+    )
 
 
 def test_trino_config_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -426,6 +448,23 @@ def watermarked_executor(watermark: date | None) -> FakeTrinoExecutor:
     return executor
 
 
+def bronze_counts_by_date(
+    counts: dict[date, int], *, chunks_complete: bool = False
+) -> Callable[[str], list[tuple[object, ...]] | None]:
+    def handler(sql: str) -> list[tuple[object, ...]] | None:
+        if not sql.startswith("select count(*)"):
+            return None
+        if " between " in sql:
+            expected = next(iter(counts.values()))
+            return [(expected, expected)] if chunks_complete else [(0, 0)]
+        for logical_date, count in counts.items():
+            if logical_date.isoformat() in sql:
+                return [(count, count)]
+        return None
+
+    return handler
+
+
 def test_table_exists_and_max_batch_date_sql_shapes() -> None:
     assert table_exists_sql(TABLES["orders"], "iceberg") == (
         "select 1 from iceberg.information_schema.tables "
@@ -480,6 +519,7 @@ def test_load_new_missing_table_loads_all_dates_ascending() -> None:
     seed_orders_batch(storage, rows=1, logical_date=date(2026, 9, 17))
     seed_orders_batch(storage, rows=2, logical_date=date(2026, 9, 16))
     executor = FakeTrinoExecutor()
+    executor.fetch_handler = bronze_counts_by_date({date(2026, 9, 16): 2, date(2026, 9, 17): 1})
 
     results = load_new(storage, executor, TABLES["orders"], clock=fixed_clock)
 
@@ -495,6 +535,7 @@ def test_load_new_loads_only_dates_past_watermark() -> None:
     seed_orders_batch(storage, rows=1, logical_date=date(2026, 9, 16))
     seed_orders_batch(storage, rows=2, logical_date=date(2026, 9, 18))
     executor = watermarked_executor(date(2026, 9, 17))  # gap day has no raw objects
+    executor.fetch_handler = bronze_counts_by_date({date(2026, 9, 18): 2})
 
     results = load_new(storage, executor, TABLES["orders"], clock=fixed_clock)
 
@@ -506,6 +547,7 @@ def test_load_new_up_to_date_is_noop() -> None:
     storage = FakeStorage()
     seed_orders_batch(storage, rows=1, logical_date=date(2026, 9, 16))
     executor = watermarked_executor(date(2026, 9, 16))
+    executor.fetch_handler = bronze_counts_by_date({date(2026, 9, 16): 1}, chunks_complete=True)
 
     results = load_new(storage, executor, TABLES["orders"], clock=fixed_clock)
 

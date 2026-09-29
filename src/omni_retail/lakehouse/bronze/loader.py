@@ -1,13 +1,4 @@
-"""Idempotent Bronze loader: raw archive objects -> Iceberg via Trino SQL.
-
-Load semantics (Phase 5 design spec §4, §6):
-- raw objects are read and verified (schema, manifest row count) BEFORE any
-  DML, so a failed verification never touches the existing partition;
-- ``load(source, date)`` replaces the day's partition: ``DELETE`` by
-  ``_batch_date`` followed by batched ``INSERT`` statements — re-running the
-  same logical date (retry, backfill) cannot create duplicate rows;
-- an empty day (no raw objects) is a warning-level no-op.
-"""
+"""Idempotent, restartable raw-archive to Iceberg Bronze loader."""
 
 import logging
 import os
@@ -24,7 +15,12 @@ from omni_retail.ingestion.common.logging import context_logger
 from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import BUCKET_ARCHIVE, manifest_key
 from omni_retail.ingestion.common.storage import ObjectNotFoundError, ObjectStorage
-from omni_retail.lakehouse.bronze.literals import date_literal, insert_statements
+from omni_retail.lakehouse.bronze.literals import (
+    InsertChunk,
+    date_literal,
+    insert_chunks,
+    varchar_literal,
+)
 from omni_retail.lakehouse.bronze.readers import list_data_objects, read_rows
 from omni_retail.lakehouse.bronze.specs import (
     BATCH_DATE,
@@ -32,24 +28,21 @@ from omni_retail.lakehouse.bronze.specs import (
     INGESTED_AT,
     SCHEMA_BRONZE,
     SOURCE_OBJECT,
+    SOURCE_OBJECT_ROW_POSITION,
     BronzeTableSpec,
 )
 
 Clock = Callable[[], datetime]
-
 logger = logging.getLogger(__name__)
-
 _SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class LoadError(Exception):
-    """Explicit Bronze load failure (manifest missing, row-count mismatch)."""
+    """Non-transient Bronze failure (archive, manifest, schema, or integrity)."""
 
 
 @dataclass(frozen=True)
 class TrinoConfig:
-    """Connection settings for the local (unauthenticated) Trino coordinator."""
-
     host: str = "127.0.0.1"
     port: int = 8080
     catalog: str = "iceberg"
@@ -66,8 +59,6 @@ class TrinoConfig:
 
 
 class TrinoExecutor(Protocol):
-    """SQL execution boundary (trino.dbapi connection or a test fake)."""
-
     def execute(self, sql: str) -> None: ...
 
     def fetch(self, sql: str) -> list[tuple[object, ...]]: ...
@@ -91,8 +82,7 @@ class DbapiTrinoExecutor:
         return self._connection
 
     def execute(self, sql: str) -> None:
-        cursor = self._connect().cursor()
-        cursor.execute(sql)
+        self._connect().cursor().execute(sql)
 
     def fetch(self, sql: str) -> list[tuple[object, ...]]:
         cursor = self._connect().cursor()
@@ -113,8 +103,6 @@ class DbapiTrinoExecutor:
 
 @dataclass(frozen=True)
 class LoadResult:
-    """Outcome of one (source, logical date) Bronze load."""
-
     source: str
     batch_id: str
     logical_date: date
@@ -122,8 +110,14 @@ class LoadResult:
     status: Literal["loaded", "empty"]
 
 
+@dataclass(frozen=True)
+class _PreparedBatch:
+    manifest: BatchManifest
+    rows: list[dict[str, object]]
+    object_count: int
+
+
 def validate_schema_name(schema: str) -> str:
-    """Validate an unquoted Trino schema identifier before SQL interpolation."""
     if not _SCHEMA_NAME_PATTERN.fullmatch(schema):
         raise ValueError(
             f"invalid schema name {schema!r}; expected lower-case letters, digits, "
@@ -133,7 +127,6 @@ def validate_schema_name(schema: str) -> str:
 
 
 def bronze_schema_from_env() -> str:
-    """Resolve the configurable Bronze schema with the production default."""
     return validate_schema_name(os.environ.get("ICEBERG_BRONZE_SCHEMA", SCHEMA_BRONZE))
 
 
@@ -150,16 +143,49 @@ def create_table_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_B
     )
 
 
+def add_row_position_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_BRONZE) -> str:
+    """Safe Iceberg schema evolution for Bronze tables created before issue #15."""
+    schema = validate_schema_name(schema)
+    return (
+        f"alter table {catalog}.{schema}.{spec.name} add column if not exists "
+        f'"{SOURCE_OBJECT_ROW_POSITION}" bigint'
+    )
+
+
+def ensure_table(executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str, schema: str) -> None:
+    executor.execute(create_schema_sql(catalog, schema))
+    executor.execute(create_table_sql(spec, catalog, schema))
+    executor.execute(add_row_position_sql(spec, catalog, schema))
+
+
 def delete_partition_sql(
-    spec: BronzeTableSpec,
-    catalog: str,
-    logical_date: date,
-    schema: str = SCHEMA_BRONZE,
+    spec: BronzeTableSpec, catalog: str, logical_date: date, schema: str = SCHEMA_BRONZE
 ) -> str:
     schema = validate_schema_name(schema)
     return (
         f"delete from {catalog}.{schema}.{spec.name} "
         f'where "{BATCH_DATE}" = {date_literal(logical_date)}'
+    )
+
+
+def delete_chunk_sql(
+    spec: BronzeTableSpec,
+    chunk: InsertChunk,
+    catalog: str,
+    logical_date: date,
+    schema: str = SCHEMA_BRONZE,
+) -> str:
+    """Delete only coordinates represented by one INSERT chunk."""
+    schema = validate_schema_name(schema)
+    predicates = " or ".join(
+        f'("{SOURCE_OBJECT}" = {varchar_literal(item.source_object)} and '
+        f'"{SOURCE_OBJECT_ROW_POSITION}" between {item.first_row_position} '
+        f"and {item.last_row_position})"
+        for item in chunk.ranges
+    )
+    return (
+        f"delete from {catalog}.{schema}.{spec.name} "
+        f'where "{BATCH_DATE}" = {date_literal(logical_date)} and ({predicates})'
     )
 
 
@@ -172,22 +198,12 @@ def table_exists_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_B
 
 
 def max_batch_date_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_BRONZE) -> str:
-    schema = validate_schema_name(schema)
-    return f'select max("{BATCH_DATE}") from {catalog}.{schema}.{spec.name}'
+    return f'select max("{BATCH_DATE}") from {catalog}.{validate_schema_name(schema)}.{spec.name}'
 
 
 def read_watermark(
-    executor: TrinoExecutor,
-    spec: BronzeTableSpec,
-    catalog: str,
-    schema: str = SCHEMA_BRONZE,
+    executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_BRONZE
 ) -> date | None:
-    """Highest logical date already present in the source's Bronze table.
-
-    The Bronze table itself is the watermark state: a missing table or an
-    empty one means "nothing loaded yet". The check goes through
-    ``information_schema`` instead of catching a missing-table query error.
-    """
     if not executor.fetch(table_exists_sql(spec, catalog, schema)):
         return None
     rows = executor.fetch(max_batch_date_sql(spec, catalog, schema))
@@ -195,24 +211,64 @@ def read_watermark(
         return None
     value = rows[0][0]
     if not isinstance(value, date):
-        raise LoadError(
-            f"{spec.source_key}: watermark is not a date: {value!r} "
-            f"(from {max_batch_date_sql(spec, catalog, schema)})"
-        )
+        raise LoadError(f"{spec.source_key}: watermark is not a date: {value!r}")
     return value
 
 
 def discover_archive_dates(storage: ObjectStorage, spec: BronzeTableSpec) -> tuple[date, ...]:
-    """Sorted logical dates that have at least one raw data object archived."""
     suffix = "." + spec.data_object_suffix
-    dates = {
-        parsed
-        for key in storage.list_object_keys(BUCKET_ARCHIVE, spec.root_prefix)
-        if key.endswith(suffix)
-        for parsed in (spec.logical_date_from_key(key),)
-        if parsed is not None
-    }
-    return tuple(sorted(dates))
+    return tuple(
+        sorted(
+            {
+                parsed
+                for key in storage.list_object_keys(BUCKET_ARCHIVE, spec.root_prefix)
+                if key.endswith(suffix)
+                for parsed in (spec.logical_date_from_key(key),)
+                if parsed is not None
+            }
+        )
+    )
+
+
+def _read_manifest(
+    storage: ObjectStorage, spec: BronzeTableSpec, logical_date: date
+) -> BatchManifest:
+    key = manifest_key(spec.source_name, spec.batch_id(logical_date))
+    try:
+        return BatchManifest.from_json(storage.get_object(BUCKET_ARCHIVE, key).decode())
+    except ObjectNotFoundError as error:
+        raise LoadError(f"manifest not found: s3://{BUCKET_ARCHIVE}/{key}") from error
+
+
+def _prepare_batch(
+    storage: ObjectStorage, spec: BronzeTableSpec, logical_date: date, clock: Clock
+) -> _PreparedBatch | None:
+    objects = list_data_objects(storage, spec, logical_date)
+    if not objects:
+        return None
+    manifest = _read_manifest(storage, spec, logical_date)
+    ingested_at = clock()
+    rows: list[dict[str, object]] = []
+    for object_key in objects:
+        for position, row in enumerate(
+            read_rows(spec, object_key, storage.get_object(BUCKET_ARCHIVE, object_key))
+        ):
+            rows.append(
+                {
+                    **row,
+                    BATCH_ID: spec.batch_id(logical_date),
+                    BATCH_DATE: logical_date,
+                    SOURCE_OBJECT: object_key,
+                    SOURCE_OBJECT_ROW_POSITION: position,
+                    INGESTED_AT: ingested_at,
+                }
+            )
+    if len(rows) != manifest.row_count:
+        raise LoadError(
+            f"{spec.source_key}: row count mismatch for {logical_date}: raw rows={len(rows)} "
+            f"manifest rows={manifest.row_count} (Bronze not modified)"
+        )
+    return _PreparedBatch(manifest, rows, len(objects))
 
 
 def load(
@@ -225,83 +281,88 @@ def load(
     catalog: str = "iceberg",
     schema: str = SCHEMA_BRONZE,
 ) -> LoadResult:
-    """Load one (source, logical date) batch into Bronze; idempotent per day."""
+    """Explicit-date load: preserve the established full partition replacement contract."""
     schema = validate_schema_name(schema)
-    effective_clock: Clock = clock or (lambda: datetime.now(UTC))
-    log = context_logger(__name__, source=spec.source_name, logical_date=logical_date.isoformat())
-    batch_id = spec.batch_id(logical_date)
-
-    objects = list_data_objects(storage, spec, logical_date)
-    if not objects:
-        log.warning("bronze batch empty: no raw objects under %s", spec.object_prefix(logical_date))
-        return LoadResult(spec.source_key, batch_id, logical_date, 0, "empty")
-
-    manifest = _read_manifest(storage, spec, logical_date)
-    ingested_at = effective_clock()
-    rows: list[dict[str, object]] = []
-    for object_key in objects:
-        body = storage.get_object(BUCKET_ARCHIVE, object_key)
-        for row in read_rows(spec, object_key, body):
-            rows.append(
-                {
-                    **row,
-                    BATCH_ID: batch_id,
-                    BATCH_DATE: logical_date,
-                    SOURCE_OBJECT: object_key,
-                    INGESTED_AT: ingested_at,
-                }
-            )
-
-    if len(rows) != manifest.row_count:
-        raise LoadError(
-            f"{spec.source_key}: row count mismatch for {logical_date}: "
-            f"raw rows={len(rows)} manifest rows={manifest.row_count} "
-            "(partition not modified)"
+    prepared = _prepare_batch(storage, spec, logical_date, clock or (lambda: datetime.now(UTC)))
+    if prepared is None:
+        logger.warning(
+            "bronze batch empty: source=%s logical_date=%s", spec.source_key, logical_date
         )
-
-    executor.execute(create_schema_sql(catalog, schema))
-    executor.execute(create_table_sql(spec, catalog, schema))
+        return LoadResult(spec.source_key, spec.batch_id(logical_date), logical_date, 0, "empty")
+    ensure_table(executor, spec, catalog, schema)
     executor.execute(delete_partition_sql(spec, catalog, logical_date, schema))
-    statements = insert_statements(spec, rows, catalog=catalog, schema=schema)
-    for statement in statements:
-        executor.execute(statement)
-    log.info(
-        "bronze load completed: batch_id=%s objects=%d row_count=%d statements=%d",
-        batch_id,
-        len(objects),
-        len(rows),
-        len(statements),
+    chunks = insert_chunks(spec, prepared.rows, catalog=catalog, schema=schema)
+    for chunk in chunks:
+        executor.execute(chunk.sql)
+    context_logger(__name__, source=spec.source_name, logical_date=logical_date.isoformat()).info(
+        "bronze partition replaced: batch_id=%s objects=%d row_count=%d chunks=%d",
+        prepared.manifest.batch_id,
+        prepared.object_count,
+        len(prepared.rows),
+        len(chunks),
     )
-    return LoadResult(spec.source_key, batch_id, logical_date, len(rows), "loaded")
+    return LoadResult(
+        spec.source_key, spec.batch_id(logical_date), logical_date, len(prepared.rows), "loaded"
+    )
 
 
-def _read_manifest(
-    storage: ObjectStorage, spec: BronzeTableSpec, logical_date: date
-) -> BatchManifest:
-    key = manifest_key(spec.source_name, spec.batch_id(logical_date))
-    try:
-        body = storage.get_object(BUCKET_ARCHIVE, key)
-    except ObjectNotFoundError as error:
-        raise LoadError(f"manifest not found: s3://{BUCKET_ARCHIVE}/{key}") from error
-    return BatchManifest.from_json(body.decode())
-
-
-#: Trino/Polaris catalog errors that are safe to retry by re-running the
-#: whole idempotent per-day load (DELETE partition + INSERT). Known trigger:
-#: trinodb/trino#30816 (fixed in the unreleased 484) — per-operation OAuth2
-#: token fetches occasionally send catalog requests unauthenticated, and
-#: Polaris answers empty-body 401 "Not authorized" responses.
-_TRANSIENT_CATALOG_MARKERS: tuple[str, ...] = ("Not authorized",)
+_TRANSIENT_CATALOG_MARKERS: tuple[str, ...] = (
+    "Not authorized",
+    # Trino 483 can hide Polaris's empty-body OAuth2 401 as an Iceberg
+    # catalog load error; it is safe to resume after a Polaris restart.
+    "Failed to load table:",
+)
+_TRANSIENT_TRINO_ERRORS = (
+    trino.exceptions.TrinoConnectionError,
+    trino.exceptions.Http502Error,
+    trino.exceptions.Http503Error,
+    trino.exceptions.Http504Error,
+)
 
 
 def is_transient_catalog_error(error: BaseException) -> bool:
-    """Classify trino errors that a retry of the same load can survive."""
     if not isinstance(error, trino.exceptions.Error):
         return False
     message = getattr(error, "message", "")
     return isinstance(message, str) and any(
         marker in message for marker in _TRANSIENT_CATALOG_MARKERS
     )
+
+
+def is_transient_trino_error(error: BaseException) -> bool:
+    """Whether a failed Trino HTTP connection is safe for rebuild resumption."""
+    return isinstance(error, _TRANSIENT_TRINO_ERRORS)
+
+
+def _execute_with_retry(
+    executor: TrinoExecutor,
+    delete_sql: str,
+    insert_sql: str,
+    *,
+    attempts: int,
+    sleep: Callable[[float], None],
+    log: logging.LoggerAdapter[logging.Logger],
+) -> None:
+    for attempt in range(1, attempts + 1):
+        try:
+            executor.execute(delete_sql)
+            executor.execute(insert_sql)
+            return
+        except trino.exceptions.Error as error:
+            if attempt == attempts or not is_transient_catalog_error(error):
+                raise
+            backoff_seconds = float(2**attempt)
+            log.warning(
+                "transient catalog error; retrying chunk: attempt=%d/%d backoff_seconds=%.0f "
+                "error_type=%s error_message=%s",
+                attempt,
+                attempts,
+                backoff_seconds,
+                type(error).__name__,
+                getattr(error, "message", ""),
+            )
+            sleep(backoff_seconds)
+    raise AssertionError("unreachable")
 
 
 def load_with_retry(
@@ -316,11 +377,7 @@ def load_with_retry(
     attempts: int = 3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> LoadResult:
-    """Run :func:`load` with bounded retries on transient catalog-auth errors.
-
-    Non-transient failures (row-count mismatch, schema drift) propagate
-    immediately; each retry re-executes the whole idempotent day load.
-    """
+    """Bounded full-date retry for explicit date loads."""
     log = context_logger(__name__, source=spec.source_name, logical_date=logical_date.isoformat())
     for attempt in range(1, attempts + 1):
         try:
@@ -338,16 +395,60 @@ def load_with_retry(
                 raise
             backoff_seconds = float(2**attempt)
             log.warning(
-                "transient catalog error, retrying bronze load: attempt=%d/%d "
-                "backoff_seconds=%.0f error_type=%s error_message=%s",
+                "transient catalog error; retrying date: attempt=%d/%d backoff_seconds=%.0f",
                 attempt,
                 attempts,
                 backoff_seconds,
-                type(error).__name__,
-                getattr(error, "message", ""),
             )
             sleep(backoff_seconds)
-    raise AssertionError("unreachable: load_with_retry exhausted attempts without raising")
+    raise AssertionError("unreachable")
+
+
+def _chunk_count_sql(
+    spec: BronzeTableSpec,
+    chunk: InsertChunk,
+    catalog: str,
+    logical_date: date,
+    schema: str,
+) -> str:
+    predicate = delete_chunk_sql(spec, chunk, catalog, logical_date, schema).split(" where ", 1)[1]
+    return (
+        f'select count(*), count(distinct row("{SOURCE_OBJECT}", '
+        f'"{SOURCE_OBJECT_ROW_POSITION}")) from {catalog}.{schema}.{spec.name} where {predicate}'
+    )
+
+
+def _chunk_is_complete(
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    chunk: InsertChunk,
+    catalog: str,
+    logical_date: date,
+    schema: str,
+) -> bool:
+    rows = executor.fetch(_chunk_count_sql(spec, chunk, catalog, logical_date, schema))
+    return bool(rows and tuple(rows[0]) == (chunk.row_count, chunk.row_count))
+
+
+def _verify_batch(
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    prepared: _PreparedBatch,
+    catalog: str,
+    logical_date: date,
+    schema: str,
+) -> None:
+    rows = executor.fetch(
+        f'select count(*), count(distinct row("{SOURCE_OBJECT}", '
+        f'"{SOURCE_OBJECT_ROW_POSITION}")) from {catalog}.{schema}.{spec.name} '
+        f'where "{BATCH_DATE}" = {date_literal(logical_date)}'
+    )
+    expected = (prepared.manifest.row_count, prepared.manifest.row_count)
+    if not rows or tuple(rows[0]) != expected:
+        raise LoadError(
+            f"{spec.source_key}: Bronze integrity mismatch for {logical_date}: "
+            f"expected count/unique={expected}, actual={rows[0] if rows else None}"
+        )
 
 
 def load_new(
@@ -361,47 +462,51 @@ def load_new(
     attempts: int = 3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[LoadResult]:
-    """Load every archived logical date newer than the Bronze watermark.
-
-    Watermark-driven counterpart of repeated ``run`` calls: unlike a
-    dataset-triggered logical date, ``max(_batch_date)`` always addresses the
-    producer's next unloaded day, and days with no raw objects are simply not
-    discovered. Dates load in ascending order; the first failure aborts the
-    source (fail fast) and a restart resumes at the watermark.
-    """
-    log = context_logger(__name__, source=spec.source_name, command="run-new")
+    """Resume archived days using independently replaceable source-object chunks."""
     schema = validate_schema_name(schema)
     watermark = read_watermark(executor, spec, catalog, schema)
+    # Include the watermark itself: it may be a partially committed day after a crash.
     pending = [
-        logical_date
-        for logical_date in discover_archive_dates(storage, spec)
-        if watermark is None or logical_date > watermark
+        day
+        for day in discover_archive_dates(storage, spec)
+        if watermark is None or day >= watermark
     ]
     results: list[LoadResult] = []
+    effective_clock = clock or (lambda: datetime.now(UTC))
     for logical_date in pending:
-        result = load_with_retry(
-            storage,
-            executor,
-            spec,
-            logical_date=logical_date,
-            clock=clock,
-            catalog=catalog,
-            schema=schema,
-            attempts=attempts,
-            sleep=sleep,
-        )
-        results.append(result)
-        log.info(
-            "run-new progress: source=%s logical_date=%s status=%s row_count=%d",
-            result.source,
-            result.logical_date.isoformat(),
-            result.status,
-            result.row_count,
-        )
-    if not results:
-        log.info(
-            "run-new up-to-date: source=%s watermark=%s pending_dates=0",
-            spec.source_key,
-            watermark.isoformat() if watermark is not None else "none",
-        )
+        prepared = _prepare_batch(storage, spec, logical_date, effective_clock)
+        if prepared is None:
+            continue
+        ensure_table(executor, spec, catalog, schema)
+        chunks = insert_chunks(spec, prepared.rows, catalog=catalog, schema=schema)
+        changed = False
+        for index, chunk in enumerate(chunks, start=1):
+            if _chunk_is_complete(executor, spec, chunk, catalog, logical_date, schema):
+                continue
+            changed = True
+            log = context_logger(
+                __name__,
+                source=spec.source_name,
+                logical_date=logical_date.isoformat(),
+                chunk=index,
+            )
+            _execute_with_retry(
+                executor,
+                delete_chunk_sql(spec, chunk, catalog, logical_date, schema),
+                chunk.sql,
+                attempts=attempts,
+                sleep=sleep,
+                log=log,
+            )
+        _verify_batch(executor, spec, prepared, catalog, logical_date, schema)
+        if changed:
+            results.append(
+                LoadResult(
+                    spec.source_key,
+                    spec.batch_id(logical_date),
+                    logical_date,
+                    len(prepared.rows),
+                    "loaded",
+                )
+            )
     return results

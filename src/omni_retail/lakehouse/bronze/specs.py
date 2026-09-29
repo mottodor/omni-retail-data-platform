@@ -26,6 +26,7 @@ SCHEMA_BRONZE = "bronze"
 BATCH_ID = "_batch_id"
 BATCH_DATE = "_batch_date"
 SOURCE_OBJECT = "_source_object"
+SOURCE_OBJECT_ROW_POSITION = "_source_object_row_position"
 INGESTED_AT = "_ingested_at"
 
 
@@ -148,6 +149,8 @@ SERVICE_COLUMNS: tuple[BronzeColumnSpec, ...] = (
     BronzeColumnSpec(BATCH_ID, "varchar"),
     BronzeColumnSpec(BATCH_DATE, "date"),
     BronzeColumnSpec(SOURCE_OBJECT, "varchar"),
+    # Stable coordinate within the immutable archive object; enables chunk-level resume.
+    BronzeColumnSpec(SOURCE_OBJECT_ROW_POSITION, "bigint"),
     BronzeColumnSpec(INGESTED_AT, "timestamp(6) with time zone"),
 )
 

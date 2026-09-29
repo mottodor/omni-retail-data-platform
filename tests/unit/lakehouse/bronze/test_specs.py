@@ -84,10 +84,11 @@ def test_service_columns_are_last_and_partition_on_batch_date() -> None:
         "_batch_id",
         "_batch_date",
         "_source_object",
+        "_source_object_row_position",
         "_ingested_at",
     ]
     assert SERVICE_COLUMNS[1].trino_type == "date"
-    assert TABLES["orders"].all_columns[-4:] == SERVICE_COLUMNS
+    assert TABLES["orders"].all_columns[-5:] == SERVICE_COLUMNS
 
 
 def test_api_specs_declare_envelope_fields() -> None:

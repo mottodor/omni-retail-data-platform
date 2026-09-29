@@ -105,9 +105,12 @@ logical day at a time, partitioned by `_batch_date`:
 
 Service columns on every table: `_batch_id` (deterministic
 `<source>-<yyyymmdd>`), `_batch_date` (partition), `_source_object`,
-`_ingested_at`. Loads are idempotent per (table, logical date):
-`DELETE` partition → batched `INSERT`, row-count-verified against the raw
-manifest.
+`_source_object_row_position` (zero-based coordinate inside the immutable raw
+object), `_ingested_at`. Explicit-date loads are idempotent per (table,
+logical date): `DELETE` partition → batched `INSERT`, row-count-verified
+against the raw manifest. Watermark-driven `run-new` resumes at independently
+replaceable source-object row ranges and verifies the manifest count plus
+unique raw coordinates.
 
 ## Silver layer (Phase 5 slice 2)
 

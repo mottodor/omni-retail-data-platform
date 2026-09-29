@@ -1,26 +1,40 @@
-"""Trino SQL literal builders and batched INSERT statements (Phase 5 spec §4).
-
-Values travel as Python objects and are rendered as *typed* SQL literals so a
-batched multi-row INSERT is a single deterministic statement per chunk — no
-driver-side parameter protocol involved.
-"""
+"""Typed Trino SQL literal and resumable INSERT-chunk builders."""
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from omni_retail.lakehouse.bronze.specs import BronzeTableSpec
+from omni_retail.lakehouse.bronze.specs import (
+    SOURCE_OBJECT,
+    SOURCE_OBJECT_ROW_POSITION,
+    BronzeTableSpec,
+)
 
-#: Rows per multi-row INSERT statement. Larger batches mean fewer catalog
-#: commits per load (per-operation OAuth2 churn, trinodb/trino#30816) and
-#: fewer tiny parquet files per Iceberg snapshot (AGENTS §22/§25).
-ROWS_PER_STATEMENT = 5000
-
-#: Character budget per INSERT statement: Trino rejects query text larger
-#: than 1MB (QUERY_TEXT_TOO_LARGE), so batches must stay well under it.
-MAX_STATEMENT_CHARS = 768_000
+#: Rows per multi-row INSERT. Fewer bounded Iceberg commits constrain catalog
+#: metadata growth during a full rebuild; the SQL remains below Trino's 2 MB limit.
+ROWS_PER_STATEMENT = 10_000
+MAX_STATEMENT_CHARS = 1_750_000
 
 Row = Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class ObjectRange:
+    """Contiguous, deterministic row positions from one archived object."""
+
+    source_object: str
+    first_row_position: int
+    last_row_position: int
+
+
+@dataclass(frozen=True)
+class InsertChunk:
+    """One INSERT plus the exact source-object coordinates it replaces."""
+
+    sql: str
+    row_count: int
+    ranges: tuple[ObjectRange, ...]
 
 
 def varchar_literal(value: str) -> str:
@@ -28,7 +42,6 @@ def varchar_literal(value: str) -> str:
 
 
 def timestamp_literal(value: datetime) -> str:
-    """``TIMESTAMP '... UTC'`` literal; naive values are assumed UTC."""
     moment = value if value.tzinfo else value.replace(tzinfo=UTC)
     return f"TIMESTAMP '{moment.astimezone(UTC):%Y-%m-%d %H:%M:%S.%f} UTC'"
 
@@ -38,7 +51,7 @@ def date_literal(value: date) -> str:
 
 
 def sql_literal(value: object, trino_type: str) -> str:
-    """Render one Python value as a Trino SQL literal for ``trino_type``."""
+    """Render one Python value as a typed Trino SQL literal."""
     if value is None:
         return "null"
     if trino_type.startswith("varchar"):
@@ -72,7 +85,30 @@ def sql_literal(value: object, trino_type: str) -> str:
     raise TypeError(f"unsupported trino type for literals: {trino_type!r}")
 
 
-def insert_statements(
+def _chunk_ranges(rows: Sequence[Row]) -> tuple[ObjectRange, ...]:
+    ranges: list[ObjectRange] = []
+    for row in rows:
+        source_object = row.get(SOURCE_OBJECT)
+        position = row.get(SOURCE_OBJECT_ROW_POSITION)
+        if (
+            not isinstance(source_object, str)
+            or isinstance(position, bool)
+            or not isinstance(position, int)
+        ):
+            raise ValueError("INSERT chunks require deterministic source-object row positions")
+        if (
+            ranges
+            and ranges[-1].source_object == source_object
+            and position == ranges[-1].last_row_position + 1
+        ):
+            previous = ranges[-1]
+            ranges[-1] = ObjectRange(source_object, previous.first_row_position, position)
+        else:
+            ranges.append(ObjectRange(source_object, position, position))
+    return tuple(ranges)
+
+
+def insert_chunks(
     spec: BronzeTableSpec,
     rows: Sequence[Row],
     *,
@@ -80,12 +116,8 @@ def insert_statements(
     schema: str = "bronze",
     rows_per_statement: int = ROWS_PER_STATEMENT,
     max_statement_chars: int = MAX_STATEMENT_CHARS,
-) -> list[str]:
-    """Batched multi-row INSERTs covering every row in declaration order.
-
-    A batch is cut at ``rows_per_statement`` rows OR when the rendered
-    statement would exceed ``max_statement_chars`` — whichever comes first.
-    """
+) -> list[InsertChunk]:
+    """Build bounded INSERT chunks with their exact replacement coordinates."""
     if rows_per_statement < 1:
         raise ValueError(f"rows_per_statement must be >= 1, got {rows_per_statement}")
     columns = spec.all_columns
@@ -95,19 +127,26 @@ def insert_statements(
         if missing:
             raise ValueError(f"{spec.name}: row missing columns {missing}")
 
-    column_list = ", ".join(f'"{name}"' for name in names)
-    header = f"insert into {catalog}.{schema}.{spec.name} ({column_list}) values "
-
-    statements: list[str] = []
-    chunk: list[str] = []
+    header = (
+        f"insert into {catalog}.{schema}.{spec.name} "
+        f"({', '.join(f'"{name}"' for name in names)}) values "
+    )
+    chunks: list[InsertChunk] = []
+    chunk_rows: list[Row] = []
+    rendered_rows: list[str] = []
     chunk_chars = len(header)
 
     def flush() -> None:
-        nonlocal chunk, chunk_chars
-        if chunk:
-            statements.append(header + ", ".join(chunk))
-            chunk = []
-            chunk_chars = len(header)
+        nonlocal chunk_rows, rendered_rows, chunk_chars
+        if chunk_rows:
+            chunks.append(
+                InsertChunk(
+                    sql=header + ", ".join(rendered_rows),
+                    row_count=len(chunk_rows),
+                    ranges=_chunk_ranges(chunk_rows),
+                )
+            )
+            chunk_rows, rendered_rows, chunk_chars = [], [], len(header)
 
     for row in rows:
         rendered = (
@@ -118,13 +157,37 @@ def insert_statements(
             )
             + ")"
         )
-        separator_chars = 2 if chunk else 0
-        if chunk and (
+        separator_chars = 2 if rendered_rows else 0
+        if rendered_rows and (
             chunk_chars + separator_chars + len(rendered) > max_statement_chars
-            or len(chunk) >= rows_per_statement
+            or len(chunk_rows) >= rows_per_statement
         ):
             flush()
-        chunk.append(rendered)
-        chunk_chars += (2 if len(chunk) > 1 else 0) + len(rendered)
+        chunk_rows.append(row)
+        rendered_rows.append(rendered)
+        chunk_chars += (2 if len(rendered_rows) > 1 else 0) + len(rendered)
     flush()
-    return statements
+    return chunks
+
+
+def insert_statements(
+    spec: BronzeTableSpec,
+    rows: Sequence[Row],
+    *,
+    catalog: str = "iceberg",
+    schema: str = "bronze",
+    rows_per_statement: int = ROWS_PER_STATEMENT,
+    max_statement_chars: int = MAX_STATEMENT_CHARS,
+) -> list[str]:
+    """Backward-compatible SQL-only view of :func:`insert_chunks`."""
+    return [
+        chunk.sql
+        for chunk in insert_chunks(
+            spec,
+            rows,
+            catalog=catalog,
+            schema=schema,
+            rows_per_statement=rows_per_statement,
+            max_statement_chars=max_statement_chars,
+        )
+    ]

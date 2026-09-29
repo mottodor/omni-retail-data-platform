@@ -16,11 +16,14 @@ Contract:
 
 ## Current focus
 
-Reliability debt #14 is complete: integration tests restore exact object
-mutations, enforce a full-archive checksum invariant, and use disposable
-lakehouse schemas; two consecutive live runs preserved all production table
-snapshots and left no `it_*` schemas. Phase 7 (Apache Superset) is **done**;
-next up is Phase 8 (CDC: Debezium -> Kafka -> Iceberg). Phase 7 delivered end
+Reliability fix #15 is complete: the full archive-to-Bronze rebuild now uses
+bounded query memory/text, fewer commits, and finite automatic Polaris/Trino
+recovery; its live acceptance run completed from the seeded archive with two
+Trino restarts and no operator intervention. Phase 8 (CDC: Debezium -> Kafka
+-> Iceberg) is next. Reliability debt #14 is complete: integration tests restore exact object mutations,
+enforce a full-archive checksum invariant, and use disposable lakehouse
+schemas; two consecutive live runs preserved all production table snapshots
+and left no `it_*` schemas. Phase 7 (Apache Superset) is **done** and delivered end
 to end: custom pinned image
 `omni-retail/superset:0.1.0`, `bi`-profile services with dedicated metadata
 PostgreSQL, idempotent bootstrap (ADR 0005) with fixed connection UUIDs, and

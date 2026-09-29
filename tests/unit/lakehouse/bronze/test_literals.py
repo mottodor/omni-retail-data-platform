@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from omni_retail.lakehouse.bronze.literals import insert_statements, sql_literal
+from omni_retail.lakehouse.bronze.literals import insert_chunks, insert_statements, sql_literal
 from omni_retail.lakehouse.bronze.specs import TABLES
 
 
@@ -72,6 +72,7 @@ def categories_row(category_id: int) -> dict[str, object]:
         "_batch_id": "postgres-categories-20260918",
         "_batch_date": date(2026, 9, 18),
         "_source_object": "postgres/categories/2026/09/18/data.parquet",
+        "_source_object_row_position": category_id,
         "_ingested_at": datetime(2026, 9, 18, 9, 0, tzinfo=UTC),
     }
 
@@ -99,22 +100,30 @@ def test_insert_statements_reject_missing_columns() -> None:
         insert_statements(TABLES["categories"], [{"category_id": 1}])
 
 
+def test_insert_chunks_preserve_source_object_position_ranges() -> None:
+    rows = [categories_row(index) for index in range(3)]
+    chunks = insert_chunks(TABLES["categories"], rows, rows_per_statement=2)
+
+    assert [(item.first_row_position, item.last_row_position) for item in chunks[0].ranges] == [
+        (0, 1)
+    ]
+    assert chunks[1].ranges[0].first_row_position == 2
+
+
 def test_default_batch_size_limits_catalog_operations() -> None:
-    """5000 rows/statement cap: fewer INSERT commits per load (catalog-auth
-    churn, trinodb/trino#30816) and fewer tiny parquet files per snapshot."""
+    """10k rows/statement cap limits Iceberg commit and catalog-session growth."""
     spec = TABLES["categories"]
-    rows = [categories_row(index) for index in range(5001)]
+    rows = [categories_row(index) for index in range(10_001)]
     statements = insert_statements(spec, rows)
     assert len(statements) == 2
 
 
 def test_statements_respect_query_text_budget() -> None:
-    """Trino rejects query text over 1MB (QUERY_TEXT_TOO_LARGE); batches must
-    stay well under it even with wide rows."""
+    """Rebuild statements stay below the explicitly configured 2 MB Trino limit."""
     spec = TABLES["categories"]
-    rows = [categories_row(index) for index in range(200)]
+    rows = [categories_row(index) for index in range(500)]
     rows = [{**row, "name": "x" * 4000} for row in rows]
     statements = insert_statements(spec, rows)
     assert len(statements) > 1
-    assert all(len(statement) <= 768_000 for statement in statements)
-    assert sum(statement.count("), (") for statement in statements) == 198
+    assert all(len(statement) <= 1_750_000 for statement in statements)
+    assert sum(statement.count("), (") for statement in statements) == 498
