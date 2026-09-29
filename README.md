@@ -446,7 +446,7 @@ Each documentation artifact has a single role:
 | [docs/adr/](docs/adr/README.md) | Architecture Decision Records (index, template); significant decisions only |
 | [ROADMAP.md](ROADMAP.md) | Phases, scope, acceptance criteria, target architecture, repository structure |
 | [PROGRESS.md](PROGRESS.md) | Current state only: phase/slice status, current focus, deferred follow-ups |
-| [docs/plans/active.md](docs/plans/active.md) | Execution detail of the single active task (session-resume checklist; removed when the phase closes) |
+| `docs/plans/active.md` (when present) | Execution detail of the single active task (session-resume checklist; removed when the task closes) |
 | [docs/data-model.md](docs/data-model.md) | Table documentation, grain, source metrics |
 | [docs/data-contracts.md](docs/data-contracts.md) | Source data contracts |
 | [docs/runbooks/](docs/runbooks/) | Operational failure runbooks |
