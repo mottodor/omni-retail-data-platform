@@ -1,4 +1,6 @@
-"""Unit tests for keyset extraction and Parquet snapshots (fakes only)."""
+"""Unit tests for keyset extraction and Parquet snapshots with fakes."""
+
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false
 
 import hashlib
 import io
@@ -26,7 +28,10 @@ from omni_retail.ingestion.postgres_snapshot.tables import (
     UPDATED_AT,
     table_by_name,
 )
-from omni_retail.ingestion.postgres_snapshot.watermark import Watermark, load_watermark
+from omni_retail.ingestion.postgres_snapshot.watermark import (
+    Watermark,
+    load_watermark,
+)
 
 ORDERS = table_by_name("orders")
 
@@ -203,6 +208,29 @@ def test_snapshot_table_empty_window_writes_manifest_only() -> None:
     assert not storage.object_exists("archive", postgres_snapshot_key("orders", date(2026, 9, 13)))
     assert storage.object_exists("archive", manifest_key("postgres-orders", manifest.batch_id))
     assert not any(key.startswith("_watermarks/") for (_bucket, key) in storage.stored_objects())
+
+
+def test_empty_rerun_removes_stale_parquet_before_zero_row_manifest() -> None:
+    storage = FakeStorage()
+    logical_date = date(2026, 9, 13)
+    stale_key = postgres_snapshot_key("orders", logical_date)
+    storage.put_object("archive", stale_key, b"foreign-stale-parquet")
+
+    manifest = snapshot_table(
+        storage,
+        FakeSnapshotConnection([]),
+        ORDERS,
+        logical_date=logical_date,
+        watermark=Watermark("orders", datetime(2026, 9, 12, tzinfo=UTC), 1),
+        clock=fixed_clock,
+    )
+
+    assert manifest.row_count == 0
+    assert not storage.object_exists("archive", stale_key)
+    stored_manifest = storage.get_object(
+        "archive", manifest_key("postgres-orders", manifest.batch_id)
+    )
+    assert b'"row_count": 0' in stored_manifest
 
 
 def test_snapshot_table_watermark_does_not_move_when_upload_fails() -> None:

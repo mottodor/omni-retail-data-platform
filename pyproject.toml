@@ -50,7 +50,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["omni_retail"]
-mypy_path = ["infrastructure/mock_api/src", "airflow"]
+mypy_path = ["src", "tests", "infrastructure/mock_api/src", "airflow"]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "openpyxl.*", "trino.*"]

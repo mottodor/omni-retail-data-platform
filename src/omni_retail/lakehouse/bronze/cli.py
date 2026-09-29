@@ -18,6 +18,7 @@ from omni_retail.lakehouse.bronze.loader import (
     LoadError,
     TrinoConfig,
     TrinoExecutor,
+    bronze_schema_from_env,
     load_new,
     load_with_retry,
 )
@@ -68,31 +69,53 @@ def run_one(
     executor: TrinoExecutor,
     logical_date: date,
     catalog: str = "iceberg",
+    schema: str = "bronze",
 ) -> int:
     """Load one source for the logical date; returns a process exit code."""
-    load_with_retry(storage, executor, spec, logical_date=logical_date, catalog=catalog)
+    load_with_retry(
+        storage,
+        executor,
+        spec,
+        logical_date=logical_date,
+        catalog=catalog,
+        schema=schema,
+    )
     return 0
 
 
 def run_all(
-    storage: ObjectStorage, executor: TrinoExecutor, logical_date: date, catalog: str = "iceberg"
+    storage: ObjectStorage,
+    executor: TrinoExecutor,
+    logical_date: date,
+    catalog: str = "iceberg",
+    schema: str = "bronze",
 ) -> int:
     """Load every registered source; empty days are warnings, errors fail fast."""
     log = context_logger(__name__, logical_date=logical_date.isoformat())
     for spec in TABLES.values():
         result = load_with_retry(
-            storage, executor, spec, logical_date=logical_date, catalog=catalog
+            storage,
+            executor,
+            spec,
+            logical_date=logical_date,
+            catalog=catalog,
+            schema=schema,
         )
         if result.status == "loaded":
             log.info("run-all progress: source=%s row_count=%d", result.source, result.row_count)
     return 0
 
 
-def run_new(storage: ObjectStorage, executor: TrinoExecutor, catalog: str = "iceberg") -> int:
+def run_new(
+    storage: ObjectStorage,
+    executor: TrinoExecutor,
+    catalog: str = "iceberg",
+    schema: str = "bronze",
+) -> int:
     """Load every source past its Bronze watermark; up-to-date sources are no-ops."""
     log = context_logger(__name__, command="run-new")
     for spec in TABLES.values():
-        results = load_new(storage, executor, spec, catalog=catalog)
+        results = load_new(storage, executor, spec, catalog=catalog, schema=schema)
         loaded = sum(1 for result in results if result.status == "loaded")
         log.info(
             "run-new source complete: source=%s dates=%d loaded=%d",
@@ -110,13 +133,14 @@ def main(argv: list[str] | None = None) -> int:
         # Resolve the spec first so unknown sources fail before any client is built.
         spec = spec_by_source(args.source) if args.command == "run" else None
         storage = BotoObjectStorage(StorageConfig.from_env())
+        schema = bronze_schema_from_env()
         with contextlib.closing(DbapiTrinoExecutor(TrinoConfig.from_env())) as executor:
             if args.command == "run":
                 assert spec is not None
-                return run_one(spec, storage, executor, args.date)
+                return run_one(spec, storage, executor, args.date, schema=schema)
             if args.command == "run-all":
-                return run_all(storage, executor, args.date)
-            return run_new(storage, executor)
+                return run_all(storage, executor, args.date, schema=schema)
+            return run_new(storage, executor, schema=schema)
     except (LoadError, BronzeReadError, StorageError, ValueError) as error:
         logger.error("%s failed: %s", args.command, error)
         return 1

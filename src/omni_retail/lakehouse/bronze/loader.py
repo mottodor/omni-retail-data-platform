@@ -11,6 +11,7 @@ Load semantics (Phase 5 design spec §4, §6):
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +38,8 @@ from omni_retail.lakehouse.bronze.specs import (
 Clock = Callable[[], datetime]
 
 logger = logging.getLogger(__name__)
+
+_SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class LoadError(Exception):
@@ -119,53 +122,82 @@ class LoadResult:
     status: Literal["loaded", "empty"]
 
 
-def create_schema_sql(catalog: str) -> str:
-    return f"create schema if not exists {catalog}.{SCHEMA_BRONZE}"
+def validate_schema_name(schema: str) -> str:
+    """Validate an unquoted Trino schema identifier before SQL interpolation."""
+    if not _SCHEMA_NAME_PATTERN.fullmatch(schema):
+        raise ValueError(
+            f"invalid schema name {schema!r}; expected lower-case letters, digits, "
+            "underscores, starting with a letter"
+        )
+    return schema
 
 
-def create_table_sql(spec: BronzeTableSpec, catalog: str) -> str:
+def bronze_schema_from_env() -> str:
+    """Resolve the configurable Bronze schema with the production default."""
+    return validate_schema_name(os.environ.get("ICEBERG_BRONZE_SCHEMA", SCHEMA_BRONZE))
+
+
+def create_schema_sql(catalog: str, schema: str = SCHEMA_BRONZE) -> str:
+    return f"create schema if not exists {catalog}.{validate_schema_name(schema)}"
+
+
+def create_table_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_BRONZE) -> str:
+    schema = validate_schema_name(schema)
     columns = ", ".join(f'"{column.name}" {column.trino_type}' for column in spec.all_columns)
     return (
-        f"create table if not exists {catalog}.{SCHEMA_BRONZE}.{spec.name} "
+        f"create table if not exists {catalog}.{schema}.{spec.name} "
         f"({columns}) with (partitioning = ARRAY['_batch_date'])"
     )
 
 
-def delete_partition_sql(spec: BronzeTableSpec, catalog: str, logical_date: date) -> str:
+def delete_partition_sql(
+    spec: BronzeTableSpec,
+    catalog: str,
+    logical_date: date,
+    schema: str = SCHEMA_BRONZE,
+) -> str:
+    schema = validate_schema_name(schema)
     return (
-        f"delete from {catalog}.{SCHEMA_BRONZE}.{spec.name} "
+        f"delete from {catalog}.{schema}.{spec.name} "
         f'where "{BATCH_DATE}" = {date_literal(logical_date)}'
     )
 
 
-def table_exists_sql(spec: BronzeTableSpec, catalog: str) -> str:
+def table_exists_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_BRONZE) -> str:
+    schema = validate_schema_name(schema)
     return (
         f"select 1 from {catalog}.information_schema.tables "
-        f"where table_schema = '{SCHEMA_BRONZE}' and table_name = '{spec.name}'"
+        f"where table_schema = '{schema}' and table_name = '{spec.name}'"
     )
 
 
-def max_batch_date_sql(spec: BronzeTableSpec, catalog: str) -> str:
-    return f'select max("{BATCH_DATE}") from {catalog}.{SCHEMA_BRONZE}.{spec.name}'
+def max_batch_date_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHEMA_BRONZE) -> str:
+    schema = validate_schema_name(schema)
+    return f'select max("{BATCH_DATE}") from {catalog}.{schema}.{spec.name}'
 
 
-def read_watermark(executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str) -> date | None:
+def read_watermark(
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    catalog: str,
+    schema: str = SCHEMA_BRONZE,
+) -> date | None:
     """Highest logical date already present in the source's Bronze table.
 
     The Bronze table itself is the watermark state: a missing table or an
     empty one means "nothing loaded yet". The check goes through
     ``information_schema`` instead of catching a missing-table query error.
     """
-    if not executor.fetch(table_exists_sql(spec, catalog)):
+    if not executor.fetch(table_exists_sql(spec, catalog, schema)):
         return None
-    rows = executor.fetch(max_batch_date_sql(spec, catalog))
+    rows = executor.fetch(max_batch_date_sql(spec, catalog, schema))
     if not rows or rows[0][0] is None:
         return None
     value = rows[0][0]
     if not isinstance(value, date):
         raise LoadError(
             f"{spec.source_key}: watermark is not a date: {value!r} "
-            f"(from {max_batch_date_sql(spec, catalog)})"
+            f"(from {max_batch_date_sql(spec, catalog, schema)})"
         )
     return value
 
@@ -191,8 +223,10 @@ def load(
     logical_date: date,
     clock: Clock | None = None,
     catalog: str = "iceberg",
+    schema: str = SCHEMA_BRONZE,
 ) -> LoadResult:
     """Load one (source, logical date) batch into Bronze; idempotent per day."""
+    schema = validate_schema_name(schema)
     effective_clock: Clock = clock or (lambda: datetime.now(UTC))
     log = context_logger(__name__, source=spec.source_name, logical_date=logical_date.isoformat())
     batch_id = spec.batch_id(logical_date)
@@ -225,10 +259,10 @@ def load(
             "(partition not modified)"
         )
 
-    executor.execute(create_schema_sql(catalog))
-    executor.execute(create_table_sql(spec, catalog))
-    executor.execute(delete_partition_sql(spec, catalog, logical_date))
-    statements = insert_statements(spec, rows, catalog=catalog)
+    executor.execute(create_schema_sql(catalog, schema))
+    executor.execute(create_table_sql(spec, catalog, schema))
+    executor.execute(delete_partition_sql(spec, catalog, logical_date, schema))
+    statements = insert_statements(spec, rows, catalog=catalog, schema=schema)
     for statement in statements:
         executor.execute(statement)
     log.info(
@@ -278,6 +312,7 @@ def load_with_retry(
     logical_date: date,
     clock: Clock | None = None,
     catalog: str = "iceberg",
+    schema: str = SCHEMA_BRONZE,
     attempts: int = 3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> LoadResult:
@@ -290,7 +325,13 @@ def load_with_retry(
     for attempt in range(1, attempts + 1):
         try:
             return load(
-                storage, executor, spec, logical_date=logical_date, clock=clock, catalog=catalog
+                storage,
+                executor,
+                spec,
+                logical_date=logical_date,
+                clock=clock,
+                catalog=catalog,
+                schema=schema,
             )
         except trino.exceptions.Error as error:
             if attempt == attempts or not is_transient_catalog_error(error):
@@ -316,6 +357,7 @@ def load_new(
     *,
     clock: Clock | None = None,
     catalog: str = "iceberg",
+    schema: str = SCHEMA_BRONZE,
     attempts: int = 3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[LoadResult]:
@@ -328,7 +370,8 @@ def load_new(
     source (fail fast) and a restart resumes at the watermark.
     """
     log = context_logger(__name__, source=spec.source_name, command="run-new")
-    watermark = read_watermark(executor, spec, catalog)
+    schema = validate_schema_name(schema)
+    watermark = read_watermark(executor, spec, catalog, schema)
     pending = [
         logical_date
         for logical_date in discover_archive_dates(storage, spec)
@@ -343,6 +386,7 @@ def load_new(
             logical_date=logical_date,
             clock=clock,
             catalog=catalog,
+            schema=schema,
             attempts=attempts,
             sleep=sleep,
         )

@@ -13,13 +13,13 @@ models:
   omni_retail:
     staging:
       +materialized: view
-      +schema: silver
+      +schema: "{{ env_var('DBT_SILVER_SCHEMA', 'silver') }}"
     intermediate:
       +materialized: view
-      +schema: silver
+      +schema: "{{ env_var('DBT_SILVER_SCHEMA', 'silver') }}"
     core:
       +materialized: table
-      +schema: gold
+      +schema: "{{ env_var('DBT_GOLD_SCHEMA', 'gold') }}"
     marts:
       +materialized: table
-      +schema: analytics
+      +schema: "{{ env_var('DBT_ANALYTICS_SCHEMA', 'analytics') }}"

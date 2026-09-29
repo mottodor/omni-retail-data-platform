@@ -140,16 +140,24 @@ def snapshot_table(
         body=body,
         ingested_at=effective_clock(),
     )
+    if not rows:
+        # A deterministic date key may contain an earlier/full-refresh object.
+        # Remove it before publishing the zero-row manifest so readers can
+        # never pair fresh empty metadata with stale foreign Parquet bytes.
+        storage.delete_object(BUCKET_ARCHIVE, object_key)
+        storage.put_object(
+            BUCKET_ARCHIVE,
+            manifest_key(spec.source_name, manifest.batch_id),
+            manifest.to_json().encode(),
+        )
+        log.info("postgres snapshot empty window: batch_id=%s row_count=0", manifest.batch_id)
+        return manifest
+
     storage.put_object(
         BUCKET_ARCHIVE,
         manifest_key(spec.source_name, manifest.batch_id),
         manifest.to_json().encode(),
     )
-
-    if not rows:
-        log.info("postgres snapshot empty window: batch_id=%s row_count=0", manifest.batch_id)
-        return manifest
-
     storage.put_object(BUCKET_ARCHIVE, object_key, body)
     save_watermark(
         storage,

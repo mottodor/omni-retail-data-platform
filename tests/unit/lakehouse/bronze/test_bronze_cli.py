@@ -1,4 +1,4 @@
-"""Unit tests for the Bronze loader CLI (fakes; no network)."""
+"""Unit tests for the Bronze CLI with fakes and no network."""
 
 from datetime import date
 from typing import Literal
@@ -58,6 +58,7 @@ def test_run_all_loads_every_source_and_tolerates_empty_days(
         logical_date: date,
         clock: object | None = None,
         catalog: str = "iceberg",
+        schema: str = "bronze",
     ) -> LoadResult:
         loaded.append(spec.source_key)
         return _result("empty")
@@ -76,6 +77,7 @@ def test_run_all_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> No
         logical_date: date,
         clock: object | None = None,
         catalog: str = "iceberg",
+        schema: str = "bronze",
     ) -> LoadResult:
         raise LoadError("boom")
 

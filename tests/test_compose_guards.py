@@ -60,7 +60,17 @@ EXPECTED_INGESTION_ENV_KEYS = {
 }
 
 # Trino/dbt configuration documented for Phase 5 (design spec §8).
-EXPECTED_TRINO_ENV_KEYS = {"TRINO_HOST", "TRINO_PORT", "TRINO_CATALOG", "TRINO_USER"}
+EXPECTED_TRINO_ENV_KEYS = {
+    "TRINO_HOST",
+    "TRINO_PORT",
+    "TRINO_CATALOG",
+    "TRINO_USER",
+    "ICEBERG_BRONZE_SCHEMA",
+    "DBT_BRONZE_SCHEMA",
+    "DBT_SILVER_SCHEMA",
+    "DBT_GOLD_SCHEMA",
+    "DBT_ANALYTICS_SCHEMA",
+}
 
 DBT_DIR = REPO_ROOT / "dbt"
 DBT_STAGING_MODELS = {
@@ -548,6 +558,18 @@ def test_dbt_profiles_are_env_driven_and_secret_free() -> None:
         assert forbidden not in output, f"profiles.yml must not contain {forbidden!r}"
     for env_driven in ("host", "user", "catalog", "schema"):
         assert "env_var" in str(output[env_driven]), f"{env_driven} must come from env_var"
+
+
+def test_dbt_layer_schemas_are_environment_configurable_with_production_defaults() -> None:
+    project = (DBT_DIR / "dbt_project.yml").read_text(encoding="utf-8")
+    sources = (DBT_DIR / "models" / "staging" / "sources.yml").read_text(encoding="utf-8")
+    for name, default in (
+        ("DBT_SILVER_SCHEMA", "silver"),
+        ("DBT_GOLD_SCHEMA", "gold"),
+        ("DBT_ANALYTICS_SCHEMA", "analytics"),
+    ):
+        assert f"env_var('{name}', '{default}')" in project
+    assert "env_var('DBT_BRONZE_SCHEMA', 'bronze')" in sources
 
 
 def test_dbt_project_and_staging_skeleton_exist() -> None:

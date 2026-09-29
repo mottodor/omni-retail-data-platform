@@ -1,22 +1,11 @@
 """Deterministic two-day raw world for live lakehouse integration tests.
 
-Shared seeding helpers extracted for the slice-3 orchestration test (the
-first consumer). The world mirrors ``test_dbt_core_build.py``'s fixtures —
-that file keeps its own inline copy for now (scope control; see the task-3
-plan in git history).
-
-Contract of the seeded world:
-
-- DAY_1 carries full, mutually consistent snapshots of the seven OLTP
-  tables plus one page per API source; DAY_2 adds the late/changed day
-  (one mutated customer, one re-snapshotted order, fresh API feeds);
-- raw objects land in the archive bucket together with their manifests,
-  exactly as the Phase 3/4 ingestion pipelines write them;
-- ``reset_bronze()`` wipes every partition of every Bronze table (the test
-  owns Bronze while it runs; Bronze is rebuildable by design);
-- ``purge_test_raw()`` removes only the seeded days' objects and manifests,
-  never data of other local days.
+Every write goes through the caller's object mutation journal. Seed functions
+return their manifests so callers can construct a manifest-scoped archive view
+that hides every unrelated date on a long-lived stack.
 """
+
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false
 
 import hashlib
 import json
@@ -27,17 +16,20 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import trino
 
+from integration.namespace_ownership import ObjectMutationJournal
 from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
+    api_batch_prefix,
     api_page_key,
     manifest_key,
     postgres_snapshot_key,
 )
-from omni_retail.ingestion.common.storage import BotoObjectStorage
-from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
+from omni_retail.ingestion.common.storage import ObjectStorage
+from omni_retail.ingestion.postgres_snapshot.tables import (
+    table_by_name,
+)
 from omni_retail.lakehouse.bronze.loader import TrinoConfig
-from omni_retail.lakehouse.bronze.specs import TABLES as BRONZE_TABLES
 
 DAY_1 = date(2026, 9, 20)
 DAY_2 = date(2026, 9, 21)
@@ -68,45 +60,51 @@ def trino_scalar(sql: str) -> object:
     return row[0]
 
 
-def bronze_table_exists(table: str) -> bool:
-    """Fresh-stack guard: a Bronze table exists only after its first load."""
-    count = trino_scalar(
-        "select count(*) from iceberg.information_schema.tables "
-        f"where table_schema = 'bronze' and table_name = '{table}'"
-    )
-    return bool(count == 1)
+def isolate_seed_coordinates(journal: ObjectMutationJournal) -> None:
+    """Clear only deterministic seed batches after leasing their prior bytes."""
+    direct_refs: set[tuple[str, str]] = set()
+    postgres_days = {
+        DAY_1: OLTP_TABLES,
+        DAY_2: ("customers", "orders"),
+    }
+    for logical_date, tables in postgres_days.items():
+        for table in tables:
+            source = f"postgres-{table}"
+            batch_id = f"{source}-{logical_date:%Y%m%d}"
+            direct_refs.add((BUCKET_ARCHIVE, postgres_snapshot_key(table, logical_date)))
+            direct_refs.add((BUCKET_ARCHIVE, manifest_key(source, batch_id)))
+    journal.lease_keys(direct_refs)
+    for bucket, key in direct_refs:
+        journal.delete_object(bucket, key)
+
+    for logical_date in (DAY_1, DAY_2):
+        for source in API_SOURCES:
+            prefix = api_batch_prefix(source, logical_date)
+            journal.lease_prefix(BUCKET_ARCHIVE, prefix)
+            for key in journal.list_object_keys(BUCKET_ARCHIVE, prefix):
+                journal.delete_object(BUCKET_ARCHIVE, key)
+            batch_id = f"{source}-{logical_date:%Y%m%d}"
+            manifest_ref = (BUCKET_ARCHIVE, manifest_key(source, batch_id))
+            journal.lease_key(*manifest_ref)
+            journal.delete_object(*manifest_ref)
 
 
-def reset_bronze() -> None:
-    """Delete every partition of every Bronze table (the test owns Bronze)."""
-    for name in BRONZE_TABLES:
-        if bronze_table_exists(name):
-            trino_scalar(f"delete from iceberg.bronze.{name}")
-
-
-def purge_test_raw(storage: BotoObjectStorage) -> None:
-    """Remove only the seeded raw objects and manifests of both days."""
-    prefixes = [
-        f"postgres/{name}/{day:%Y/%m/%d}/" for name in OLTP_TABLES for day in (DAY_1, DAY_2)
-    ]
-    prefixes += [f"api/{source}/{day:%Y%m%d}/" for source in API_SOURCES for day in (DAY_1, DAY_2)]
-    prefixes += [
-        f"_manifests/postgres-{name}/postgres-{name}-{day:%Y%m%d}.json"
-        for name in OLTP_TABLES
-        for day in (DAY_1, DAY_2)
-    ]
-    prefixes += [
-        f"_manifests/{source}/{source}-{day:%Y%m%d}.json"
-        for source in API_SOURCES
-        for day in (DAY_1, DAY_2)
-    ]
-    for prefix in prefixes:
-        for key in storage.list_object_keys(BUCKET_ARCHIVE, prefix):
-            storage.delete_object(BUCKET_ARCHIVE, key)
+def read_seed_manifests(
+    storage: ObjectStorage,
+    logical_date: date,
+    sources: tuple[str, ...],
+) -> tuple[BatchManifest, ...]:
+    """Read back exactly the manifests produced by one seed helper."""
+    manifests: list[BatchManifest] = []
+    for source in sources:
+        batch_id = f"{source}-{logical_date:%Y%m%d}"
+        body = storage.get_object(BUCKET_ARCHIVE, manifest_key(source, batch_id))
+        manifests.append(BatchManifest.from_json(body.decode()))
+    return tuple(manifests)
 
 
 def put_parquet(
-    storage: BotoObjectStorage, table: str, logical_date: date, rows: list[tuple[object, ...]]
+    storage: ObjectStorage, table: str, logical_date: date, rows: list[tuple[object, ...]]
 ) -> None:
     """Archive one OLTP-table snapshot as Parquet plus its manifest."""
     spec = table_by_name(table)
@@ -131,7 +129,7 @@ def put_parquet(
 
 
 def put_postgres_manifest(
-    storage: BotoObjectStorage,
+    storage: ObjectStorage,
     *,
     table: str,
     logical_date: date,
@@ -160,7 +158,7 @@ def put_postgres_manifest(
 
 
 def put_api_pages(
-    storage: BotoObjectStorage,
+    storage: ObjectStorage,
     *,
     source: str,
     logical_date: date,
@@ -193,7 +191,7 @@ def put_api_pages(
     storage.put_object(BUCKET_ARCHIVE, manifest_key(source, batch_id), manifest.to_json().encode())
 
 
-def seed_day_1(storage: BotoObjectStorage) -> None:
+def seed_day_1(storage: ObjectStorage) -> tuple[BatchManifest, ...]:
     """Consistent full snapshot day: 2 categories, 2 products, 2 customers,
     2 orders (1 delivered USD, 1 refunded EUR), 3 order items, 2 payments,
     1 shipment, one page per API source."""
@@ -434,9 +432,14 @@ def seed_day_1(storage: BotoObjectStorage) -> None:
         ],
         row_count=1,
     )
+    return read_seed_manifests(
+        storage,
+        DAY_1,
+        tuple(f"postgres-{table}" for table in OLTP_TABLES) + API_SOURCES,
+    )
 
 
-def seed_day_2(storage: BotoObjectStorage) -> None:
+def seed_day_2(storage: ObjectStorage) -> tuple[BatchManifest, ...]:
     """Late/changed day: one mutated customer (SCD2 leg), one re-snapshotted
     order (dedup leg), fresh daily API feeds (latest-wins legs)."""
     put_parquet(
@@ -527,4 +530,9 @@ def seed_day_2(storage: BotoObjectStorage) -> None:
             }
         ],
         row_count=1,
+    )
+    return read_seed_manifests(
+        storage,
+        DAY_2,
+        ("postgres-customers", "postgres-orders", *API_SOURCES),
     )

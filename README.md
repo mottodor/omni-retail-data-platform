@@ -401,7 +401,13 @@ view of the Airflow UI.
 - dbt tests: built-in constraints plus singular business tests, including
   the orders ↔ payments reconciliation (see the Lakehouse section).
 - `make integration` runs the acceptance scenarios against the live core
-  stack (MinIO + mock-api + Trino), gated by `OMNI_INTEGRATION=1`:
+  stack (MinIO + mock-api + Trino), gated by `OMNI_INTEGRATION=1`.
+  The suite is safe on a long-lived stack: deterministic object coordinates
+  are borrowed through exact-key rollback journals, a session checksum
+  invariant verifies the complete archive byte-for-byte, and lakehouse tests
+  use UUID-prefixed disposable Bronze/Silver/Gold/analytics schemas. Shared
+  production schemas are never reset and no Bronze reload is required after
+  tests:
   - re-running the same file batch archives exactly once (content-addressed dedup);
   - a corrupted file is quarantined with a machine-readable `.rejection.json`;
   - Parquet and XLSX sources flow end-to-end through real object storage;

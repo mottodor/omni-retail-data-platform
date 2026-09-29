@@ -1,19 +1,23 @@
-"""Integration tests: API ingestion against the live mock external API.
+"""Live API-ingestion tests with deterministic batch-prefix leases."""
 
-Phase 3 design spec §12 scenarios: a 429 fault is retried to success, and
-a date-range backfill is idempotent (re-running overwrites the same
-deterministic page keys instead of duplicating objects).
-"""
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false
 
 import contextlib
 import os
-from collections.abc import Callable
 from datetime import date
 
+from integration.namespace_ownership import ObjectMutationJournal, ObjectRef, ScopedObjectStorage
 from omni_retail.ingestion.api.cli import run_batch, spec_by_name
-from omni_retail.ingestion.api.client import DEFAULT_BASE_URL, ApiClient, ApiClientConfig
-from omni_retail.ingestion.common.paths import BUCKET_ARCHIVE
-from omni_retail.ingestion.common.storage import BotoObjectStorage
+from omni_retail.ingestion.api.client import (
+    DEFAULT_BASE_URL,
+    ApiClient,
+    ApiClientConfig,
+)
+from omni_retail.ingestion.common.paths import (
+    BUCKET_ARCHIVE,
+    api_batch_prefix,
+    manifest_key,
+)
 
 BACKFILL_DATES = (date(2026, 9, 8), date(2026, 9, 9), date(2026, 9, 10))
 SMALL_PAGE_SIZE = 7  # forces several pages per day
@@ -26,6 +30,29 @@ def live_client_config() -> ApiClientConfig:
         backoff_base_seconds=0.1,
         min_request_interval_seconds=0.05,
     )
+
+
+def isolated_api_storage(
+    journal: ObjectMutationJournal, source: str, logical_dates: tuple[date, ...]
+) -> ScopedObjectStorage:
+    """Lease and clear only the selected source/day page prefixes and manifests."""
+    prefixes: set[ObjectRef] = set()
+    keys: set[ObjectRef] = set()
+    for logical_date in logical_dates:
+        prefix = api_batch_prefix(source, logical_date)
+        batch_id = f"{source}-{logical_date:%Y%m%d}"
+        journal.lease_prefix(BUCKET_ARCHIVE, prefix)
+        prefixes.add((BUCKET_ARCHIVE, prefix))
+        manifest_ref = (BUCKET_ARCHIVE, manifest_key(source, batch_id))
+        journal.lease_key(*manifest_ref)
+        keys.add(manifest_ref)
+    view = ScopedObjectStorage(journal, keys=keys, prefixes=prefixes)
+    for bucket, prefix in prefixes:
+        for key in view.list_object_keys(bucket, prefix):
+            view.delete_object(bucket, key)
+    for bucket, key in keys:
+        view.delete_object(bucket, key)
+    return view
 
 
 def test_api_429_fault_is_retried_and_succeeds() -> None:
@@ -48,27 +75,42 @@ def test_api_429_fault_is_retried_and_succeeds() -> None:
 
 
 def test_api_backfill_range_is_idempotent(
-    live_storage: BotoObjectStorage, purged_sources: Callable[..., None]
+    object_journal: ObjectMutationJournal,
 ) -> None:
-    purged_sources("fx-rates")
+    storage = isolated_api_storage(object_journal, "fx-rates", BACKFILL_DATES)
     spec = spec_by_name("fx-rates")
 
     with contextlib.closing(ApiClient(live_client_config())) as client:
         manifests = [
-            run_batch(spec, client, live_storage, logical_date, SMALL_PAGE_SIZE)
+            run_batch(spec, client, storage, logical_date, SMALL_PAGE_SIZE)
             for logical_date in BACKFILL_DATES
         ]
 
     assert [manifest.status for manifest in manifests] == ["completed"] * len(BACKFILL_DATES)
     assert all(manifest.row_count > 0 for manifest in manifests)
-    page_keys = live_storage.list_object_keys(BUCKET_ARCHIVE, "api/fx-rates/")
-    manifest_keys = live_storage.list_object_keys(BUCKET_ARCHIVE, "_manifests/fx-rates/")
+    page_keys = tuple(
+        key
+        for logical_date in BACKFILL_DATES
+        for key in storage.list_object_keys(
+            BUCKET_ARCHIVE, api_batch_prefix("fx-rates", logical_date)
+        )
+    )
+    manifest_keys = storage.list_object_keys(BUCKET_ARCHIVE, "_manifests/fx-rates/")
     assert len(manifest_keys) == len(BACKFILL_DATES)
     assert len(page_keys) > len(BACKFILL_DATES)  # multiple pages per day
 
     with contextlib.closing(ApiClient(live_client_config())) as client:
         for logical_date in BACKFILL_DATES:
-            run_batch(spec, client, live_storage, logical_date, SMALL_PAGE_SIZE)
+            run_batch(spec, client, storage, logical_date, SMALL_PAGE_SIZE)
 
-    assert live_storage.list_object_keys(BUCKET_ARCHIVE, "api/fx-rates/") == page_keys
-    assert live_storage.list_object_keys(BUCKET_ARCHIVE, "_manifests/fx-rates/") == manifest_keys
+    assert (
+        tuple(
+            key
+            for logical_date in BACKFILL_DATES
+            for key in storage.list_object_keys(
+                BUCKET_ARCHIVE, api_batch_prefix("fx-rates", logical_date)
+            )
+        )
+        == page_keys
+    )
+    assert storage.list_object_keys(BUCKET_ARCHIVE, "_manifests/fx-rates/") == manifest_keys

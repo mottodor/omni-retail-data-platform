@@ -1,4 +1,4 @@
-"""Unit tests for the Bronze loader: DDL, ordering, idempotency (fakes only)."""
+"""Unit tests for Bronze loader DDL, ordering, and idempotency with fakes."""
 
 import hashlib
 import json
@@ -24,6 +24,7 @@ from omni_retail.lakehouse.bronze.loader import (
     DbapiTrinoExecutor,
     LoadError,
     TrinoConfig,
+    bronze_schema_from_env,
     create_schema_sql,
     create_table_sql,
     delete_partition_sql,
@@ -34,6 +35,7 @@ from omni_retail.lakehouse.bronze.loader import (
     max_batch_date_sql,
     read_watermark,
     table_exists_sql,
+    validate_schema_name,
 )
 from omni_retail.lakehouse.bronze.specs import TABLES
 
@@ -57,6 +59,21 @@ def test_trino_config_defaults_without_env(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_create_schema_sql_is_idempotent() -> None:
     assert create_schema_sql("iceberg") == "create schema if not exists iceberg.bronze"
+    assert create_schema_sql("iceberg", "it_abc_bronze") == (
+        "create schema if not exists iceberg.it_abc_bronze"
+    )
+
+
+def test_bronze_schema_env_default_custom_and_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ICEBERG_BRONZE_SCHEMA", raising=False)
+    assert bronze_schema_from_env() == "bronze"
+    monkeypatch.setenv("ICEBERG_BRONZE_SCHEMA", "it_abc_bronze")
+    assert bronze_schema_from_env() == "it_abc_bronze"
+    monkeypatch.setenv("ICEBERG_BRONZE_SCHEMA", "bronze; drop schema gold")
+    with pytest.raises(ValueError, match="invalid schema name"):
+        bronze_schema_from_env()
+    with pytest.raises(ValueError, match="invalid schema name"):
+        validate_schema_name("9_invalid")
 
 
 def test_create_table_sql_declares_all_columns_and_partitioning() -> None:
@@ -197,6 +214,47 @@ def test_load_postgres_batch_deletes_then_inserts() -> None:
     assert executor.statements.index(deletes[0]) < executor.statements.index(inserts[0])
     assert "'postgres-orders-20260918'" in inserts[0]
     assert "'postgres/orders/2026/09/18/data.parquet'" in inserts[0]
+
+
+def test_load_targets_explicit_validated_schema() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    seed_orders_batch(storage, rows=1)
+
+    load(
+        storage,
+        executor,
+        TABLES["orders"],
+        logical_date=LOGICAL_DATE,
+        clock=fixed_clock,
+        schema="it_abc_bronze",
+    )
+
+    assert executor.statements[0] == "create schema if not exists iceberg.it_abc_bronze"
+    assert executor.statements[1].startswith(
+        "create table if not exists iceberg.it_abc_bronze.orders"
+    )
+    assert executor.statements_matching("delete from")[0].startswith(
+        "delete from iceberg.it_abc_bronze.orders"
+    )
+    assert executor.statements_matching("insert into")[0].startswith(
+        "insert into iceberg.it_abc_bronze.orders"
+    )
+
+
+def test_load_rejects_invalid_schema_before_reading_or_writing() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+
+    with pytest.raises(ValueError, match="invalid schema name"):
+        load(
+            storage,
+            executor,
+            TABLES["orders"],
+            logical_date=LOGICAL_DATE,
+            schema="bronze; drop schema gold",
+        )
+    assert executor.statements == []
 
 
 def test_load_rerun_replaces_partition_without_duplicates() -> None:
