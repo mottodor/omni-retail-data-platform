@@ -16,11 +16,16 @@ Contract:
 
 ## Current focus
 
+Platform follow-up #16 is complete: every host-side Makefile target uses one
+shared localhost proxy bypass while preserving caller exclusions; live
+acceptance passed with deliberately unusable proxy URLs. Phase 8 (CDC:
+Debezium -> Kafka -> Iceberg) is next.
+
 Reliability fix #15 is complete: the full archive-to-Bronze rebuild now uses
 bounded query memory/text, fewer commits, and finite automatic Polaris/Trino
 recovery; its live acceptance run completed from the seeded archive with two
-Trino restarts and no operator intervention. Phase 8 (CDC: Debezium -> Kafka
--> Iceberg) is next. Reliability debt #14 is complete: integration tests restore exact object mutations,
+Trino restarts and no operator intervention. Reliability debt #14 is complete:
+integration tests restore exact object mutations,
 enforce a full-archive checksum invariant, and use disposable lakehouse
 schemas; two consecutive live runs preserved all production table snapshots
 and left no `it_*` schemas. Phase 7 (Apache Superset) is **done** and delivered end
@@ -107,9 +112,6 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 
 Open follow-ups from the 2026-09-27 restart-verification postmortem
 (milestone "Reliability debt (post-Phase 7)"):
-
-- #16 (P2, chore): Makefile targets `ingest-api`, `bronze-load`,
-  `dbt-build` lack `no_proxy` for localhost and fail on proxied hosts.
 
 - Bronze daily loads leave Iceberg snapshot history unbounded (order_items
   hit metadata v194 during the 2026-09-27 rebuild churn); expiration and

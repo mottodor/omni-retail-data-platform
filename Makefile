@@ -1,6 +1,10 @@
 SHELL := /bin/bash
 UV := uv
 
+LOCALHOST_NO_PROXY := 127.0.0.1,localhost
+# shellcheck disable=SC2034  # GNU Make variable expanded in host-side recipes below.
+LOCALHOST_PROXY_BYPASS=no_proxy="$(LOCALHOST_NO_PROXY)$${no_proxy:+,$${no_proxy}}" NO_PROXY="$(LOCALHOST_NO_PROXY)$${NO_PROXY:+,$${NO_PROXY}}"
+
 .PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
@@ -41,40 +45,40 @@ smoke-core: ## End-to-end check: Trino -> Polaris -> Iceberg -> MinIO
 EVENTS ?= 200
 
 generate-oltp: ## Apply OLTP schema and load initial data (10k/5k/100k, seed 42). ARGS="--orders 1000" to override
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.generators.oltp initial $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.generators.oltp initial $(ARGS)'
 
 mutate-oltp: ## Apply EVENTS random mutations (inserts/updates/deletes) to the OLTP source
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.generators.oltp mutate --events $(EVENTS) $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.generators.oltp mutate --events $(EVENTS) $(ARGS)'
 
 ROWS ?= 200
 SEED ?= 7
 
 seed-supplier-files: ## Generate deterministic vendor files and upload to landing. ARGS="--rows 500 --seed 11" to override
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.generators.vendor_files generate --upload --rows $(ROWS) --seed $(SEED) $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.generators.vendor_files generate --upload --rows $(ROWS) --seed $(SEED) $(ARGS)'
 
 ingest-files: ## Process pending vendor files (landing -> processing -> archive | rejected). ARGS="--source supplier-prices --date 2026-09-11"
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.ingestion.files process $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.ingestion.files process $(ARGS)'
 
 ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source fx-rates --date 2026-09-11" or "backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.ingestion.api $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.ingestion.api $(ARGS)'
 
 bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18", "run-all --date 2026-09-18" or "run-new"
-	@bash -c 'set -a; source .env; set +a; $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
 
 bronze-rebuild: ## DESTRUCTIVE: clear only the configured Bronze schema, then rebuild it from archive with bounded Polaris recovery
-	bash infrastructure/scripts/bronze_rebuild.sh
+	$(LOCALHOST_PROXY_BYPASS) bash infrastructure/scripts/bronze_rebuild.sh
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
 	$(UV) run dbt parse --project-dir dbt --profiles-dir dbt
 
 dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select staging"
-	@bash -c 'set -a; source .env; set +a; $(UV) run dbt build --project-dir dbt --profiles-dir dbt $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt build --project-dir dbt --profiles-dir dbt $(ARGS)'
 
 dbt-test: ## Run dbt tests. ARGS="--select staging"
-	@bash -c 'set -a; source .env; set +a; $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
 
 integration: ## Run integration tests against the live stacks (requires `make up`; ClickHouse tests also need `make bi-up`)
-	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'
 
 BI_COMPOSE := docker compose --profile bi
 
@@ -92,13 +96,13 @@ bi-down: ## Stop the bi profile services (clickhouse-data and superset metadata 
 	$(BI_COMPOSE) down
 
 serving-publish: ## Publish a Gold mart to ClickHouse. ARGS="--mart mart_daily_sales"
-	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
 
 serving-rebuild: ## Rebuild serving marts from Iceberg Gold. No ARGS = every mart; ARGS="--mart mart_daily_sales" = one mart
-	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse rebuild $(if $(ARGS),$(ARGS),--all)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.serving.clickhouse rebuild $(if $(ARGS),$(ARGS),--all)'
 
 serving-benchmark: ## Compare a representative Gold query in Trino and ClickHouse. ARGS="--repetitions 5"
-	@bash -c 'set -a; source .env; set +a; no_proxy="127.0.0.1,localhost,$${no_proxy:-}" NO_PROXY="127.0.0.1,localhost,$${NO_PROXY:-}" $(UV) run python -m omni_retail.serving.clickhouse benchmark $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.serving.clickhouse benchmark $(ARGS)'
 
 AIRFLOW_COMPOSE := docker compose --profile orchestration
 

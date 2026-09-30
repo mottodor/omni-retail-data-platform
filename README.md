@@ -232,8 +232,10 @@ The pipeline runs as the least-privilege MinIO user `omni-ingestion`
 (rw on `landing`/`archive`/`rejected`, read-only on `lakehouse`), created
 automatically by `minio-init` from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`.
 
-Note for proxied environments: if your shell sets `HTTP_PROXY`/`HTTPS_PROXY`,
-add `no_proxy=127.0.0.1,localhost` so local MinIO traffic bypasses the proxy.
+Note for proxied environments: host-side `make` targets automatically add
+`127.0.0.1,localhost` to both `no_proxy` and `NO_PROXY` while preserving existing
+exclusions. When invoking the Python or dbt CLI directly, configure the equivalent
+localhost bypass in the caller environment.
 
 ### API ingestion
 
