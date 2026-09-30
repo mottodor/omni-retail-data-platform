@@ -13,3 +13,4 @@ When adding an ADR, append it to this index in the same change.
 | [0003](0003-airflow-deployment.md) | Airflow deployment model (Phase 4 orchestration) | Accepted |
 | [0004](0004-clickhouse-serving-publication.md) | ClickHouse serving layer: deployment and Gold publication mechanism | Accepted |
 | [0005](0005-superset-deployment.md) | Superset deployment and BI-as-code bootstrap | Accepted |
+| [0006](0006-cdc-deployment-and-delivery.md) | CDC deployment and delivery semantics | Accepted |

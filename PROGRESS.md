@@ -18,7 +18,8 @@ Contract:
 
 Phase 8 (CDC: Debezium -> Kafka -> Iceberg) is next. The first slice must
 establish PostgreSQL logical replication, Debezium/Kafka persistence, and a
-restart-safe Bronze path for customers, orders, and payments.
+restart-safe Bronze path for customers, orders, and payments. Execution plan:
+[`docs/plans/active.md`](docs/plans/active.md).
 
 ## Phase status
 
