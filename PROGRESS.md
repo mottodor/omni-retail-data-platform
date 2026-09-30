@@ -16,44 +16,9 @@ Contract:
 
 ## Current focus
 
-Platform follow-up #16 is complete: every host-side Makefile target uses one
-shared localhost proxy bypass while preserving caller exclusions; live
-acceptance passed with deliberately unusable proxy URLs. Phase 8 (CDC:
-Debezium -> Kafka -> Iceberg) is next.
-
-Reliability fix #15 is complete: the full archive-to-Bronze rebuild now uses
-bounded query memory/text, fewer commits, and finite automatic Polaris/Trino
-recovery; its live acceptance run completed from the seeded archive with two
-Trino restarts and no operator intervention. Reliability debt #14 is complete:
-integration tests restore exact object mutations,
-enforce a full-archive checksum invariant, and use disposable lakehouse
-schemas; two consecutive live runs preserved all production table snapshots
-and left no `it_*` schemas. Phase 7 (Apache Superset) is **done** and delivered end
-to end: custom pinned image
-`omni-retail/superset:0.1.0`, `bi`-profile services with dedicated metadata
-PostgreSQL, idempotent bootstrap (ADR 0005) with fixed connection UUIDs, and
-BI-as-code — the four mart datasets plus the Sales, Executive, Customer and
-Marketing dashboards committed as sanitized import/export v1 bundles under
-`superset/assets/` and re-imported on every `make bi-up` (verified by a
-metadata-volume-wipe round-trip). Dashboard URLs are slug-based. The Trino
-SQL Lab ad-hoc path (Superset -> Trino -> Iceberg) is verified by an
-integration test. Remaining manual step: dashboard screenshots for the
-README gallery (procedure in `docs/screenshots/README.md`; no browser in
-the agent environment). Funnel dashboard and conversion/ROAS metrics are
-deferred to Phase 9 (no clickstream/attribution data yet).
-
-Phase 6 delivered the `bi` profile and migrations ledger, least-privilege
-`omni_publisher`/`superset_reader` accounts, idempotent staging-swap
-publication for all four available marts, per-mart physical design,
-Gold-vs-ClickHouse reconciliation, one-command rebuild, dataset-triggered
-Airflow publication, Trino-vs-ClickHouse benchmark, and the ClickHouse
-outage runbook.
-
-Phase 5 delivered end to end: Bronze loader (Iceberg via Polaris), Silver/Gold
-Kimball model with SCD2 `dim_customer`, `int_orders_fx` + four EUR-normalized
-analytics marts, dataset-triggered `load_bronze` -> `transform_lakehouse`
-orchestration (+ DAG structure tests), and a live integration test over both
-runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
+Phase 8 (CDC: Debezium -> Kafka -> Iceberg) is next. The first slice must
+establish PostgreSQL logical replication, Debezium/Kafka persistence, and a
+restart-safe Bronze path for customers, orders, and payments.
 
 ## Phase status
 
@@ -79,66 +44,19 @@ runner code paths (`tests/integration/test_lakehouse_orchestration.py`).
 | 17 | dbt Core 1.10 -> dbt v2 migration exercise | deferred until stable dbt v2 + confirmed Trino compatibility |
 | 18 | GitLab CI migration | not started |
 
-### Phase 5 slice detail
+## Tracked technical debt
 
-| Slice | Scope | Status |
-|---|---|---|
-| 1 | Bronze loader (Iceberg via Polaris) | done |
-| 2 | Silver/Gold Kimball model, SCD2 `dim_customer`, reconciliation tests | done |
-| 3 | Analytics marts + dataset-triggered orchestration | done |
-
-### Phase 6 slice detail
-
-| Slice | Scope | Status |
-|---|---|---|
-| 1 | ClickHouse service (`bi` profile), users, migrations, idempotent publisher for `mart_daily_sales` | done |
-| 2 | Remaining 3 marts, engine/ORDER BY/partitioning design, reconciliation + full rebuild | done |
-| 3 | Airflow dataset-triggered publication, Trino-vs-ClickHouse benchmark, runbook | done |
-
-### Phase 7 slice detail
-
-| Slice | Scope | Status |
-|---|---|---|
-| 1 | Superset platform: custom image, `bi`-profile services, connections, idempotent bootstrap (ADR 0005) | done |
-| 2 | BI-as-code loop (sanitized bundles, fixed connection UUIDs) + Sales dashboard + canary test | done |
-| 3 | Executive/Customer/Marketing dashboards, Trino ad-hoc path, runbook completion, README gallery scaffolding | done; screenshots are a manual follow-up (no browser in the agent environment) |
+| ID | Debt / risk | Status | Disposition |
+|---|---|---|---|
+| TD-001 | `make up` is not reproducible on a clean host because the pinned MinIO images disappeared from Docker Hub; current workstations use locally built images from checksum-verified release binaries. | open | [#17](https://github.com/mottodor/omni-retail-data-platform/issues/17): restore a reproducible image supply; changing the S3 store requires an ADR. |
+| TD-002 | Four supplier file sources stop in MinIO landing/archive and are not loaded into Iceberg Bronze. | open | [#18](https://github.com/mottodor/omni-retail-data-platform/issues/18): add manifest-driven, idempotent file-source Bronze loading. |
+| TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | scheduled: Phase 11 | Add snapshot expiration/maintenance with retention and rollback safety. |
+| TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
+| TD-005 | The dbt v1 project has 16 generic-test definitions using syntax that must move under `arguments` for dbt v2. | deferred: Phase 17 | Migrate after stable dbt v2 and confirmed Trino compatibility; clear v1 deprecation warnings first. |
 
 ## Deferred / follow-ups
 
-- dbt v2 migration is scheduled for Phase 17 after a stable release and a
-  confirmed Trino path. Preparation includes migrating 16 generic-test
-  definitions to the required `arguments` property and clearing dbt
-  deprecation warnings on the v1 baseline.
-
-Open follow-ups from the 2026-09-27 restart-verification postmortem
-(milestone "Reliability debt (post-Phase 7)"):
-
-- Bronze daily loads leave Iceberg snapshot history unbounded (order_items
-  hit metadata v194 during the 2026-09-27 rebuild churn); expiration and
-  maintenance stay Phase 11 scope — recorded there as an early trigger
-  example.
-- Superset dashboard screenshots: the README gallery table and capture
-  procedure are in place (`docs/screenshots/README.md`); the PNG files are
-  a manual step — no browser exists in the agent environment.
-- Funnel mart in ClickHouse: deferred until Phase 9 clickstream data
-  exists — Phase 6 publishes the four existing Gold marts only (plan
-  decision, recorded at slice-2 completion).
-- Branch reconciliation: `feature/phase5-followups` (forked before slice 2)
-  carries a stale-watermark purge CLI, lockfile alignment, and a
-  bronze-teardown cleanup; its polaris-init/compose/smoke fix (grant
-  `CATALOG_MANAGE_CONTENT`, `DROP_WITH_PURGE_ENABLED`, smoke-core drop guard)
-  is already in the slice-3 line — merge or rebase the remainder against it.
-- MinIO images unpullable: `minio/minio` / `minio/mc` were removed from
-  Docker Hub and dl.min.io returns 410; the local stack runs on locally
-  built images from sha256-verified GitHub-release binaries, tagged under
-  the pinned names. Follow-up issue (+ADR if the S3 store changes) to make
-  `make up` reproducible again.
-- Stale comment in `tests/integration/test_bronze_load.py` about Polaris
-  denying DROP — obsolete after the purge/grant fix; cleanup exists as
-  05e1fd3 on the followups branch.
-- Bronze ingestion for the 4 file-based sources — supplier files land in
-  MinIO (landing/archive) but are not loaded into Iceberg Bronze; the Bronze
-  loader currently covers the PostgreSQL snapshot and API sources only.
-  Follow-up issue.
-- dbt model contracts as enforcement — depends on dbt-trino contract support;
-  the fallback is YAML documentation plus tests.
+- Superset dashboard screenshots are still a manual step; the README gallery
+  and capture procedure are ready in `docs/screenshots/README.md`.
+- Funnel, conversion, ROAS, and CAC marts remain deferred to Phase 9 because
+  clickstream and attribution data do not exist yet.
