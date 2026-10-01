@@ -202,6 +202,30 @@ for source ordering and future current-state derivation, but is not the sink's
 uniqueness key: several table records can belong to one source transaction,
 and Kafka delivery/replay is defined by topic coordinates.
 
+### Schema evolution and ordering boundary
+
+The schema-less raw ledger enforces the stable envelope, route, operation, and
+primary-key identity for each captured table. The Kafka key must contain
+exactly `customer_id`, `order_id`, or `payment_id` as a JSON integer for its
+route, and the corresponding `after` row (`r/c/u`) or `before` row (`d`) must carry the same
+value. A key or route change is incompatible and fails the batch before offset
+commit.
+
+Additive nullable or defaulted non-key source columns are compatible at this
+boundary: Debezium adds the field to `before`/`after`, and Bronze preserves it
+inside the raw envelope without changing the Iceberg table schema. Non-key
+rename, removal, or type changes are still raw-capturable, but schema-less JSON
+cannot classify them automatically. They are therefore downstream-breaking
+contract changes that require a reviewed source migration, contract update,
+and typed-consumer impact check. This ADR does not claim automated rejection
+of such changes; formal schema compatibility enforcement remains deferred.
+
+Kafka order is defined only within each single-partition table topic. The raw
+sink preserves transport arrival as distinct coordinates even when source/event
+time moves backwards, and it never chooses current state by timestamp, LSN, or
+business key. There is no cross-topic total-order claim. Resolving late or
+out-of-order changes into typed current state is a separate Phase 8 slice.
+
 ### Consumer delivery boundary
 
 The Python consumer uses a versioned group ID
@@ -224,10 +248,11 @@ that replay a no-op. A write or validation failure does not advance any
 covered offset. This is at-least-once transport with an idempotent sink, not an
 end-to-end exactly-once guarantee.
 
-Malformed envelopes, unexpected routes, and unsupported operations fail the
-consumer partition/batch with structured topic/partition/offset context. They
-are not skipped and their offsets are not committed. A DLQ or rejected-object
-store is intentionally deferred until Phase 10 failure engineering.
+Malformed envelopes, unexpected routes, unsupported operations, and
+primary-key contract violations fail the consumer partition/batch with
+structured topic/partition/offset context. They are not skipped and their
+offsets are not committed. A DLQ or rejected-object store is intentionally
+deferred until Phase 10 failure engineering.
 
 ### Lifecycle and reset contract
 
@@ -322,9 +347,9 @@ Negative and accepted costs:
 - Insert-only Iceberg MERGE is heavier than a plain Kafka append and depends on
   Trino/Polaris availability; bounded batches and integration tests are
   required.
-- Schema-less JSON defers compatibility enforcement. Unexpected payloads fail
-  loudly, but additive/incompatible schema-change policy is not completed in
-  this slice.
+- Schema-less JSON permits additive non-key fields without a registry, but it
+  cannot automatically classify non-key rename/drop/type changes; those rely
+  on migration review until typed contracts or formal schema metadata exist.
 - Resetting Kafka while retaining Bronze creates a second initial-snapshot
   history with different event IDs; the runbook must distinguish transport
   reset from clean end-to-end replay.

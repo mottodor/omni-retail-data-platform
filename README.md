@@ -145,7 +145,9 @@ source, so `make reset` cannot wipe Airflow state.
 The resource-bounded `streaming` profile adds Kafka 4.3 in single-node KRaft mode,
 Debezium Connect 3.6, and a non-root Python consumer. Kafka/Connect state is
 persistent; the consumer commits offsets only after an insert-only Iceberg MERGE
-into `bronze.postgres_cdc_events`. Details and recovery procedures:
+into `bronze.postgres_cdc_events`. The raw contract accepts additive non-key
+source fields, enforces route-specific primary keys, and preserves event-time-
+out-of-order records without deriving current state. Details and recovery procedures:
 [`docs/runbooks/kafka-cdc.md`](docs/runbooks/kafka-cdc.md).
 
 All host ports bind to `127.0.0.1` only: PostgreSQL `5432`, MinIO `9000`/`9001`,

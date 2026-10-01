@@ -135,29 +135,47 @@ All API sources share the same mechanics:
 | Grain | one row per `(kafka_topic, kafka_partition, kafka_offset)` |
 | Sink | `iceberg.bronze.postgres_cdc_events`, append-only insert semantics |
 | Identity | SHA-256 `event_id` of the transport coordinate |
-| Ordering | transport order per table partition; source LSN retained; no cross-table total-order claim |
+| Ordering | transport order per single-partition table topic; source LSN retained; event/ingestion time may move backwards; no cross-table total-order claim |
 | Raw payload | exact decoded key and Debezium envelope JSON retained as text |
 | Delivery | at-least-once; Iceberg MERGE before synchronous Kafka offset commit |
 | Invalid record | fail-stop with topic/partition/offset context; offset is not committed |
 | Retention | Kafka: 7 days or 5 GiB per data-topic partition; Iceberg history has no Phase 8 expiry |
 
-Delete events require a non-empty key object, a `before` object, and null
-`after`. PostgreSQL default primary-key replica identity means the key is
-reliable but non-key old values are not guaranteed. Kafka tombstones are
-configured off (`tombstones.on.delete=false`) and treated as contract failures
-if received. Resetting Kafka while retaining Bronze produces a new snapshot
-with new transport coordinates; this is new raw history, not a duplicate under
-the transport identity. A clean end-to-end replay therefore requires a
-separate, explicit Bronze reset.
+Each route has one exact primary-key contract: `customers.customer_id`,
+`orders.order_id`, or `payments.payment_id`. The Kafka key must contain exactly
+that field as a JSON integer, and its value must match the `after` row for `r/c/u` or the
+`before` row for `d`; violations fail-stop before covered offsets advance.
+Delete events require a `before` object and null `after`. PostgreSQL default
+primary-key replica identity means non-key old values are not guaranteed.
+Kafka tombstones are configured off (`tombstones.on.delete=false`) and treated
+as contract failures if received.
 
-Schema-less JSON is intentional for this first slice. Additive or incompatible
-source-schema changes are fail-loud/unsupported until the later Phase 8 schema
-evolution slice; no silent field-dropping compatibility promise is made.
+Compatibility at the raw boundary is explicit:
+
+| Source change | Raw CDC behavior | Compatibility |
+|---|---|---|
+| Add nullable/defaulted non-key field | accepted and preserved in envelope/`before`/`after` JSON; no Bronze DDL | compatible |
+| Primary-key shape/value or route change | validation failure; offset not committed | incompatible |
+| Non-key rename/drop/type change | raw JSON is preserved but no automatic classification is possible | downstream-breaking; reviewed migration required |
+| Malformed envelope/unsupported operation/tombstone | validation failure; offset not committed | incompatible |
+
+Schema-less JSON is intentional: it preserves additive payload evolution
+without another platform service, but it is not a schema registry. Typed
+current-state models must version and test the fields they project. The raw
+ledger never overwrites by business key, LSN, source timestamp, or ingestion
+time, so event-time-out-of-order records remain separate events. Kafka order is
+only per table topic; there is no cross-table total order.
+
+Resetting Kafka while retaining Bronze produces a new snapshot with new
+transport coordinates; this is new raw history, not a duplicate under the
+transport identity. A clean end-to-end replay therefore requires a separate,
+explicit Bronze reset.
 
 ## Change process
 
 1. The producer announces the change; the owner classifies it (additive vs breaking).
-2. Breaking changes require: contract update here, schema version bump, validator/client update, tests, and downstream impact review.
-3. Additive changes are still rejected by validators until the contract is versioned — an explicit, reviewed switch, never a silent drift.
+2. Breaking changes require: contract update here, schema version bump where the producer exposes one, validator/client update, tests, and downstream impact review.
+3. For PostgreSQL raw CDC only, additive nullable/defaulted non-key fields are accepted and preserved automatically; typed consumers still require an explicit reviewed projection change.
+4. Other source validators keep their source-specific strictness documented above; raw CDC compatibility does not weaken file or API contracts.
 
 Runbook for handling rejected supplier files: `docs/runbooks/bad-supplier-file.md`.

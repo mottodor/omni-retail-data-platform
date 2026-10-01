@@ -46,15 +46,23 @@ class FakeMessage:
         return (1, self.timestamp_ms)
 
 
-def envelope(operation: str) -> bytes:
-    before = {"order_id": 42, "order_total": "10.50"} if operation in {"u", "d"} else None
+def envelope(
+    operation: str,
+    *,
+    table: str = "orders",
+    key_field: str = "order_id",
+    key_value: object = 42,
+    extra_after: dict[str, object] | None = None,
+) -> bytes:
+    before = {key_field: key_value, "order_total": "10.50"} if operation in {"u", "d"} else None
     after = (
         None
         if operation == "d"
         else {
-            "order_id": 42,
+            key_field: key_value,
             "order_total": "10.50",
             "updated_at": 1_780_228_800_123_456,
+            **(extra_after or {}),
         }
     )
     return json.dumps(
@@ -63,7 +71,7 @@ def envelope(operation: str) -> bytes:
             "after": after,
             "source": {
                 "schema": "public",
-                "table": "orders",
+                "table": table,
                 "lsn": 123456,
                 "txId": 91,
                 "ts_us": 1_780_228_800_123_456,
@@ -91,6 +99,35 @@ def test_parse_supported_debezium_operations(operation: str) -> None:
     assert (event.after_json is None) is (operation == "d")
 
 
+@pytest.mark.parametrize(
+    ("topic", "table", "key_field"),
+    [
+        ("omni.oltp.public.customers", "customers", "customer_id"),
+        ("omni.oltp.public.orders", "orders", "order_id"),
+        ("omni.oltp.public.payments", "payments", "payment_id"),
+    ],
+)
+def test_parse_enforces_each_route_primary_key(topic: str, table: str, key_field: str) -> None:
+    message = FakeMessage(
+        envelope("c", table=table, key_field=key_field),
+        key_payload=json.dumps({key_field: 42}).encode(),
+        topic_name=topic,
+    )
+
+    event = parse_debezium_record(message, topic_tables={topic: table}, ingested_at=NOW)
+
+    assert json.loads(event.after_json or "{}")[key_field] == 42
+
+
+def test_additive_non_key_field_is_preserved_in_raw_json() -> None:
+    message = FakeMessage(envelope("u", extra_after={"cdc_schema_evolution_note": "compatible"}))
+
+    event = parse_debezium_record(message, topic_tables={TOPIC: "orders"}, ingested_at=NOW)
+
+    assert json.loads(event.after_json or "{}")["cdc_schema_evolution_note"] == "compatible"
+    assert '"cdc_schema_evolution_note":"compatible"' in event.envelope_json
+
+
 def test_event_identity_changes_with_each_transport_coordinate() -> None:
     identities = {
         event_identity(TOPIC, 0, 7),
@@ -112,6 +149,17 @@ def test_event_identity_changes_with_each_transport_coordinate() -> None:
             "route mismatch",
         ),
         (FakeMessage(envelope("x")), "unsupported Debezium operation"),
+        (FakeMessage(envelope("c"), key_payload=b'{"customer_id":42}'), "exactly"),
+        (FakeMessage(envelope("c"), key_payload=b'{"order_id":42,"other":1}'), "exactly"),
+        (FakeMessage(envelope("c"), key_payload=b'{"order_id":"42"}'), "JSON integer"),
+        (
+            FakeMessage(envelope("c", key_value=43)),
+            "must match the Kafka key",
+        ),
+        (
+            FakeMessage(envelope("d", key_value=43)),
+            "must match the Kafka key",
+        ),
     ],
 )
 def test_invalid_records_fail_with_transport_context(message: FakeMessage, match: str) -> None:

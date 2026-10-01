@@ -112,7 +112,7 @@ against the raw manifest. Watermark-driven `run-new` resumes at independently
 replaceable source-object row ranges and verifies the manifest count plus
 unique raw coordinates.
 
-## PostgreSQL CDC Bronze ledger (Phase 8 slice 1)
+## PostgreSQL CDC Bronze ledger (Phase 8)
 
 `iceberg.bronze.postgres_cdc_events` is an append-only raw event ledger for
 `public.customers`, `public.orders`, and `public.payments`. Its grain is one
@@ -133,9 +133,20 @@ coordinate and is the insert-only MERGE key, so replay is a no-op.
 The Iceberg table is partitioned by `event_date`. Deletes retain the Debezium
 key and delete envelope; because PostgreSQL keeps default primary-key replica
 identity, non-key old values are not guaranteed. Broker tombstones are disabled
-and fail loudly if one nevertheless arrives. This table does not replace the
-snapshot-shaped `bronze.customers/orders/payments` tables yet; typed/current
-state and dbt switching belong to the next Phase 8 slice.
+and fail loudly if one nevertheless arrives. Route-specific primary-key shape
+and row/key equality are validated before offset commit.
+
+Additive nullable/defaulted non-key source columns require no Bronze DDL: the
+new fields remain inside the immutable raw JSON, so old and new payload shapes
+can coexist. Non-key rename/drop/type changes are raw-capturable but are
+breaking for typed consumers and require review. Events remain distinct by
+transport coordinate even when source/event time moves backwards; the sink
+does not sort or overwrite by business key, LSN, or timestamp, and it makes no
+cross-topic total-order claim.
+
+This table does not replace the snapshot-shaped
+`bronze.customers/orders/payments` tables yet; typed/current state and dbt
+switching belong to the next Phase 8 slice.
 
 ## Silver layer (Phase 5 slice 2)
 

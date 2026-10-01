@@ -14,7 +14,7 @@ import trino
 from confluent_kafka import TopicPartition
 
 from omni_retail.streaming.cdc.consumer import CdcBatchWriter, CdcRunner
-from omni_retail.streaming.cdc.model import CdcEvent
+from omni_retail.streaming.cdc.model import CdcEvent, CdcRecordError
 
 TOPIC = "omni.oltp.public.customers"
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -23,6 +23,8 @@ NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 @dataclass
 class FakeMessage:
     offset_number: int = 1
+    source_timestamp_ms: int = 1_780_228_800_000
+    key_payload: bytes = b'{"customer_id":9}'
 
     def topic(self) -> str:
         return TOPIC
@@ -34,7 +36,7 @@ class FakeMessage:
         return self.offset_number
 
     def key(self) -> bytes:
-        return b'{"customer_id":9}'
+        return self.key_payload
 
     def value(self) -> bytes:
         return json.dumps(
@@ -46,7 +48,7 @@ class FakeMessage:
                     "table": "customers",
                     "lsn": 99,
                     "txId": 8,
-                    "ts_ms": 1_780_228_800_000,
+                    "ts_ms": self.source_timestamp_ms,
                 },
                 "op": "c",
             }
@@ -91,6 +93,7 @@ class FakeWriter:
         self.actions = actions
         self.fail = fail
         self.event_ids: set[str] = set()
+        self.events: list[CdcEvent] = []
 
     def ensure_table(self) -> None:
         self.actions.append("ensure")
@@ -99,6 +102,7 @@ class FakeWriter:
         self.actions.append("write")
         if self.fail:
             raise RuntimeError("Iceberg unavailable")
+        self.events.extend(events)
         self.event_ids.update(event.event_id for event in events)
 
 
@@ -131,6 +135,19 @@ def test_durable_write_happens_before_synchronous_offset_commit(
     assert "first_event_id=" in caplog.text
 
 
+def test_primary_key_contract_failure_never_writes_or_advances_offsets(tmp_path: Path) -> None:
+    actions: list[str] = []
+    consumer = FakeConsumer([[FakeMessage(key_payload=b'{"order_id":9}')]], actions)
+    writer = FakeWriter(actions)
+
+    with pytest.raises(CdcRecordError, match="customer_id"):
+        runner(consumer, writer, tmp_path / "ready").run(max_batches=1)
+
+    assert "write" not in actions
+    assert "commit" not in actions
+    assert actions == ["ensure", "subscribe", "close"]
+
+
 def test_write_failure_never_advances_offsets(tmp_path: Path) -> None:
     actions: list[str] = []
     consumer = FakeConsumer([[FakeMessage()]], actions)
@@ -141,6 +158,31 @@ def test_write_failure_never_advances_offsets(tmp_path: Path) -> None:
 
     assert "commit" not in actions
     assert actions[-1] == "close"
+
+
+def test_event_time_out_of_order_records_are_preserved_in_transport_order(
+    tmp_path: Path,
+) -> None:
+    actions: list[str] = []
+    messages = [
+        FakeMessage(offset_number=1, source_timestamp_ms=1_780_228_802_000),
+        FakeMessage(offset_number=2, source_timestamp_ms=1_780_228_801_000),
+    ]
+    consumer = FakeConsumer([messages], actions)
+    writer = FakeWriter(actions)
+
+    count = runner(consumer, writer, tmp_path / "ready").run(max_batches=1)
+
+    assert count == 2
+    assert [event.kafka_offset for event in writer.events] == [1, 2]
+    source_timestamps = [event.source_timestamp for event in writer.events]
+    assert source_timestamps == [
+        datetime.fromtimestamp(1_780_228_802, tz=UTC),
+        datetime.fromtimestamp(1_780_228_801, tz=UTC),
+    ]
+    assert len(writer.event_ids) == 2
+    assert consumer.commits[0][0].offset == 3
+    assert actions == ["ensure", "subscribe", "write", "commit", "close"]
 
 
 def test_replayed_transport_coordinate_is_a_sink_noop(tmp_path: Path) -> None:

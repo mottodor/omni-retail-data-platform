@@ -8,6 +8,11 @@ from datetime import UTC, date, datetime
 from typing import Protocol, cast
 
 SUPPORTED_OPERATIONS = frozenset({"r", "c", "u", "d"})
+PRIMARY_KEY_BY_TABLE = {
+    "customers": "customer_id",
+    "orders": "order_id",
+    "payments": "payment_id",
+}
 
 
 class CdcRecordError(ValueError):
@@ -76,12 +81,49 @@ def _decode_json(raw: bytes | None, *, field: str, context: str) -> tuple[str, o
         raise CdcRecordError(f"{context}: {field} is not valid JSON") from exc
 
 
-def _optional_mapping_json(value: object, *, field: str, context: str) -> str | None:
+def _optional_mapping(
+    value: object, *, field: str, context: str
+) -> tuple[str | None, Mapping[str, object] | None]:
     if value is None:
-        return None
+        return None, None
     if not isinstance(value, Mapping):
         raise CdcRecordError(f"{context}: envelope.{field} must be an object or null")
-    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    mapping = cast(Mapping[str, object], value)
+    return (
+        json.dumps(mapping, separators=(",", ":"), sort_keys=True, ensure_ascii=False),
+        mapping,
+    )
+
+
+def _primary_key(
+    key: Mapping[object, object], *, expected_table: str, context: str
+) -> tuple[str, int]:
+    key_field = PRIMARY_KEY_BY_TABLE.get(expected_table)
+    if key_field is None:
+        raise CdcRecordError(f"{context}: no primary-key contract for table {expected_table!r}")
+    if set(key) != {key_field}:
+        raise CdcRecordError(
+            f"{context}: key must contain exactly the {key_field!r} field for {expected_table}"
+        )
+    key_value = key[key_field]
+    if isinstance(key_value, bool) or not isinstance(key_value, int):
+        raise CdcRecordError(f"{context}: key field {key_field!r} must be a JSON integer")
+    return key_field, key_value
+
+
+def _validate_row_key(
+    row: Mapping[str, object],
+    *,
+    field: str,
+    key_field: str,
+    key_value: int,
+    context: str,
+) -> None:
+    row_key = row.get(key_field)
+    if isinstance(row_key, bool) or not isinstance(row_key, int) or row_key != key_value:
+        raise CdcRecordError(
+            f"{context}: envelope.{field}.{key_field} must match the Kafka key integer"
+        )
 
 
 def _integer(value: object, *, field: str, context: str) -> int | None:
@@ -137,10 +179,11 @@ def parse_debezium_record(
     if record.partition() < 0 or record.offset() < 0:
         raise CdcRecordError(f"{context}: Kafka partition and offset must be non-negative")
 
-    key_json, key = _decode_json(record.key(), field="key", context=context)
+    key_json, key_value = _decode_json(record.key(), field="key", context=context)
     envelope_json, envelope_value = _decode_json(record.value(), field="value", context=context)
-    if not isinstance(key, Mapping) or not key:
+    if not isinstance(key_value, Mapping) or not key_value:
         raise CdcRecordError(f"{context}: key must be a non-empty JSON object")
+    key = cast(Mapping[object, object], key_value)
     if not isinstance(envelope_value, Mapping):
         raise CdcRecordError(f"{context}: envelope must be a JSON object")
     envelope = cast(Mapping[str, object], envelope_value)
@@ -160,12 +203,29 @@ def parse_debezium_record(
             f"got {source_schema!r}.{source_table!r}"
         )
 
-    before_json = _optional_mapping_json(envelope.get("before"), field="before", context=context)
-    after_json = _optional_mapping_json(envelope.get("after"), field="after", context=context)
-    if operation in {"r", "c", "u"} and after_json is None:
-        raise CdcRecordError(f"{context}: operation {operation!r} requires envelope.after")
-    if operation == "d" and (before_json is None or after_json is not None):
-        raise CdcRecordError(f"{context}: delete requires before object and null after")
+    key_field, business_key = _primary_key(key, expected_table=expected_table, context=context)
+    before_json, before = _optional_mapping(envelope.get("before"), field="before", context=context)
+    after_json, after = _optional_mapping(envelope.get("after"), field="after", context=context)
+    if operation in {"r", "c", "u"}:
+        if after is None:
+            raise CdcRecordError(f"{context}: operation {operation!r} requires envelope.after")
+        _validate_row_key(
+            after,
+            field="after",
+            key_field=key_field,
+            key_value=business_key,
+            context=context,
+        )
+    if operation == "d":
+        if before is None or after is not None:
+            raise CdcRecordError(f"{context}: delete requires before object and null after")
+        _validate_row_key(
+            before,
+            field="before",
+            key_field=key_field,
+            key_value=business_key,
+            context=context,
+        )
 
     source_timestamp = _epoch_moment(source)
     kafka_timestamp = _kafka_moment(record, context)

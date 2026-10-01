@@ -23,6 +23,8 @@ from omni_retail.streaming.cdc.consumer import CdcBatchWriter
 from omni_retail.streaming.cdc.model import KafkaRecord, parse_debezium_record
 
 TABLE = "iceberg.bronze.postgres_cdc_events"
+SCHEMA_EVOLUTION_COLUMN = "cdc_schema_evolution_note"
+SCHEMA_EVOLUTION_LOCK = 8_610_008
 
 
 def as_int(value: object) -> int:
@@ -91,6 +93,114 @@ def count_distinct_owned(executor: DbapiTrinoExecutor, predicate: str) -> tuple[
         f"select count(*), count(distinct event_id) from {TABLE} where {predicate}"
     )
     return as_int(rows[0][0]), as_int(rows[0][1])
+
+
+def test_postgres_cdc_additive_schema_evolution_without_restart() -> None:
+    if not connector_running():
+        pytest.skip("streaming profile is not healthy; run `make streaming-up`")
+
+    token = uuid.uuid4().hex[:12]
+    marker = f"cdc-schema-it-{token}"
+    customer_id: int | None = None
+    expected_events = 0
+    source_config = PostgresSourceConfig.from_env()
+    trino_config = TrinoConfig.from_env()
+
+    with (
+        psycopg.connect(source_config.conninfo()) as source,
+        DbapiTrinoExecutor(trino_config) as executor,
+    ):
+        source.execute("select pg_advisory_lock(%s)", (SCHEMA_EVOLUTION_LOCK,))
+        try:
+            # Repair only the reserved test column if a killed prior run left it behind.
+            source.execute(
+                f"alter table public.customers drop column if exists {SCHEMA_EVOLUTION_COLUMN}"
+            )
+            source.commit()
+
+            # Use a high UUID-derived bigint so deleted fixture IDs are never reused
+            # against immutable Bronze history from an interrupted prior run.
+            customer_id = 8_000_000_000_000_000_000 + int(token, 16)
+            source.execute(
+                "insert into customers "
+                "(customer_id, email, first_name, last_name, region, city, status, segment, "
+                "registered_at) values (%s, %s, 'CDC', 'Schema', 'it-region', 'it-city', "
+                "'active', 'standard', timestamptz '2026-10-01 12:00:00+00')",
+                (customer_id, f"{marker}@example.test"),
+            )
+            source.commit()
+            expected_events += 1
+            predicate = (
+                "source_table = 'customers' and "
+                "cast(json_extract_scalar(key_json, '$.customer_id') as bigint) = "
+                f"{customer_id}"
+            )
+            wait_until(
+                "pre-DDL customer event",
+                lambda: count_owned(executor, predicate) >= expected_events,
+            )
+            pre_ddl = executor.fetch(  # nosec B608 -- customer_id is DB-returned integer
+                f"select after_json from {TABLE} where {predicate} order by kafka_offset limit 1"
+            )
+            assert pre_ddl and pre_ddl[0][0] is not None
+            assert SCHEMA_EVOLUTION_COLUMN not in json.loads(as_str(pre_ddl[0][0]))
+
+            source.execute(
+                f"alter table public.customers add column {SCHEMA_EVOLUTION_COLUMN} text"
+            )
+            source.execute(
+                f"update public.customers set {SCHEMA_EVOLUTION_COLUMN} = %s, "
+                "updated_at = now() where customer_id = %s",
+                (marker, customer_id),
+            )
+            source.commit()
+            expected_events += 1
+
+            def additive_event_arrived() -> bool:
+                rows = executor.fetch(  # nosec B608 -- customer_id is DB-returned integer
+                    f"select after_json from {TABLE} where {predicate} and after_json is not null"
+                )
+                return any(
+                    json.loads(as_str(row_value[0])).get(SCHEMA_EVOLUTION_COLUMN) == marker
+                    for row_value in rows
+                )
+
+            wait_until("post-DDL additive customer event", additive_event_arrived)
+            total, distinct = count_distinct_owned(executor, predicate)
+            assert total == distinct == expected_events
+            slot = source.execute(
+                "select active from pg_replication_slots where slot_name = 'omni_cdc_slot'"
+            ).fetchone()
+            assert slot == (True,)
+            assert connector_running()
+        finally:
+            source.rollback()
+            source.execute(
+                f"alter table public.customers drop column if exists {SCHEMA_EVOLUTION_COLUMN}"
+            )
+            if customer_id is not None:
+                deleted = source.execute(
+                    "delete from public.customers where customer_id = %s", (customer_id,)
+                ).rowcount
+                if deleted:
+                    expected_events += 1
+            source.commit()
+            if customer_id is not None:
+                predicate = (
+                    "source_table = 'customers' and "
+                    "cast(json_extract_scalar(key_json, '$.customer_id') as bigint) = "
+                    f"{customer_id}"
+                )
+                try:
+                    wait_until(
+                        "schema-evolution fixture cleanup event",
+                        lambda: count_owned(executor, predicate) >= expected_events,
+                        timeout=60,
+                    )
+                finally:
+                    executor.execute(f"delete from {TABLE} where {predicate}")  # nosec B608
+            source.execute("select pg_advisory_unlock(%s)", (SCHEMA_EVOLUTION_LOCK,))
+            source.commit()
 
 
 def test_postgres_cdc_create_update_delete_replay_and_restart() -> None:

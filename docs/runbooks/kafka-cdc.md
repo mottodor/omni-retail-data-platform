@@ -96,6 +96,47 @@ uv run python -m omni_retail.streaming.cdc run \
 Use a different `CDC_CONSUMER_GROUP_ID` for diagnostics unless intentionally
 advancing the production-like group.
 
+## Source schema changes
+
+Classify and review a source migration before applying it:
+
+- adding a nullable or defaulted non-key column is compatible with the raw CDC
+  ledger; Debezium places it in `before`/`after` JSON and no Bronze DDL is
+  needed;
+- changing a primary key, route, or required envelope semantics is
+  incompatible and will fail-stop the consumer before offset commit;
+- renaming, dropping, or changing the type of a non-key column can still enter
+  raw JSON because the converter is schema-less, but it is breaking for typed
+  downstream consumers and requires a contract/model impact review first.
+
+For a compatible additive migration:
+
+1. record connector status, consumer lag, and the slot's
+   `confirmed_flush_lsn`;
+2. apply the versioned PostgreSQL migration;
+3. emit one controlled row change that populates the new field;
+4. query `envelope_json`/`after_json` in Bronze and verify the field, value,
+   unique `event_id`, running connector, and advancing slot/consumer offsets;
+5. update typed consumers separately before they depend on the field.
+
+Do not restart or reset the connector merely because the source relation
+changed. Do not use ingestion timestamp as source order. Kafka order is only
+per single-partition table topic; cross-topic order is not defined, and raw
+records with older event time remain valid separate events.
+
+The live integration test reserves the nullable test-only column
+`public.customers.cdc_schema_evolution_note` and removes it in teardown. If a
+killed test leaves it behind, first ensure no integration test is running, then
+clean only that column:
+
+```sql
+ALTER TABLE public.customers
+  DROP COLUMN IF EXISTS cdc_schema_evolution_note;
+```
+
+The next test run also repairs this exact reserved column while holding a
+PostgreSQL advisory lock. Never use this cleanup pattern for a business column.
+
 ## Failure procedures
 
 ### Connector or task is FAILED

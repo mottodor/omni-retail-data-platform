@@ -16,10 +16,11 @@ Contract:
 
 ## Current focus
 
-Phase 8 is in progress. The restart-safe PostgreSQL -> Debezium/Kafka ->
-immutable Iceberg Bronze slice for customers, orders, and payments is complete.
-Next: scope the Phase 8 schema-evolution and out-of-order-event slice;
-CDC-derived typed/current-state models remain a separate later slice.
+Phase 8 is in progress. Restart-safe PostgreSQL -> Debezium/Kafka -> immutable
+Iceberg Bronze is complete for customers, orders, and payments, including the
+additive schema-evolution and event-time-out-of-order raw-event contract. Next:
+scope CDC-derived typed/current-state models with explicit delete and source-
+ordering semantics.
 
 ## Phase status
 
