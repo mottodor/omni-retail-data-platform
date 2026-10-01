@@ -20,3 +20,36 @@ sources:
       - name: fx_rates
       - name: campaigns
       - name: deliveries
+      - name: postgres_cdc_events
+        description: >
+          Immutable PostgreSQL Debezium event ledger. Grain: one row per
+          Kafka transport coordinate (topic, partition, offset); event_id is
+          the deterministic transport identity. Typed projections must rank
+          all operations before applying delete semantics.
+        columns:
+          - name: event_id
+            tests: [unique, not_null]
+          - name: source_schema
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["public"]
+          - name: source_table
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["customers", "orders", "payments"]
+          - name: operation
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["r", "c", "u", "d"]
+          - name: kafka_topic
+            tests: [not_null]
+          - name: kafka_partition
+            tests: [not_null]
+          - name: kafka_offset
+            tests: [not_null]

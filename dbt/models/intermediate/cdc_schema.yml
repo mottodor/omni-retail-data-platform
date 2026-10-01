@@ -1,0 +1,101 @@
+version: 2
+
+models:
+  - name: int_cdc_customers_current
+    description: >
+      Delete-aware current customer state derived from stg_cdc_customers.
+      Grain: one row per live customer_id. All events are ranked by source_lsn,
+      then single-partition Kafka offset, before a winning delete is filtered.
+      Event timestamps, row updated_at, and ingestion time never choose state.
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["active", "inactive", "churned"]
+      - name: segment
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["standard", "premium", "vip"]
+      - name: event_id
+        tests: [unique, not_null]
+      - name: operation
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u"]
+
+  - name: int_cdc_orders_current
+    description: >
+      Delete-aware current order state derived from stg_cdc_orders. Grain: one
+      row per live order_id. PostgreSQL LSN and then Kafka offset select the
+      winner before deletes are removed.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["pending", "paid", "shipped", "delivered", "cancelled", "refunded"]
+      - name: currency
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["USD", "EUR", "GBP"]
+      - name: shipping_cost
+        tests: [not_null]
+      - name: order_total
+        tests: [not_null]
+      - name: event_id
+        tests: [unique, not_null]
+      - name: operation
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u"]
+
+  - name: int_cdc_payments_current
+    description: >
+      Delete-aware current payment state derived from stg_cdc_payments. Grain:
+      one row per live payment_id. PostgreSQL LSN and then Kafka offset select
+      the winner before deletes are removed.
+    columns:
+      - name: payment_id
+        tests: [unique, not_null]
+      - name: order_id
+        tests: [not_null]
+      - name: method
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["card", "paypal", "bank_transfer", "cash_on_delivery"]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["pending", "authorized", "captured", "failed", "refunded", "cancelled"]
+      - name: amount
+        tests: [not_null]
+      - name: transaction_id
+        tests: [not_null]
+      - name: event_id
+        tests: [unique, not_null]
+      - name: operation
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u"]

@@ -1,0 +1,82 @@
+version: 2
+
+models:
+  - name: stg_cdc_customers
+    description: >
+      Strictly typed customer CDC events from the immutable PostgreSQL ledger.
+      Grain: one row per customer event/event_id. Customer attributes come
+      only from after_json for r/c/u; deletes retain the key and metadata.
+      Upstream: bronze.postgres_cdc_events.
+    columns:
+      - name: event_id
+        tests: [unique, not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: operation
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u", "d"]
+      - name: kafka_topic
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["omni.oltp.public.customers"]
+      - name: kafka_partition
+        tests: [not_null]
+      - name: kafka_offset
+        tests: [not_null]
+
+  - name: stg_cdc_orders
+    description: >
+      Strictly typed order CDC events. Grain: one row per order event/event_id.
+      Decimal source strings are cast to decimal(12,2); deletes retain only
+      order_id and event metadata. Upstream: bronze.postgres_cdc_events.
+    columns:
+      - name: event_id
+        tests: [unique, not_null]
+      - name: order_id
+        tests: [not_null]
+      - name: operation
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u", "d"]
+      - name: kafka_topic
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["omni.oltp.public.orders"]
+      - name: kafka_partition
+        tests: [not_null]
+      - name: kafka_offset
+        tests: [not_null]
+
+  - name: stg_cdc_payments
+    description: >
+      Strictly typed payment CDC events. Grain: one row per payment
+      event/event_id. Decimal source strings are cast to decimal(12,2);
+      deletes retain only payment_id and metadata. Upstream:
+      bronze.postgres_cdc_events.
+    columns:
+      - name: event_id
+        tests: [unique, not_null]
+      - name: payment_id
+        tests: [not_null]
+      - name: operation
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u", "d"]
+      - name: kafka_topic
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["omni.oltp.public.payments"]
+      - name: kafka_partition
+        tests: [not_null]
+      - name: kafka_offset
+        tests: [not_null]

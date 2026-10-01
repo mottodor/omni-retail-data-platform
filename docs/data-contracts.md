@@ -1,8 +1,8 @@
 # Data Contracts — DRAFT
 
 - **Status:** draft (ownership and SLA numbers will be finalized in Phase 10 — Data Quality & contracts)
-- **Scope:** Phase 3 external batch sources plus the Phase 8 PostgreSQL raw CDC ledger
-- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas`, API envelope checks, and fail-stop Debezium envelope/route validation in `omni_retail.streaming.cdc`; file violations quarantine data, while malformed CDC records block offset advancement
+- **Scope:** Phase 3 external batch sources plus the Phase 8 PostgreSQL raw CDC ledger and its typed/current-state Silver projections
+- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas`, API envelope checks, fail-stop Debezium envelope/route validation in `omni_retail.streaming.cdc`, and dbt typed/current-state tests; file violations quarantine data, malformed CDC records block offset advancement, and incompatible typed CDC values fail the dbt build
 
 Additional internal modeled datasets will receive contracts in later phases.
 
@@ -170,6 +170,40 @@ Resetting Kafka while retaining Bronze produces a new snapshot with new
 transport coordinates; this is new raw history, not a duplicate under the
 transport identity. A clean end-to-end replay therefore requires a separate,
 explicit Bronze reset.
+
+## PostgreSQL CDC typed/current state
+
+The raw ledger is projected into three event-grain staging views and three
+live-key current-state views:
+
+| Entity | Typed event model | Current-state model | Business key |
+|---|---|---|---|
+| customers | `silver.stg_cdc_customers` | `silver.int_cdc_customers_current` | `customer_id` |
+| orders | `silver.stg_cdc_orders` | `silver.int_cdc_orders_current` | `order_id` |
+| payments | `silver.stg_cdc_payments` | `silver.int_cdc_payments_current` | `payment_id` |
+
+Typed staging uses strict conversions: identifiers are `bigint`, order/payment
+money is `decimal(12,2)`, and source row timestamps are
+`timestamp(6) with time zone`. Required fields on `r/c/u` are dbt-tested;
+invalid types fail casts rather than becoming silent NULLs. Delete events
+retain the business key and event metadata only because default PostgreSQL
+replica identity does not promise complete old non-key values.
+
+Current state ranks every operation per business key by
+`source_lsn DESC NULLS LAST`, then the single-partition table-topic
+`kafka_offset DESC`, with `event_id` as a deterministic final tie-break. The
+winner is filtered only after ranking: a winning `d` removes the key; an older
+delete cannot hide a later recreate. `source_tx_id`, source/Kafka timestamps,
+row `updated_at`, and ingestion time are audit fields, never ordering keys.
+This requires the ADR 0006 one-partition-per-table contract; there is no
+cross-topic order.
+
+Additive unknown non-key fields remain compatible and preserved in Bronze but
+are ignored by typed views until their projection is reviewed. Missing
+required projected fields or incompatible types are downstream-breaking and
+fail dbt tests/build. These models are parallel to the existing snapshot-backed
+Silver/Gold path: downstream cutover, customer SCD2 deletion semantics, and
+snapshot-only child handling are separate Phase 8 work.
 
 ## Change process
 

@@ -82,6 +82,9 @@ DBT_DIR = REPO_ROOT / "dbt"
 DBT_STAGING_MODELS = {
     "stg_campaigns.sql",
     "stg_categories.sql",
+    "stg_cdc_customers.sql",
+    "stg_cdc_orders.sql",
+    "stg_cdc_payments.sql",
     "stg_customers.sql",
     "stg_deliveries.sql",
     "stg_fx_rates.sql",

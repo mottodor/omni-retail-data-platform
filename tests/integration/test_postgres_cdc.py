@@ -11,7 +11,8 @@ import urllib.request
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from pathlib import Path
+from typing import Protocol, cast
 
 import psycopg
 import pytest
@@ -25,6 +26,21 @@ from omni_retail.streaming.cdc.model import KafkaRecord, parse_debezium_record
 TABLE = "iceberg.bronze.postgres_cdc_events"
 SCHEMA_EVOLUTION_COLUMN = "cdc_schema_evolution_note"
 SCHEMA_EVOLUTION_LOCK = 8_610_008
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CDC_DBT_MODELS = (
+    "stg_cdc_customers",
+    "stg_cdc_orders",
+    "stg_cdc_payments",
+    "int_cdc_customers_current",
+    "int_cdc_orders_current",
+    "int_cdc_payments_current",
+)
+
+
+class Namespace(Protocol):
+    silver: str
+
+    def dbt_env(self) -> dict[str, str]: ...
 
 
 def as_int(value: object) -> int:
@@ -51,6 +67,36 @@ def wait_until(description: str, predicate: Callable[[], bool], timeout: float =
         time.sleep(1)
     suffix = f": {last_error}" if last_error is not None else ""
     raise AssertionError(f"timed out waiting for {description}{suffix}")
+
+
+def run_cdc_dbt(namespace: Namespace, *, target_path: Path) -> None:
+    env = {
+        **os.environ,
+        **namespace.dbt_env(),
+        "DBT_BRONZE_SCHEMA": "bronze",
+        "TRINO_HOST": os.environ.get("TRINO_HOST", "127.0.0.1"),
+    }
+    completed = subprocess.run(
+        [
+            "uv",
+            "run",
+            "dbt",
+            "build",
+            "--project-dir",
+            "dbt",
+            "--profiles-dir",
+            "dbt",
+            "--target-path",
+            str(target_path),
+            "--select",
+            *CDC_DBT_MODELS,
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        timeout=300,
+        env=env,
+    )
+    assert completed.returncode == 0, "typed/current-state CDC dbt graph must build"
 
 
 def connector_running() -> bool:
@@ -203,15 +249,19 @@ def test_postgres_cdc_additive_schema_evolution_without_restart() -> None:
             source.commit()
 
 
-def test_postgres_cdc_create_update_delete_replay_and_restart() -> None:
+def test_postgres_cdc_create_update_delete_replay_and_restart(
+    lakehouse_namespace: Namespace,
+    tmp_path: Path,
+) -> None:
     if not connector_running():
         pytest.skip("streaming profile is not healthy; run `make streaming-up`")
 
-    marker = f"cdc-it-{uuid.uuid4().hex[:12]}"
+    token = uuid.uuid4().hex[:12]
+    marker = f"cdc-it-{token}"
     customer_ids: list[int] = []
     order_id = -1
     payment_id = -1
-    completed_scenario = False
+    expected_events = 0
     source_config = PostgresSourceConfig.from_env()
     trino_config = TrinoConfig.from_env()
 
@@ -254,16 +304,12 @@ def test_postgres_cdc_create_update_delete_replay_and_restart() -> None:
             ).fetchone()
             assert product_privilege == (False,)
 
-            reserved_ids = source.execute(
-                "select "
-                "(select coalesce(max(customer_id), 0) + 1000 from customers), "
-                "(select coalesce(max(order_id), 0) + 1000 from orders), "
-                "(select coalesce(max(payment_id), 0) + 1000 from payments)"
-            ).fetchone()
-            assert reserved_ids is not None
-            customer_ids.append(int(reserved_ids[0]))
-            order_id = int(reserved_ids[1])
-            payment_id = int(reserved_ids[2])
+            # Immutable Bronze history can outlive a failed test, so every run
+            # owns never-reused bigint IDs rather than max(source_id) + N.
+            suffix = int(token, 16)
+            customer_ids.append(7_000_000_000_000_000_000 + suffix)
+            order_id = 6_000_000_000_000_000_000 + suffix
+            payment_id = 5_000_000_000_000_000_000 + suffix
 
             source.execute(
                 "insert into customers "
@@ -285,26 +331,76 @@ def test_postgres_cdc_create_update_delete_replay_and_restart() -> None:
                 (payment_id, order_id, f"{marker}-tx"),
             )
             source.commit()
+            expected_events += 3
 
             source.execute(
-                "update customers set segment='premium', updated_at=now() where customer_id=%s",
+                "update customers set segment='premium', "
+                "updated_at=timestamptz '2020-01-01 00:00:00+00' where customer_id=%s",
                 (customer_ids[0],),
             )
             source.execute(
-                "update orders set status='cancelled', updated_at=now() where order_id=%s",
+                "update orders set status='cancelled', "
+                "updated_at=timestamptz '2020-01-01 00:00:00+00' where order_id=%s",
                 (order_id,),
             )
             source.execute(
-                "update payments set status='cancelled', updated_at=now() where payment_id=%s",
+                "update payments set status='cancelled', "
+                "updated_at=timestamptz '2020-01-01 00:00:00+00' where payment_id=%s",
                 (payment_id,),
             )
             source.commit()
+            expected_events += 3
+
+            predicate = owned_predicate(customer_ids, order_id, payment_id)
+            wait_until(
+                "six create/update Bronze events",
+                lambda: count_owned(executor, predicate) >= expected_events,
+            )
+            run_cdc_dbt(lakehouse_namespace, target_path=tmp_path / "dbt-target")
+            silver = lakehouse_namespace.silver
+            customer_state = executor.fetch(
+                f"select segment, updated_at from iceberg.{silver}.int_cdc_customers_current "
+                f"where customer_id = {customer_ids[0]}"  # nosec B608 -- DB-owned integer
+            )
+            assert len(customer_state) == 1
+            assert as_str(customer_state[0][0]) == "premium"
+            assert customer_state[0][1] == datetime(2020, 1, 1, tzinfo=UTC)
+            order_state = executor.fetch(
+                f"select status from iceberg.{silver}.int_cdc_orders_current "
+                f"where order_id = {order_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert len(order_state) == 1 and as_str(order_state[0][0]) == "cancelled"
+            payment_state = executor.fetch(
+                f"select status from iceberg.{silver}.int_cdc_payments_current "
+                f"where payment_id = {payment_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert len(payment_state) == 1 and as_str(payment_state[0][0]) == "cancelled"
+
             source.execute("delete from orders where order_id=%s", (order_id,))
             source.execute("delete from customers where customer_id=%s", (customer_ids[0],))
             source.commit()
+            expected_events += 3
 
             predicate = owned_predicate(customer_ids, order_id, payment_id)
-            wait_until("nine c/u/d Bronze events", lambda: count_owned(executor, predicate) >= 9)
+            wait_until(
+                "nine c/u/d Bronze events",
+                lambda: count_owned(executor, predicate) >= expected_events,
+            )
+            deleted_customer_count = executor.fetch(
+                f"select count(*) from iceberg.{silver}.int_cdc_customers_current "
+                f"where customer_id = {customer_ids[0]}"  # nosec B608 -- DB-owned integer
+            )
+            assert as_int(deleted_customer_count[0][0]) == 0
+            deleted_order_count = executor.fetch(
+                f"select count(*) from iceberg.{silver}.int_cdc_orders_current "
+                f"where order_id = {order_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert as_int(deleted_order_count[0][0]) == 0
+            deleted_payment_count = executor.fetch(
+                f"select count(*) from iceberg.{silver}.int_cdc_payments_current "
+                f"where payment_id = {payment_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert as_int(deleted_payment_count[0][0]) == 0
             rows = executor.fetch(  # nosec B608 -- predicate contains owned integer IDs only
                 f"select source_table, operation, source_lsn from {TABLE} "
                 f"where {predicate} order by kafka_topic, kafka_offset"
@@ -386,27 +482,37 @@ def test_postgres_cdc_create_update_delete_replay_and_restart() -> None:
             )
             customer_ids.append(second_customer_id)
             source.commit()
+            expected_events += 1
             predicate = owned_predicate(customer_ids, order_id, payment_id)
             wait_until(
                 "post-restart committed event",
-                lambda: count_owned(executor, predicate) >= 10,
+                lambda: count_owned(executor, predicate) >= expected_events,
             )
             total, distinct = count_distinct_owned(executor, predicate)
             assert total == distinct
-            completed_scenario = True
         finally:
+            cleanup_events = 0
+            if payment_id >= 0:
+                cleanup_events += source.execute(
+                    "delete from payments where payment_id=%s", (payment_id,)
+                ).rowcount
             if order_id >= 0:
-                source.execute("delete from orders where order_id=%s", (order_id,))
+                cleanup_events += source.execute(
+                    "delete from orders where order_id=%s", (order_id,)
+                ).rowcount
             if customer_ids:
-                source.execute("delete from customers where customer_id = any(%s)", (customer_ids,))
+                cleanup_events += source.execute(
+                    "delete from customers where customer_id = any(%s)", (customer_ids,)
+                ).rowcount
             source.commit()
+            expected_events += cleanup_events
             if order_id >= 0 and payment_id >= 0 and customer_ids:
                 predicate = owned_predicate(customer_ids, order_id, payment_id)
                 try:
-                    if completed_scenario:
+                    if cleanup_events:
                         wait_until(
                             "CDC cleanup deletes",
-                            lambda: count_owned(executor, predicate) >= 11,
+                            lambda: count_owned(executor, predicate) >= expected_events,
                             timeout=60,
                         )
                 finally:

@@ -9,7 +9,7 @@ that hides every unrelated date on a long-lived stack.
 
 import hashlib
 import json
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 import pyarrow as pa
@@ -29,7 +29,9 @@ from omni_retail.ingestion.common.storage import ObjectStorage
 from omni_retail.ingestion.postgres_snapshot.tables import (
     table_by_name,
 )
-from omni_retail.lakehouse.bronze.loader import TrinoConfig
+from omni_retail.lakehouse.bronze.loader import DbapiTrinoExecutor, TrinoConfig
+from omni_retail.streaming.cdc.consumer import CdcBatchWriter
+from omni_retail.streaming.cdc.model import CdcEvent, event_identity
 
 DAY_1 = date(2026, 9, 20)
 DAY_2 = date(2026, 9, 21)
@@ -43,6 +45,322 @@ OLTP_TABLES = (
     "shipments",
 )
 API_SOURCES = ("fx-rates", "marketing-campaigns", "deliveries")
+CDC_BASE_TIME = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
+CDC_KEY_FIELDS = {
+    "customers": "customer_id",
+    "orders": "order_id",
+    "payments": "payment_id",
+}
+
+
+def _cdc_event(
+    *,
+    table: str,
+    business_key: int,
+    operation: str,
+    offset: int,
+    source_lsn: int | None,
+    after: dict[str, object] | None,
+    source_timestamp: datetime,
+) -> CdcEvent:
+    """Build one deterministic raw CDC fixture with production-shaped JSON."""
+    topic = f"omni.oltp.public.{table}"
+    key_field = CDC_KEY_FIELDS[table]
+    key = {key_field: business_key}
+    before = key if operation == "d" else None
+    envelope = {
+        "before": before,
+        "after": after,
+        "source": {
+            "schema": "public",
+            "table": table,
+            "lsn": source_lsn,
+            "txId": source_lsn,
+            "ts_us": int(source_timestamp.timestamp() * 1_000_000),
+        },
+        "op": operation,
+    }
+    kafka_timestamp = source_timestamp + timedelta(seconds=1)
+    return CdcEvent(
+        event_id=event_identity(topic, 0, offset),
+        kafka_topic=topic,
+        kafka_partition=0,
+        kafka_offset=offset,
+        kafka_timestamp=kafka_timestamp,
+        source_schema="public",
+        source_table=table,
+        operation=operation,
+        source_lsn=source_lsn,
+        source_tx_id=source_lsn,
+        source_timestamp=source_timestamp,
+        key_json=json.dumps(key, separators=(",", ":"), sort_keys=True),
+        envelope_json=json.dumps(envelope, separators=(",", ":"), sort_keys=True),
+        before_json=(
+            json.dumps(before, separators=(",", ":"), sort_keys=True)
+            if before is not None
+            else None
+        ),
+        after_json=(
+            json.dumps(after, separators=(",", ":"), sort_keys=True) if after is not None else None
+        ),
+        event_date=source_timestamp.date(),
+        ingested_at=CDC_BASE_TIME + timedelta(minutes=offset),
+    )
+
+
+def _customer_row(
+    customer_id: int,
+    *,
+    segment: str,
+    updated_at: datetime,
+    region: str = "cdc-region",
+) -> dict[str, object]:
+    return {
+        "customer_id": customer_id,
+        "email": f"cdc-{customer_id}@example.test",
+        "first_name": "CDC",
+        "last_name": "Fixture",
+        "region": region,
+        "city": "cdc-city",
+        "status": "active",
+        "segment": segment,
+        "registered_at": "2026-09-01T08:00:00.000000Z",
+        "created_at": "2026-09-01T08:00:00.000000Z",
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _order_row(
+    order_id: int,
+    *,
+    customer_id: int,
+    status: str,
+    updated_at: datetime,
+) -> dict[str, object]:
+    return {
+        "order_id": order_id,
+        "customer_id": customer_id,
+        "status": status,
+        "currency": "USD",
+        "shipping_cost": "2.50",
+        "order_total": "42.50",
+        "created_at": "2026-09-20T10:00:00.000000Z",
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _payment_row(
+    payment_id: int,
+    *,
+    order_id: int,
+    status: str,
+    updated_at: datetime,
+) -> dict[str, object]:
+    return {
+        "payment_id": payment_id,
+        "order_id": order_id,
+        "method": "card",
+        "status": status,
+        "amount": "42.50",
+        "transaction_id": f"CDC-TXN-{payment_id}",
+        "created_at": "2026-09-20T10:01:00.000000Z",
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def seed_cdc_events(executor: DbapiTrinoExecutor, *, schema: str) -> tuple[CdcEvent, ...]:
+    """Seed replay, delete, recreate, same-LSN, and late-time CDC cases."""
+    earlier = CDC_BASE_TIME - timedelta(days=2)
+    latest_by_lsn_but_oldest_time = CDC_BASE_TIME - timedelta(days=4)
+    events = (
+        _cdc_event(
+            table="customers",
+            business_key=9_910_001,
+            operation="u",
+            offset=3,
+            source_lsn=200,
+            after={
+                **_customer_row(9_910_001, segment="vip", updated_at=latest_by_lsn_but_oldest_time),
+                "additive_note": "ignored-by-typed-projection",
+            },
+            source_timestamp=latest_by_lsn_but_oldest_time,
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_001,
+            operation="r",
+            offset=0,
+            source_lsn=None,
+            after=_customer_row(9_910_001, segment="standard", updated_at=CDC_BASE_TIME),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_001,
+            operation="u",
+            offset=2,
+            source_lsn=200,
+            after=_customer_row(9_910_001, segment="premium", updated_at=earlier),
+            source_timestamp=earlier,
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_002,
+            operation="r",
+            offset=1,
+            source_lsn=None,
+            after=_customer_row(9_910_002, segment="standard", updated_at=CDC_BASE_TIME),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_002,
+            operation="d",
+            offset=4,
+            source_lsn=201,
+            after=None,
+            source_timestamp=CDC_BASE_TIME + timedelta(minutes=1),
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_003,
+            operation="c",
+            offset=5,
+            source_lsn=202,
+            after=_customer_row(9_910_003, segment="standard", updated_at=CDC_BASE_TIME),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_003,
+            operation="d",
+            offset=6,
+            source_lsn=203,
+            after=None,
+            source_timestamp=CDC_BASE_TIME + timedelta(minutes=2),
+        ),
+        _cdc_event(
+            table="customers",
+            business_key=9_910_003,
+            operation="c",
+            offset=7,
+            source_lsn=204,
+            after=_customer_row(
+                9_910_003,
+                segment="premium",
+                updated_at=CDC_BASE_TIME + timedelta(minutes=3),
+                region="cdc-recreated",
+            ),
+            source_timestamp=CDC_BASE_TIME + timedelta(minutes=3),
+        ),
+        _cdc_event(
+            table="orders",
+            business_key=9_920_001,
+            operation="c",
+            offset=0,
+            source_lsn=300,
+            after=_order_row(
+                9_920_001,
+                customer_id=9_910_001,
+                status="pending",
+                updated_at=CDC_BASE_TIME,
+            ),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="orders",
+            business_key=9_920_001,
+            operation="u",
+            offset=1,
+            source_lsn=301,
+            after=_order_row(
+                9_920_001,
+                customer_id=9_910_001,
+                status="paid",
+                updated_at=earlier,
+            ),
+            source_timestamp=earlier,
+        ),
+        _cdc_event(
+            table="orders",
+            business_key=9_920_002,
+            operation="c",
+            offset=2,
+            source_lsn=302,
+            after=_order_row(
+                9_920_002,
+                customer_id=9_910_001,
+                status="pending",
+                updated_at=CDC_BASE_TIME,
+            ),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="orders",
+            business_key=9_920_002,
+            operation="d",
+            offset=3,
+            source_lsn=303,
+            after=None,
+            source_timestamp=CDC_BASE_TIME + timedelta(minutes=4),
+        ),
+        _cdc_event(
+            table="payments",
+            business_key=9_930_001,
+            operation="c",
+            offset=0,
+            source_lsn=400,
+            after=_payment_row(
+                9_930_001,
+                order_id=9_920_001,
+                status="pending",
+                updated_at=CDC_BASE_TIME,
+            ),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="payments",
+            business_key=9_930_001,
+            operation="u",
+            offset=1,
+            source_lsn=401,
+            after=_payment_row(
+                9_930_001,
+                order_id=9_920_001,
+                status="captured",
+                updated_at=earlier,
+            ),
+            source_timestamp=earlier,
+        ),
+        _cdc_event(
+            table="payments",
+            business_key=9_930_002,
+            operation="c",
+            offset=2,
+            source_lsn=402,
+            after=_payment_row(
+                9_930_002,
+                order_id=9_920_002,
+                status="pending",
+                updated_at=CDC_BASE_TIME,
+            ),
+            source_timestamp=CDC_BASE_TIME,
+        ),
+        _cdc_event(
+            table="payments",
+            business_key=9_930_002,
+            operation="d",
+            offset=3,
+            source_lsn=403,
+            after=None,
+            source_timestamp=CDC_BASE_TIME + timedelta(minutes=5),
+        ),
+    )
+    writer = CdcBatchWriter(executor, catalog="iceberg", schema=schema)
+    writer.ensure_table()
+    writer.write(events)
+    writer.write((events[0],))  # exact transport replay must remain a no-op
+    return events
 
 
 def trino_scalar(sql: str) -> object:

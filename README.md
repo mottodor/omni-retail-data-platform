@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), models batch data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, orchestrates with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, CDC-derived current-state models, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), derives typed/delete-aware CDC current state alongside the batch dbt Silver/Gold Kimball path, orchestrates with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, CDC-to-Gold cutover, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -46,7 +46,7 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
 ```
 
-Implemented today: PostgreSQL OLTP snapshots and raw CDC for customers/orders/payments, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: CDC-derived typed/current state, Spark, OpenLineage/Marquez, Prometheus/Grafana.
+Implemented today: PostgreSQL OLTP snapshots and restart-safe raw CDC plus typed/delete-aware current state for customers/orders/payments, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: CDC-to-Gold/serving cutover, Spark, OpenLineage/Marquez, Prometheus/Grafana.
 
 Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
 
@@ -147,7 +147,9 @@ Debezium Connect 3.6, and a non-root Python consumer. Kafka/Connect state is
 persistent; the consumer commits offsets only after an insert-only Iceberg MERGE
 into `bronze.postgres_cdc_events`. The raw contract accepts additive non-key
 source fields, enforces route-specific primary keys, and preserves event-time-
-out-of-order records without deriving current state. Details and recovery procedures:
+out-of-order records. Parallel dbt views strictly type those events and derive
+current state by PostgreSQL LSN/Kafka offset with rank-before-delete semantics.
+Details and recovery procedures:
 [`docs/runbooks/kafka-cdc.md`](docs/runbooks/kafka-cdc.md).
 
 All host ports bind to `127.0.0.1` only: PostgreSQL `5432`, MinIO `9000`/`9001`,
@@ -298,8 +300,9 @@ shared registry (`source_kind="postgres"`), and a durable watermark
 after a successful upload, so interruptions re-extract and overwrite the
 same window. Known limitation of this batch path: hard deletes are invisible to snapshots,
 and historical backfill of past states is impossible (a snapshot holds the
-current state). Phase 8 raw CDC now captures those deletes, but dbt still reads
-the snapshot-shaped Bronze tables until the next CDC current-state slice.
+current state). Phase 8 CDC captures those deletes and exposes parallel typed
+current-state Silver views, but the established Gold path still reads the
+snapshot-shaped models until the downstream cutover.
 
 ## Lakehouse: Bronze → Silver → Gold → marts
 
@@ -328,15 +331,17 @@ the raw archive — loading them into Bronze is a tracked follow-up
 
 ### Silver and Gold
 
-dbt builds the analytical model over Bronze: `silver.stg_*` (typed
-pass-through) and `silver.int_*` (current entity state via keyset dedup),
-then the Kimball `gold` layer — `dim_date`, `dim_product`, `dim_campaign`,
+dbt builds the analytical model over Bronze: the established
+`silver.stg_*`/`silver.int_*` snapshot path plus parallel
+`stg_cdc_{customers,orders,payments}` typed events and
+`int_cdc_*_current` delete-aware state. CDC winners are selected by source LSN
+and per-table Kafka offset, never event/ingestion time. The Kimball `gold`
+layer remains snapshot-backed — `dim_date`, `dim_product`, `dim_campaign`,
 SCD2 `dim_customer`, and the `fact_orders` / `fact_order_items` /
-`fact_payments` / `fact_shipments` facts. Every core model carries a YAML
-contract (grain, PK, measures, upstream) and is covered by built-in and
-singular business tests, including the orders ↔ payments reconciliation.
-Run against the live core stack with `make dbt-build`; the model reference
-lives in `docs/data-model.md`.
+`fact_payments` / `fact_shipments` facts — until a separate cutover defines
+SCD2 delete and snapshot-only child semantics. Every core/CDC model carries a
+YAML contract and dbt tests. Run against the live core stack with
+`make dbt-build`; the model reference lives in `docs/data-model.md`.
 
 On top of Gold, four marts provide dashboard-ready aggregates with all
 financial measures normalized to EUR by `int_orders_fx` (the order
@@ -424,7 +429,8 @@ view of the Airflow UI.
 
 - Unit tests (`make test`) stay hermetic; no network, no containers.
 - dbt tests: built-in constraints plus singular business tests, including
-  the orders ↔ payments reconciliation (see the Lakehouse section).
+  orders ↔ payments reconciliation and CDC raw-route, transport-identity,
+  required typed-field, ordering, recreate, and delete semantics.
 - `make integration` runs the acceptance scenarios against the live core
   stack (MinIO + mock-api + Trino), gated by `OMNI_INTEGRATION=1`.
   The suite is safe on a long-lived stack: deterministic object coordinates

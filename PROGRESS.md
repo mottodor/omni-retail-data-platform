@@ -17,10 +17,10 @@ Contract:
 ## Current focus
 
 Phase 8 is in progress. Restart-safe PostgreSQL -> Debezium/Kafka -> immutable
-Iceberg Bronze is complete for customers, orders, and payments, including the
-additive schema-evolution and event-time-out-of-order raw-event contract. Next:
-scope CDC-derived typed/current-state models with explicit delete and source-
-ordering semantics.
+Iceberg Bronze plus parallel typed/delete-aware dbt Silver current state is
+complete for customers, orders, and payments. Source order uses PostgreSQL LSN
+with per-table Kafka offset tie-breaking. Next: scope the downstream Gold
+cutover, including customer SCD2 deletes and snapshot-only child semantics.
 
 ## Phase status
 
@@ -34,7 +34,7 @@ ordering semantics.
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
 | 6 | ClickHouse serving layer | done |
 | 7 | Apache Superset | done |
-| 8 | CDC: Debezium -> Kafka -> Iceberg | in progress — immutable Bronze slice done |
+| 8 | CDC: Debezium -> Kafka -> Iceberg | in progress — raw Bronze + typed/current-state Silver done |
 | 9 | Clickstream + Spark | not started |
 | 10 | Data quality, contracts, failure engineering | not started |
 | 11 | Iceberg maintenance and performance | not started |
@@ -54,7 +54,7 @@ ordering semantics.
 | TD-002 | Four supplier file sources stop in MinIO landing/archive and are not loaded into Iceberg Bronze. | open | [#18](https://github.com/mottodor/omni-retail-data-platform/issues/18): add manifest-driven, idempotent file-source Bronze loading. |
 | TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | scheduled: Phase 11 | Add snapshot expiration/maintenance with retention and rollback safety. |
 | TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
-| TD-005 | The dbt v1 project has 16 generic-test definitions using syntax that must move under `arguments` for dbt v2. | deferred: Phase 17 | Migrate after stable dbt v2 and confirmed Trino compatibility; clear v1 deprecation warnings first. |
+| TD-005 | The dbt v1 project has 13 generic-test definitions using syntax that must move under `arguments` for dbt v2. | deferred: Phase 17 | Migrate after stable dbt v2 and confirmed Trino compatibility; clear v1 deprecation warnings first. |
 | TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | scheduled: Phase 11 | Measure file growth, then add safe compaction and snapshot expiration without changing raw event semantics. |
 
 ## Deferred / follow-ups

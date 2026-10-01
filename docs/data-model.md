@@ -145,8 +145,43 @@ does not sort or overwrite by business key, LSN, or timestamp, and it makes no
 cross-topic total-order claim.
 
 This table does not replace the snapshot-shaped
-`bronze.customers/orders/payments` tables yet; typed/current state and dbt
-switching belong to the next Phase 8 slice.
+`bronze.customers/orders/payments` tables. It now feeds parallel typed/current-
+state Silver models; switching the established Gold path remains a separate
+Phase 8 cutover.
+
+## CDC typed/current-state Silver (Phase 8)
+
+Three event-grain views strictly type the schema-less raw payload while
+retaining source/transport metadata:
+
+| Model | Grain | Typed payload |
+|---|---|---|
+| `stg_cdc_customers` | one row per customer CDC event | customer attributes and timestamps |
+| `stg_cdc_orders` | one row per order CDC event | order attributes, `decimal(12,2)` amounts, timestamps |
+| `stg_cdc_payments` | one row per payment CDC event | payment attributes, `decimal(12,2)` amount, timestamps |
+
+For `r/c/u`, values come only from `after_json`; required source fields are
+dbt-tested and incompatible types fail strict casts. A `d` row retains only
+the typed business key and event metadata because default replica identity does
+not guarantee complete non-key old values. Additive unknown fields remain in
+Bronze and do not change these projections until reviewed.
+
+The corresponding `int_cdc_<entity>_current` views have one row per live
+business key. They rank all operations before filtering deletes:
+
+```text
+source_lsn DESC NULLS LAST -> kafka_offset DESC -> event_id DESC
+```
+
+LSN is the PostgreSQL source-order boundary; offset resolves snapshot/null-LSN
+and same-LSN events inside each single-partition table topic. Event time, row
+`updated_at`, Kafka time, transaction ID, and ingestion time do not select
+state. A winning delete removes the key, while a later recreate wins normally.
+There is no cross-topic order claim.
+
+These models deliberately run alongside the established snapshot-backed
+`stg_*`/`int_*` and Gold models. Gold cutover must first define customer SCD2
+delete intervals and stale snapshot-only `order_items`/`shipments` behavior.
 
 ## Silver layer (Phase 5 slice 2)
 
@@ -157,9 +192,11 @@ _ingested_at desc` on the business key. `int_fx_rates_daily` keeps the
 latest rate per (currency, day); `int_campaigns` keeps the latest daily
 campaign snapshot; `int_deliveries` keeps the latest carrier status.
 
-Known limitation (until CDC, Phase 8): snapshot extraction cannot see hard
-deletes, so a deleted source row retains its last version in `int_*` and
-downstream facts/dimensions.
+Known limitation of this established path: snapshot extraction cannot see hard
+deletes, so a deleted source row retains its last version in the snapshot-backed
+`int_*` and downstream facts/dimensions. The parallel Phase 8
+`int_cdc_*_current` views close that gap for their three entities, but Gold has
+not switched to them yet.
 
 ## Gold layer — Kimball (Phase 5 slice 2)
 

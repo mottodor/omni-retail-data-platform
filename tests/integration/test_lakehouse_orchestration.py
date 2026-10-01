@@ -15,6 +15,7 @@ from integration.lakehouse_seed import (
     DAY_1,
     DAY_2,
     isolate_seed_coordinates,
+    seed_cdc_events,
     seed_day_1,
     seed_day_2,
     trino_scalar,
@@ -30,6 +31,7 @@ from omni_retail.ingestion.common.paths import (
     postgres_watermark_key,
 )
 from omni_retail.ingestion.common.storage import BotoObjectStorage
+from omni_retail.lakehouse.bronze.loader import DbapiTrinoExecutor, TrinoConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTERED_SOURCES = 10
@@ -60,6 +62,8 @@ def orchestrated_world(
 ) -> OrchestratedWorld:
     isolate_seed_coordinates(object_journal)
     manifests = (*seed_day_1(object_journal), *seed_day_2(object_journal))
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        seed_cdc_events(executor, schema=lakehouse_namespace.bronze)
     return OrchestratedWorld(
         storage=manifest_scoped_storage(object_journal, manifests),
         namespace=lakehouse_namespace,

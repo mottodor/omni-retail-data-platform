@@ -56,7 +56,8 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ["standard", "premium", "vip"]
+              arguments:
+                values: ["standard", "premium", "vip"]
       - name: first_order_date
         tests: [not_null]
       - name: last_order_date
@@ -85,11 +86,13 @@ models:
       - name: channel
         tests:
           - accepted_values:
-              values: ["search", "display", "social", "email", "video"]
+              arguments:
+                values: ["search", "display", "social", "email", "video"]
       - name: campaign_status
         tests:
           - accepted_values:
-              values: ["active", "paused", "completed", "scheduled"]
+              arguments:
+                values: ["active", "paused", "completed", "scheduled"]
       - name: impressions
         tests: [not_null]
       - name: clicks

@@ -96,6 +96,49 @@ uv run python -m omni_retail.streaming.cdc run \
 Use a different `CDC_CONSUMER_GROUP_ID` for diagnostics unless intentionally
 advancing the production-like group.
 
+## Build and inspect typed current state
+
+Build the parallel CDC Silver graph after Bronze contains events:
+
+```bash
+make dbt-build ARGS="--select stg_cdc_customers stg_cdc_orders stg_cdc_payments int_cdc_customers_current int_cdc_orders_current int_cdc_payments_current"
+```
+
+Inspect the raw history and the selected live winner together:
+
+```sql
+SELECT operation, source_lsn, kafka_offset, source_timestamp, ingested_at
+FROM iceberg.bronze.postgres_cdc_events
+WHERE source_table = 'orders'
+  AND cast(json_extract_scalar(key_json, '$.order_id') AS bigint) = 123
+ORDER BY source_lsn, kafka_offset;
+
+SELECT order_id, status, source_lsn, kafka_offset, event_id
+FROM iceberg.silver.int_cdc_orders_current
+WHERE order_id = 123;
+```
+
+The winner is the greatest non-null PostgreSQL LSN, then Kafka offset within
+the fixed single-partition table topic. A snapshot event with null LSN is
+ordered by offset until a streaming event exists. A latest delete correctly
+returns no current-state row. Do not diagnose state using `updated_at`, source
+or Kafka timestamp, transaction ID, or `ingested_at`; those are audit fields.
+
+If dbt fails during typed projection:
+
+1. find the failing topic/partition/offset in dbt/Trino output;
+2. inspect `key_json`, `after_json`, and `operation` in Bronze without editing
+   the raw row;
+3. classify the source change against `docs/data-contracts.md`;
+4. for a missing required field or incompatible type, stop downstream work and
+   update the source migration/contract/projection together;
+5. rerun the selected dbt graph. Do not replace strict casts with `try_cast` or
+   suppress a required-field test merely to make the build green.
+
+These views are parallel verification models. Existing Gold, ClickHouse, and
+Superset outputs still use snapshot-backed Silver until the separate downstream
+cutover defines SCD2 deletes and snapshot-only child cleanup.
+
 ## Source schema changes
 
 Classify and review a source migration before applying it:
@@ -214,5 +257,6 @@ reset: analytical history and transport state have separate ownership.
 
 Stop the consumer and Connect, record final offsets, then drop the inactive
 slot/publication only if CDC is being disabled. Existing seven-table batch
-snapshot ingestion remains operational and dbt still reads its snapshot-shaped
-Bronze tables, so this slice can be rolled back without changing Silver/Gold.
+snapshot ingestion remains operational, and Gold still reads its snapshot-
+backed Silver path. The parallel `stg_cdc_*` / `int_cdc_*_current` views may be
+dropped without changing Gold, ClickHouse, or Superset.
