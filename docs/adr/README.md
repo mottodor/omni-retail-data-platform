@@ -14,3 +14,4 @@ When adding an ADR, append it to this index in the same change.
 | [0004](0004-clickhouse-serving-publication.md) | ClickHouse serving layer: deployment and Gold publication mechanism | Accepted |
 | [0005](0005-superset-deployment.md) | Superset deployment and BI-as-code bootstrap | Accepted |
 | [0006](0006-cdc-deployment-and-delivery.md) | CDC deployment and delivery semantics | Accepted |
+| [0007](0007-cdc-gold-cutover.md) | CDC-backed Gold cutover and mixed child semantics | Accepted |

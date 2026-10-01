@@ -18,9 +18,9 @@ Contract:
 
 Phase 8 is in progress. Restart-safe PostgreSQL -> Debezium/Kafka -> immutable
 Iceberg Bronze plus parallel typed/delete-aware dbt Silver current state is
-complete for customers, orders, and payments. Source order uses PostgreSQL LSN
-with per-table Kafka offset tie-breaking. Next: scope the downstream Gold
-cutover, including customer SCD2 deletes and snapshot-only child semantics.
+complete for customers, orders, and payments. The active task plan is
+`docs/plans/active.md`: customer SCD2 deletes and recreates, CDC order/payment
+facts, and safe snapshot-only child semantics.
 
 ## Phase status
 
