@@ -5,7 +5,7 @@ return their manifests so callers can construct a manifest-scoped archive view
 that hides every unrelated date on a long-lived stack.
 """
 
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false
+# pyright: reportAttributeAccessIssue=false, reportMissingImports=false, reportMissingTypeStubs=false
 
 import hashlib
 import json

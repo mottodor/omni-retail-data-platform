@@ -16,10 +16,10 @@ Contract:
 
 ## Current focus
 
-Phase 8 (CDC: Debezium -> Kafka -> Iceberg) is next. The first slice must
-establish PostgreSQL logical replication, Debezium/Kafka persistence, and a
-restart-safe Bronze path for customers, orders, and payments. Execution plan:
-[`docs/plans/active.md`](docs/plans/active.md).
+Phase 8 is in progress. The restart-safe PostgreSQL -> Debezium/Kafka ->
+immutable Iceberg Bronze slice for customers, orders, and payments is complete.
+Next: scope the Phase 8 schema-evolution and out-of-order-event slice;
+CDC-derived typed/current-state models remain a separate later slice.
 
 ## Phase status
 
@@ -33,7 +33,7 @@ restart-safe Bronze path for customers, orders, and payments. Execution plan:
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
 | 6 | ClickHouse serving layer | done |
 | 7 | Apache Superset | done |
-| 8 | CDC: Debezium -> Kafka -> Iceberg | next |
+| 8 | CDC: Debezium -> Kafka -> Iceberg | in progress — immutable Bronze slice done |
 | 9 | Clickstream + Spark | not started |
 | 10 | Data quality, contracts, failure engineering | not started |
 | 11 | Iceberg maintenance and performance | not started |
@@ -54,6 +54,7 @@ restart-safe Bronze path for customers, orders, and payments. Execution plan:
 | TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | scheduled: Phase 11 | Add snapshot expiration/maintenance with retention and rollback safety. |
 | TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
 | TD-005 | The dbt v1 project has 16 generic-test definitions using syntax that must move under `arguments` for dbt v2. | deferred: Phase 17 | Migrate after stable dbt v2 and confirmed Trino compatibility; clear v1 deprecation warnings first. |
+| TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | scheduled: Phase 11 | Measure file growth, then add safe compaction and snapshot expiration without changing raw event semantics. |
 
 ## Deferred / follow-ups
 

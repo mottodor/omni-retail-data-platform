@@ -17,6 +17,7 @@ dependencies = [
     # the platform itself uses psycopg v3 above — no code imports this here.
     "psycopg2-binary>=2.9,<3",
     "pyarrow>=21,<24",
+    "confluent-kafka==2.15.1",
 ]
 
 [build-system]
@@ -27,6 +28,11 @@ build-backend = "hatchling.build"
 packages = ["src/omni_retail"]
 
 [dependency-groups]
+# Minimal runtime closure for the lockfile-built Phase 8 consumer image.
+cdc = [
+    "confluent-kafka==2.15.1",
+    "trino==0.339.0",
+]
 dev = [
     "apache-airflow==2.11.2",
     "boto3-stubs[s3]>=1.35,<2",

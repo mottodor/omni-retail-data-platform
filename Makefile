@@ -5,7 +5,7 @@ LOCALHOST_NO_PROXY := 127.0.0.1,localhost
 # shellcheck disable=SC2034  # GNU Make variable expanded in host-side recipes below.
 LOCALHOST_PROXY_BYPASS=no_proxy="$(LOCALHOST_NO_PROXY)$${no_proxy:+,$${no_proxy}}" NO_PROXY="$(LOCALHOST_NO_PROXY)$${NO_PROXY:+,$${NO_PROXY}}"
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -77,8 +77,38 @@ dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select
 dbt-test: ## Run dbt tests. ARGS="--select staging"
 	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
 
-integration: ## Run integration tests against the live stacks (requires `make up`; ClickHouse tests also need `make bi-up`)
+integration: ## Run integration tests against the live stacks (requires `make up`; optional profiles for their tests)
 	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'
+
+STREAMING_COMPOSE := docker compose --profile core --profile streaming
+STREAMING_SERVICES := cdc-consumer debezium-connector-init debezium-connect kafka-topics-init kafka postgres-cdc-init postgres-cdc-reset
+
+streaming-up: ## Start restart-safe Kafka, Debezium, and the CDC Bronze consumer (requires CDC secrets in .env)
+	# Start long-running dependencies separately because Compose v5 --wait treats
+	# successful one-shot containers in the wait set as failures.
+	$(STREAMING_COMPOSE) up -d --wait postgres trino kafka
+	$(STREAMING_COMPOSE) run --rm postgres-cdc-init
+	$(STREAMING_COMPOSE) run --rm kafka-topics-init
+	$(STREAMING_COMPOSE) up -d --wait --no-deps debezium-connect
+	$(STREAMING_COMPOSE) run --rm --no-deps debezium-connector-init
+	$(STREAMING_COMPOSE) up -d --wait --build --no-deps cdc-consumer
+
+streaming-down: ## Stop streaming services; preserve Kafka, connector, slot, and Bronze state
+	$(STREAMING_COMPOSE) stop cdc-consumer debezium-connect kafka
+	$(STREAMING_COMPOSE) rm -f $(STREAMING_SERVICES)
+
+streaming-status: ## Show streaming health, connector/task state, and Bronze consumer offsets
+	$(STREAMING_COMPOSE) ps postgres trino kafka debezium-connect cdc-consumer
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) curl --fail --silent --show-error "http://127.0.0.1:$${KAFKA_CONNECT_PORT:-8083}/connectors/omni-postgres-cdc/status"; echo'
+	$(STREAMING_COMPOSE) exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --group "$${CDC_CONSUMER_GROUP_ID:-omni-iceberg-bronze-cdc-v1}" --describe
+
+streaming-reset: ## DESTRUCTIVE: reset Kafka/Connect transport and PG slot/publication; preserve OLTP and Bronze
+	@echo "warning: streaming-reset destroys Kafka records, Connect state, and the PostgreSQL CDC slot/publication"
+	-$(STREAMING_COMPOSE) stop cdc-consumer debezium-connect kafka
+	-$(STREAMING_COMPOSE) rm -f $(STREAMING_SERVICES)
+	bash infrastructure/scripts/remove_kafka_volume.sh
+	$(STREAMING_COMPOSE) run --rm postgres-cdc-reset
+	$(MAKE) streaming-up
 
 BI_COMPOSE := docker compose --profile bi
 

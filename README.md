@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. Today it ingests a PostgreSQL OLTP database, supplier files, and REST APIs into an Iceberg lakehouse (MinIO + Polaris + Trino), models the data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, orchestrates everything with Airflow, publishes Gold marts to a ClickHouse serving layer, and serves BI dashboards in Apache Superset. Planned next on the same foundation: CDC via Debezium + Kafka, Spark, observability and lineage — see [ROADMAP.md](ROADMAP.md).
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), models batch data with dbt into Silver/Gold Kimball layers and dashboard-ready marts, orchestrates with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, CDC-derived current-state models, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -46,7 +46,7 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
 ```
 
-Implemented today: PostgreSQL OLTP snapshots, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: Debezium CDC + Kafka, Spark, OpenLineage/Marquez, Prometheus/Grafana.
+Implemented today: PostgreSQL OLTP snapshots and raw CDC for customers/orders/payments, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: CDC-derived typed/current state, Spark, OpenLineage/Marquez, Prometheus/Grafana.
 
 Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
 
@@ -88,6 +88,12 @@ make down       # stop services (named volumes are preserved)
 make logs       # follow service logs
 make reset      # DESTRUCTIVE: down -v, destroys all local volumes
 make smoke-core # end-to-end check: Trino -> Polaris -> Iceberg -> MinIO
+
+# --- Streaming CDC (requires core + CDC credentials in .env) ---
+make streaming-up     # Kafka + Debezium + restart-safe Iceberg Bronze consumer
+make streaming-status # connector/task state and consumer-group offsets
+make streaming-down   # preserve Kafka/Connect/slot/Bronze state
+make streaming-reset  # DESTRUCTIVE transport reset; preserves OLTP and Bronze
 
 # --- Source data ---
 make generate-oltp       # apply OLTP schema + load initial data (10k customers / 5k products / 100k orders)
@@ -135,6 +141,12 @@ The `orchestration` profile adds Airflow: a custom image `omni-retail/airflow:0.
 built from `apache/airflow:2.11.2-python3.12` (webserver + scheduler, LocalExecutor)
 with a dedicated metadata PostgreSQL (`airflow-postgres`) separated from the OLTP
 source, so `make reset` cannot wipe Airflow state.
+
+The resource-bounded `streaming` profile adds Kafka 4.3 in single-node KRaft mode,
+Debezium Connect 3.6, and a non-root Python consumer. Kafka/Connect state is
+persistent; the consumer commits offsets only after an insert-only Iceberg MERGE
+into `bronze.postgres_cdc_events`. Details and recovery procedures:
+[`docs/runbooks/kafka-cdc.md`](docs/runbooks/kafka-cdc.md).
 
 All host ports bind to `127.0.0.1` only: PostgreSQL `5432`, MinIO `9000`/`9001`,
 mock-api `9002`, Polaris `8181`, Trino `8080`, Airflow UI `8081`. All images are
@@ -282,9 +294,10 @@ shared registry (`source_kind="postgres"`), and a durable watermark
 `archive/_watermarks/postgres/<table>.json`. Keyset pagination on
 `(updated_at, pk)` makes same-second events safe; the watermark moves only
 after a successful upload, so interruptions re-extract and overwrite the
-same window. Known limitation (until CDC — see [ROADMAP.md](ROADMAP.md)):
-hard deletes are invisible to snapshots, and historical backfill of past
-states is impossible (a snapshot holds the current state).
+same window. Known limitation of this batch path: hard deletes are invisible to snapshots,
+and historical backfill of past states is impossible (a snapshot holds the
+current state). Phase 8 raw CDC now captures those deletes, but dbt still reads
+the snapshot-shaped Bronze tables until the next CDC current-state slice.
 
 ## Lakehouse: Bronze → Silver → Gold → marts
 
@@ -434,7 +447,7 @@ view of the Airflow UI.
 
 ```text
 src/omni_retail/    Python package: ingestion (files, api, postgres_snapshot),
-                   generators, lakehouse (bronze), serving (clickhouse publisher)
+                   streaming CDC, generators, lakehouse, serving publisher
 dbt/               dbt project: staging → intermediate → core → marts
 airflow/           DAGs, dataset definitions, shared policy and runners
 postgres/          OLTP schema DDL (idempotent, applied on first volume init)

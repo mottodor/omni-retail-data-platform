@@ -112,6 +112,31 @@ against the raw manifest. Watermark-driven `run-new` resumes at independently
 replaceable source-object row ranges and verifies the manifest count plus
 unique raw coordinates.
 
+## PostgreSQL CDC Bronze ledger (Phase 8 slice 1)
+
+`iceberg.bronze.postgres_cdc_events` is an append-only raw event ledger for
+`public.customers`, `public.orders`, and `public.payments`. Its grain is one
+row per Kafka transport coordinate `(kafka_topic, kafka_partition,
+kafka_offset)`. `event_id` is the deterministic SHA-256 encoding of that
+coordinate and is the insert-only MERGE key, so replay is a no-op.
+
+| Column group | Fields | Semantics |
+|---|---|---|
+| Identity | `event_id`, `kafka_topic`, `kafka_partition`, `kafka_offset` | stable transport identity; not a business key |
+| Kafka time | `kafka_timestamp` | broker record timestamp; fallback for partition date |
+| Source routing | `source_schema`, `source_table`, `operation` | allow-listed `public` table; `r/c/u/d` |
+| Source ordering | `source_lsn`, `source_tx_id`, `source_timestamp` | retained for later current-state derivation; LSN is not globally unique |
+| Raw payload | `key_json`, `envelope_json` | exact UTF-8-decoded schema-less JSON from Kafka |
+| Convenience payload | `before_json`, `after_json` | parsed object JSON; nullable according to operation |
+| Lakehouse metadata | `event_date`, `ingested_at` | source timestamp date (Kafka fallback), UTC ingestion time |
+
+The Iceberg table is partitioned by `event_date`. Deletes retain the Debezium
+key and delete envelope; because PostgreSQL keeps default primary-key replica
+identity, non-key old values are not guaranteed. Broker tombstones are disabled
+and fail loudly if one nevertheless arrives. This table does not replace the
+snapshot-shaped `bronze.customers/orders/payments` tables yet; typed/current
+state and dbt switching belong to the next Phase 8 slice.
+
 ## Silver layer (Phase 5 slice 2)
 
 Staging (`stg_*`) is a typed pass-through of bronze. Intermediate

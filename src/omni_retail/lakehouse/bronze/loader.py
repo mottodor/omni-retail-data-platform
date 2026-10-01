@@ -1,13 +1,14 @@
 """Idempotent, restartable raw-archive to Iceberg Bronze loader."""
 
+# pyright: reportMissingImports=false
+
 import logging
 import os
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Literal, Protocol
+from typing import Literal
 
 import trino
 
@@ -31,74 +32,32 @@ from omni_retail.lakehouse.bronze.specs import (
     SOURCE_OBJECT_ROW_POSITION,
     BronzeTableSpec,
 )
+from omni_retail.lakehouse.trino import (
+    DbapiTrinoExecutor as DbapiTrinoExecutor,
+)
+from omni_retail.lakehouse.trino import TrinoConfig as TrinoConfig
+from omni_retail.lakehouse.trino import TrinoExecutor as TrinoExecutor
+from omni_retail.lakehouse.trino import (
+    is_transient_catalog_error as is_transient_catalog_error,
+)
+from omni_retail.lakehouse.trino import is_transient_trino_error as is_transient_trino_error
+from omni_retail.lakehouse.trino import validate_schema_name as validate_schema_name
+
+__all__ = (
+    "DbapiTrinoExecutor",
+    "TrinoConfig",
+    "TrinoExecutor",
+    "is_transient_catalog_error",
+    "is_transient_trino_error",
+    "validate_schema_name",
+)
 
 Clock = Callable[[], datetime]
 logger = logging.getLogger(__name__)
-_SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class LoadError(Exception):
     """Non-transient Bronze failure (archive, manifest, schema, or integrity)."""
-
-
-@dataclass(frozen=True)
-class TrinoConfig:
-    host: str = "127.0.0.1"
-    port: int = 8080
-    catalog: str = "iceberg"
-    user: str = "omni"
-
-    @classmethod
-    def from_env(cls) -> "TrinoConfig":
-        return cls(
-            host=os.environ.get("TRINO_HOST", cls.host),
-            port=int(os.environ.get("TRINO_PORT", str(cls.port))),
-            catalog=os.environ.get("TRINO_CATALOG", cls.catalog),
-            user=os.environ.get("TRINO_USER", cls.user),
-        )
-
-
-class TrinoExecutor(Protocol):
-    def execute(self, sql: str) -> None: ...
-
-    def fetch(self, sql: str) -> list[tuple[object, ...]]: ...
-
-
-class DbapiTrinoExecutor:
-    """Lazily-connecting autocommit executor over one trino.dbapi connection."""
-
-    def __init__(self, config: TrinoConfig) -> None:
-        self._config = config
-        self._connection: trino.dbapi.Connection | None = None
-
-    def _connect(self) -> trino.dbapi.Connection:
-        if self._connection is None:
-            self._connection = trino.dbapi.connect(  # type: ignore[no-untyped-call]
-                host=self._config.host,
-                port=self._config.port,
-                user=self._config.user,
-                catalog=self._config.catalog,
-            )
-        return self._connection
-
-    def execute(self, sql: str) -> None:
-        self._connect().cursor().execute(sql)
-
-    def fetch(self, sql: str) -> list[tuple[object, ...]]:
-        cursor = self._connect().cursor()
-        cursor.execute(sql)
-        return list(cursor.fetchall())
-
-    def close(self) -> None:
-        if self._connection is not None:
-            self._connection.close()  # type: ignore[no-untyped-call]
-            self._connection = None
-
-    def __enter__(self) -> "DbapiTrinoExecutor":
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
 
 
 @dataclass(frozen=True)
@@ -115,15 +74,6 @@ class _PreparedBatch:
     manifest: BatchManifest
     rows: list[dict[str, object]]
     object_count: int
-
-
-def validate_schema_name(schema: str) -> str:
-    if not _SCHEMA_NAME_PATTERN.fullmatch(schema):
-        raise ValueError(
-            f"invalid schema name {schema!r}; expected lower-case letters, digits, "
-            "underscores, starting with a letter"
-        )
-    return schema
 
 
 def bronze_schema_from_env() -> str:
@@ -153,8 +103,11 @@ def add_row_position_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHE
 
 
 def ensure_table(executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str, schema: str) -> None:
+    # pi-lens-ignore: python-sql-injection
     executor.execute(create_schema_sql(catalog, schema))
+    # pi-lens-ignore: python-sql-injection
     executor.execute(create_table_sql(spec, catalog, schema))
+    # pi-lens-ignore: python-sql-injection
     executor.execute(add_row_position_sql(spec, catalog, schema))
 
 
@@ -304,34 +257,6 @@ def load(
     return LoadResult(
         spec.source_key, spec.batch_id(logical_date), logical_date, len(prepared.rows), "loaded"
     )
-
-
-_TRANSIENT_CATALOG_MARKERS: tuple[str, ...] = (
-    "Not authorized",
-    # Trino 483 can hide Polaris's empty-body OAuth2 401 as an Iceberg
-    # catalog load error; it is safe to resume after a Polaris restart.
-    "Failed to load table:",
-)
-_TRANSIENT_TRINO_ERRORS = (
-    trino.exceptions.TrinoConnectionError,
-    trino.exceptions.Http502Error,
-    trino.exceptions.Http503Error,
-    trino.exceptions.Http504Error,
-)
-
-
-def is_transient_catalog_error(error: BaseException) -> bool:
-    if not isinstance(error, trino.exceptions.Error):
-        return False
-    message = getattr(error, "message", "")
-    return isinstance(message, str) and any(
-        marker in message for marker in _TRANSIENT_CATALOG_MARKERS
-    )
-
-
-def is_transient_trino_error(error: BaseException) -> bool:
-    """Whether a failed Trino HTTP connection is safe for rebuild resumption."""
-    return isinstance(error, _TRANSIENT_TRINO_ERRORS)
 
 
 def _execute_with_retry(

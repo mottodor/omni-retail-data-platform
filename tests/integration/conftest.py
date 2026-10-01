@@ -5,7 +5,7 @@ object keys through an exact mutation journal and use disposable Iceberg
 schemas, so a long-lived developer stack is restored after success or failure.
 """
 
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false
+# pyright: reportAttributeAccessIssue=false, reportMissingImports=false, reportMissingTypeStubs=false
 
 import hashlib
 import os

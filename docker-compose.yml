@@ -50,6 +50,16 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+      - -c
+      - max_slot_wal_keep_size=2GB
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -246,6 +256,167 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    restart: unless-stopped
+
+  # PostgreSQL CDC transport and raw Bronze sink (Phase 8, ADR 0006).
+  postgres-cdc-init:
+    image: postgres:16.15-alpine
+    profiles: ["streaming"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      DEBEZIUM_POSTGRES_USER: ${DEBEZIUM_POSTGRES_USER}
+      DEBEZIUM_POSTGRES_PASSWORD: ${DEBEZIUM_POSTGRES_PASSWORD}
+    volumes:
+      - ./infrastructure/scripts/postgres_cdc_init.sh:/usr/local/bin/postgres_cdc_init.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres_cdc_init.sh"]
+    restart: "no"
+
+  postgres-cdc-reset:
+    image: postgres:16.15-alpine
+    profiles: ["streaming"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./infrastructure/scripts/postgres_cdc_reset.sh:/usr/local/bin/postgres_cdc_reset.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres_cdc_reset.sh"]
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:4.3.0
+    profiles: ["streaming"]
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://127.0.0.1:${KAFKA_PORT:-9092}
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 20s
+    mem_limit: 1g
+    restart: unless-stopped
+
+  kafka-topics-init:
+    image: apache/kafka:4.3.0
+    profiles: ["streaming"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    volumes:
+      - ./infrastructure/scripts/kafka_topics_init.sh:/usr/local/bin/kafka_topics_init.sh:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/kafka_topics_init.sh"]
+    restart: "no"
+
+  debezium-connect:
+    image: quay.io/debezium/connect:3.6.1.Final
+    profiles: ["streaming"]
+    depends_on:
+      kafka-topics-init:
+        condition: service_completed_successfully
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: omni-connect
+      CONFIG_STORAGE_TOPIC: omni-connect-configs
+      OFFSET_STORAGE_TOPIC: omni-connect-offsets
+      STATUS_STORAGE_TOPIC: omni-connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      REST_ADVERTISED_HOST_NAME: debezium-connect
+      HEAP_OPTS: -Xms256m -Xmx768m
+    ports:
+      - "127.0.0.1:${KAFKA_CONNECT_PORT:-8083}:8083"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+    mem_limit: 1g
+    restart: unless-stopped
+
+  debezium-connector-init:
+    image: python:3.12.12-alpine
+    profiles: ["streaming"]
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+      postgres-cdc-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_CONNECT_URL: http://debezium-connect:8083
+      POSTGRES_DB: ${POSTGRES_DB}
+      DEBEZIUM_POSTGRES_USER: ${DEBEZIUM_POSTGRES_USER}
+      DEBEZIUM_POSTGRES_PASSWORD: ${DEBEZIUM_POSTGRES_PASSWORD}
+    volumes:
+      - ./infrastructure/scripts/debezium_connector_init.py:/usr/local/bin/debezium_connector_init.py:ro
+    entrypoint: ["python", "/usr/local/bin/debezium_connector_init.py"]
+    restart: "no"
+
+  cdc-consumer:
+    image: omni-retail/cdc-consumer:0.1.0
+    build:
+      context: .
+      dockerfile: infrastructure/cdc/Dockerfile
+    profiles: ["streaming"]
+    depends_on:
+      debezium-connector-init:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      CDC_CONSUMER_GROUP_ID: ${CDC_CONSUMER_GROUP_ID:-omni-iceberg-bronze-cdc-v1}
+      CDC_TOPIC_PREFIX: omni.oltp
+      CDC_BATCH_SIZE: ${CDC_BATCH_SIZE:-500}
+      CDC_POLL_TIMEOUT_SECONDS: ${CDC_POLL_TIMEOUT_SECONDS:-1}
+      CDC_WRITE_ATTEMPTS: ${CDC_WRITE_ATTEMPTS:-3}
+      CDC_READINESS_FILE: /tmp/cdc-consumer.ready
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_CATALOG: iceberg
+      TRINO_USER: omni_cdc
+      ICEBERG_BRONZE_SCHEMA: ${ICEBERG_BRONZE_SCHEMA:-bronze}
+    healthcheck:
+      test: ["CMD", "python", "-m", "omni_retail.streaming.cdc", "healthcheck", "--path", "/tmp/cdc-consumer.ready", "--max-age-seconds", "60"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    mem_limit: 512m
     restart: unless-stopped
 
   # ClickHouse serving layer (Phase 6, profile `bi`, ADR 0004). Only the
@@ -473,3 +644,4 @@ volumes:
   airflow-logs:
   clickhouse-data:
   superset-metadata-data:
+  kafka-data:

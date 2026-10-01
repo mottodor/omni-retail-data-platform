@@ -1,10 +1,10 @@
-# Data Contracts (Phase 3 external sources) — DRAFT
+# Data Contracts — DRAFT
 
-- **Status:** draft (introduced with Phase 3 slice 3; ownership and SLA numbers will be finalized in Phase 10 — Data Quality & contracts)
-- **Scope:** external batch sources ingested in Phase 3: four file feeds and three REST API sources
-- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas` (file sources) and envelope checks in `omni_retail.ingestion.api.pipeline` / source clients (API sources); violations quarantine data with machine-readable reasons rather than silently accepting it
+- **Status:** draft (ownership and SLA numbers will be finalized in Phase 10 — Data Quality & contracts)
+- **Scope:** Phase 3 external batch sources plus the Phase 8 PostgreSQL raw CDC ledger
+- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas`, API envelope checks, and fail-stop Debezium envelope/route validation in `omni_retail.streaming.cdc`; file violations quarantine data, while malformed CDC records block offset advancement
 
-Internal OLTP and lakehouse datasets will receive contracts in later phases.
+Additional internal modeled datasets will receive contracts in later phases.
 
 ## Conventions
 
@@ -124,6 +124,35 @@ All API sources share the same mechanics:
 - **Freshness (draft):** every 15 minutes.
 
 ---
+
+## PostgreSQL CDC raw events
+
+| Aspect | Contract |
+|---|---|
+| Source tables | exactly `public.customers`, `public.orders`, `public.payments` |
+| Topics | `omni.oltp.public.<table>`; one partition per table |
+| Operations | `r` snapshot read, `c` create, `u` update, `d` delete |
+| Grain | one row per `(kafka_topic, kafka_partition, kafka_offset)` |
+| Sink | `iceberg.bronze.postgres_cdc_events`, append-only insert semantics |
+| Identity | SHA-256 `event_id` of the transport coordinate |
+| Ordering | transport order per table partition; source LSN retained; no cross-table total-order claim |
+| Raw payload | exact decoded key and Debezium envelope JSON retained as text |
+| Delivery | at-least-once; Iceberg MERGE before synchronous Kafka offset commit |
+| Invalid record | fail-stop with topic/partition/offset context; offset is not committed |
+| Retention | Kafka: 7 days or 5 GiB per data-topic partition; Iceberg history has no Phase 8 expiry |
+
+Delete events require a non-empty key object, a `before` object, and null
+`after`. PostgreSQL default primary-key replica identity means the key is
+reliable but non-key old values are not guaranteed. Kafka tombstones are
+configured off (`tombstones.on.delete=false`) and treated as contract failures
+if received. Resetting Kafka while retaining Bronze produces a new snapshot
+with new transport coordinates; this is new raw history, not a duplicate under
+the transport identity. A clean end-to-end replay therefore requires a
+separate, explicit Bronze reset.
+
+Schema-less JSON is intentional for this first slice. Additive or incompatible
+source-schema changes are fail-loud/unsupported until the later Phase 8 schema
+evolution slice; no silent field-dropping compatibility promise is made.
 
 ## Change process
 

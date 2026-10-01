@@ -35,6 +35,10 @@ SUPERSET_DOCKERFILE = REPO_ROOT / "infrastructure" / "superset" / "Dockerfile"
 SUPERSET_IMAGE = "omni-retail/superset:0.1.0"
 SUPERSET_INIT_SCRIPT = REPO_ROOT / "infrastructure" / "scripts" / "superset_init.py"
 SUPERSET_CONFIG_FILE = REPO_ROOT / "superset" / "superset_config.py"
+CDC_DOCKERFILE = REPO_ROOT / "infrastructure" / "cdc" / "Dockerfile"
+POSTGRES_CDC_INIT = REPO_ROOT / "infrastructure" / "scripts" / "postgres_cdc_init.sh"
+DEBEZIUM_CONNECTOR_INIT = REPO_ROOT / "infrastructure" / "scripts" / "debezium_connector_init.py"
+KAFKA_TOPICS_INIT = REPO_ROOT / "infrastructure" / "scripts" / "kafka_topics_init.sh"
 
 # BI driver closure exported from uv.lock: clickhouse-connect + trino
 # transitives minus the packages the base image venv already ships
@@ -113,6 +117,18 @@ EXPECTED_SUPERSET_ENV_KEYS = {
     "SUPERSET_POSTGRES_DB",
 }
 
+EXPECTED_STREAMING_ENV_KEYS = {
+    "DEBEZIUM_POSTGRES_USER",
+    "DEBEZIUM_POSTGRES_PASSWORD",
+    "KAFKA_PORT",
+    "KAFKA_CONNECT_PORT",
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "CDC_CONSUMER_GROUP_ID",
+    "CDC_BATCH_SIZE",
+    "CDC_POLL_TIMEOUT_SECONDS",
+    "CDC_WRITE_ATTEMPTS",
+}
+
 EXPECTED_CORE_SERVICES = {
     "postgres",
     "minio",
@@ -140,6 +156,20 @@ ONE_SHOT_SERVICES = {
     "airflow-init",
     "clickhouse-init",
     "superset-init",
+    "postgres-cdc-init",
+    "postgres-cdc-reset",
+    "kafka-topics-init",
+    "debezium-connector-init",
+}
+
+EXPECTED_STREAMING_SERVICES = {
+    "postgres-cdc-init",
+    "postgres-cdc-reset",
+    "kafka",
+    "kafka-topics-init",
+    "debezium-connect",
+    "debezium-connector-init",
+    "cdc-consumer",
 }
 
 EXPECTED_BI_SERVICES = {
@@ -232,6 +262,7 @@ def test_stateful_services_use_named_volumes() -> None:
         "polaris-postgres-data",
         "airflow-metadata-data",
         "airflow-logs",
+        "kafka-data",
     }
     assert required <= volumes, f"missing named volumes: {sorted(required - volumes)}"
     services = compose["services"]
@@ -244,6 +275,9 @@ def test_stateful_services_use_named_volumes() -> None:
     assert any(
         "airflow-metadata-data" in str(services["airflow-postgres"].get("volumes", [])) for _ in [0]
     ), "airflow-postgres must mount airflow-metadata-data (ADR 0003)"
+    assert "kafka-data:/var/lib/kafka/data" in str(services["kafka"].get("volumes", [])), (
+        "Kafka must persist broker records and Connect internal topics"
+    )
 
 
 def test_trino_jvm_heap_is_the_committed_workstation_baseline() -> None:
@@ -282,6 +316,13 @@ def test_trino_catalog_targets_polaris_rest_api() -> None:
         ("airflow-scheduler", "airflow-postgres", "service_healthy"),
         ("airflow-scheduler", "airflow-init", "service_completed_successfully"),
         ("airflow-scheduler", "airflow-webserver", "service_healthy"),
+        ("postgres-cdc-init", "postgres", "service_healthy"),
+        ("kafka-topics-init", "kafka", "service_healthy"),
+        ("debezium-connect", "kafka-topics-init", "service_completed_successfully"),
+        ("debezium-connector-init", "debezium-connect", "service_healthy"),
+        ("debezium-connector-init", "postgres-cdc-init", "service_completed_successfully"),
+        ("cdc-consumer", "debezium-connector-init", "service_completed_successfully"),
+        ("cdc-consumer", "trino", "service_healthy"),
     ],
 )
 def test_service_dependencies_use_health_conditions(
@@ -327,6 +368,56 @@ def test_bi_profile_contains_expected_services() -> None:
 def test_env_example_documents_superset_variables() -> None:
     missing = EXPECTED_SUPERSET_ENV_KEYS - _env_example_keys()
     assert not missing, f"superset env vars missing from .env.example: {sorted(missing)}"
+
+
+def test_streaming_profile_is_isolated_and_pinned() -> None:
+    services = _load_compose()["services"]
+    missing = EXPECTED_STREAMING_SERVICES - set(services)
+    assert not missing, f"streaming services missing from compose: {sorted(missing)}"
+    for name in EXPECTED_STREAMING_SERVICES:
+        profiles = services[name].get("profiles", [])
+        assert "streaming" in profiles, f"{name} is not in the streaming profile"
+        assert "core" not in profiles, f"{name} must not join the core profile"
+    assert services["kafka"]["image"] == "apache/kafka:4.3.0"
+    assert services["debezium-connect"]["image"] == "quay.io/debezium/connect:3.6.1.Final"
+    assert services["cdc-consumer"]["image"] == "omni-retail/cdc-consumer:0.1.0"
+
+
+def test_streaming_contract_and_bootstrap_are_explicit() -> None:
+    services = _load_compose()["services"]
+    postgres_command = " ".join(services["postgres"]["command"])
+    for setting in (
+        "wal_level=logical",
+        "max_replication_slots=4",
+        "max_wal_senders=4",
+        "max_slot_wal_keep_size=2GB",
+    ):
+        assert setting in postgres_command
+    connector = DEBEZIUM_CONNECTOR_INIT.read_text(encoding="utf-8")
+    assert '"table.include.list": "public.customers,public.orders,public.payments"' in connector
+    assert '"publication.autocreate.mode": "disabled"' in connector
+    assert '"snapshot.mode": "initial"' in connector
+    assert '"tombstones.on.delete": "false"' in connector
+    assert "change-me" not in connector
+    postgres_init = POSTGRES_CDC_INIT.read_text(encoding="utf-8")
+    assert "LOGIN REPLICATION" in postgres_init
+    assert "public.customers, public.orders, public.payments" in postgres_init
+    topics = KAFKA_TOPICS_INIT.read_text(encoding="utf-8")
+    assert "cleanup.policy=$cleanup" in topics
+    assert "604800000" in topics
+    assert "5368709120" in topics
+
+
+def test_streaming_env_and_consumer_image_are_reproducible() -> None:
+    missing = EXPECTED_STREAMING_ENV_KEYS - _env_example_keys()
+    assert not missing, f"streaming env vars missing from .env.example: {sorted(missing)}"
+    text = CDC_DOCKERFILE.read_text(encoding="utf-8")
+    assert "FROM python:3.12.12-slim-bookworm" in text
+    assert "ghcr.io/astral-sh/uv:0.11.3" in text
+    assert "uv sync --frozen --only-group cdc --no-install-project" in text
+    assert "PYTHONPATH=/app/src" in text
+    assert text.rstrip().endswith('CMD ["python", "-m", "omni_retail.streaming.cdc", "run"]')
+    assert "USER cdc" in text
 
 
 def test_superset_services_use_custom_pinned_image() -> None:
