@@ -20,9 +20,6 @@ RAW_POSTGRES_SNAPSHOT = raw_dataset("postgres-snapshot")
 #: Emitted by ``load_bronze`` after a successful watermark-driven load.
 BRONZE = Dataset("lakehouse://bronze")
 
-#: Emitted by ``transform_lakehouse`` after Silver/Gold/marts are built.
-GOLD = Dataset("lakehouse://gold")
-
 #: Datasets consumed by ``load_bronze``. Supplier files land in the raw
 #: archive but are not loaded into Bronze yet (deferred follow-up), so
 #: ``ingest_supplier_files`` intentionally emits no dataset in this list.

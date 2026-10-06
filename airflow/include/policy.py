@@ -6,9 +6,21 @@ inside the ingestion flows.
 """
 
 from datetime import timedelta
+from typing import TypedDict
+
+
+class TaskPolicy(TypedDict):
+    """Typed subset of Airflow operator arguments shared by local tasks."""
+
+    retries: int
+    retry_delay: timedelta
+    retry_exponential_backoff: bool
+    max_retry_delay: timedelta
+    execution_timeout: timedelta
+
 
 #: Applied to every ingestion task via DAG ``default_args``.
-INGESTION_TASK_DEFAULT_ARGS: dict[str, object] = {
+INGESTION_TASK_DEFAULT_ARGS: TaskPolicy = {
     "retries": 3,
     "retry_delay": timedelta(seconds=30),
     "retry_exponential_backoff": True,
@@ -19,7 +31,7 @@ INGESTION_TASK_DEFAULT_ARGS: dict[str, object] = {
 #: Applied to ``load_bronze`` tasks (Phase 5 slice 3). The Bronze loader
 #: already retries transient catalog-auth failures internally; task retries
 #: re-run the watermark-driven load, which is idempotent per day.
-LAKEHOUSE_TASK_DEFAULT_ARGS: dict[str, object] = {
+LAKEHOUSE_TASK_DEFAULT_ARGS: TaskPolicy = {
     "retries": 2,
     "retry_delay": timedelta(minutes=1),
     "retry_exponential_backoff": True,
@@ -27,10 +39,21 @@ LAKEHOUSE_TASK_DEFAULT_ARGS: dict[str, object] = {
     "execution_timeout": timedelta(minutes=30),
 }
 
-#: Applied to ``transform_lakehouse`` tasks. A full dbt build (models plus
+#: Applied to stable-boundary polling before any analytical work starts.
+#: The primitive has its own five-minute default deadline; the task timeout
+#: leaves a small margin for client cleanup and log flushing.
+CDC_BOUNDARY_TASK_DEFAULT_ARGS: TaskPolicy = {
+    "retries": 3,
+    "retry_delay": timedelta(minutes=1),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=10),
+    "execution_timeout": timedelta(minutes=6),
+}
+
+#: Applied to ``transform_lakehouse`` dbt tasks. A full dbt build (models plus
 #: tests) is slower than ingestion and a task retry repeats the whole build,
 #: so the backoff and timeout budgets are wider than the lakehouse defaults.
-TRANSFORM_TASK_DEFAULT_ARGS: dict[str, object] = {
+TRANSFORM_TASK_DEFAULT_ARGS: TaskPolicy = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
@@ -39,7 +62,7 @@ TRANSFORM_TASK_DEFAULT_ARGS: dict[str, object] = {
 }
 
 #: Applied to the idempotent full-snapshot Gold -> ClickHouse publication.
-SERVING_TASK_DEFAULT_ARGS: dict[str, object] = {
+SERVING_TASK_DEFAULT_ARGS: TaskPolicy = {
     "retries": 2,
     "retry_delay": timedelta(minutes=2),
     "retry_exponential_backoff": True,

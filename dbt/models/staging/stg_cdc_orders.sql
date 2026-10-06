@@ -47,3 +47,4 @@ from {{ source('bronze', 'postgres_cdc_events') }}
 where source_schema = 'public'
   and source_table = 'orders'
   and kafka_topic = 'omni.oltp.public.orders'
+{{ cdc_boundary_predicate('omni.oltp.public.orders') }}

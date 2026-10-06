@@ -26,6 +26,10 @@ def test_config_builds_the_exact_three_topic_allow_list(
         "omni.oltp.public.payments": "payments",
     }
     assert config.group_id.endswith("-v1")
+    assert config.connect_url == "http://127.0.0.1:8083"
+    assert config.boundary_stability_seconds == 10.0
+    assert config.boundary_timeout_seconds == 300.0
+    assert config.boundary_request_timeout_seconds == 10.0
 
 
 def test_config_rejects_invalid_batch_and_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,6 +40,28 @@ def test_config_rejects_invalid_batch_and_namespace(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("CDC_BATCH_SIZE", "10")
     monkeypatch.setenv("CDC_TOPIC_PREFIX", "changed.namespace")
     with pytest.raises(CdcConfigError, match="must remain"):
+        CdcConfig.from_env()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("CDC_BOUNDARY_STABILITY_SECONDS", "0", "greater than zero"),
+        ("CDC_BOUNDARY_STABILITY_SECONDS", "nan", "finite number"),
+        ("CDC_BOUNDARY_TIMEOUT_SECONDS", "not-a-number", "must be numeric"),
+        ("CDC_BOUNDARY_REQUEST_TIMEOUT_SECONDS", "-1", "greater than zero"),
+        ("KAFKA_CONNECT_URL", "localhost:8083", "absolute HTTP"),
+        ("KAFKA_CONNECT_URL", "http://user:secret@localhost:8083", "credentials"),
+    ],
+)
+def test_config_rejects_invalid_boundary_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(CdcConfigError, match=message):
         CdcConfig.from_env()
 
 

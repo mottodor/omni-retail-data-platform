@@ -237,10 +237,22 @@ disappear immediately with a deleted CDC parent, but children for a new live
 order can be absent until the next snapshot. Consumers must not interpret
 missing children during that window as proof that the source order has none.
 
-Orders/payments reconciliation remains fail-loud. A full Gold build and
-ClickHouse publication are valid only after the selected CDC topics reach a
-stable consumed boundary. Automatic stable-boundary scheduling is not yet part
-of this contract.
+Orders/payments reconciliation remains fail-loud. Automatic Airflow builds
+capture a stable consumed boundary for exactly the three configured topics and
+pass it to dbt as `cdc_boundary`. Each topic entry contains partition `0` and a
+non-negative `offset_exclusive`; CDC staging reads only
+`kafka_offset < offset_exclusive`. Exact topic coverage, partition topology,
+and integer offsets are validated before dbt starts. Two lag-zero samples must
+have identical broker high watermarks across the configured stability window.
+Records appended to Bronze after capture remain outside that build and become
+eligible only after a later boundary advances.
+
+The boundary is a per-topic quiescent transport frontier, not a cross-topic
+total order, source transaction, or exactly-once guarantee. PostgreSQL LSN
+remains the entity/source ordering key and orders/payments reconciliation can
+still fail a semantically incomplete state. The host-side unbounded dbt command
+is an operator recovery/diagnostic path that requires the runbook's explicit
+stable-lag check and must not overlap the coordinated Airflow DAG.
 
 Compatibility: replacing the former date-validity columns on `dim_customer`
 with LSN validity is the coordinated breaking change ratified by ADR 0007.

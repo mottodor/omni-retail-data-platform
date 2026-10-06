@@ -126,10 +126,14 @@ EXPECTED_STREAMING_ENV_KEYS = {
     "KAFKA_PORT",
     "KAFKA_CONNECT_PORT",
     "KAFKA_BOOTSTRAP_SERVERS",
+    "KAFKA_CONNECT_URL",
     "CDC_CONSUMER_GROUP_ID",
     "CDC_BATCH_SIZE",
     "CDC_POLL_TIMEOUT_SECONDS",
     "CDC_WRITE_ATTEMPTS",
+    "CDC_BOUNDARY_STABILITY_SECONDS",
+    "CDC_BOUNDARY_TIMEOUT_SECONDS",
+    "CDC_BOUNDARY_REQUEST_TIMEOUT_SECONDS",
 }
 
 EXPECTED_CORE_SERVICES = {
@@ -557,6 +561,20 @@ def test_airflow_ingestion_env_uses_docker_network_addresses() -> None:
     assert env["POSTGRES_HOST"] == "postgres"
 
 
+def test_airflow_cdc_boundary_env_uses_network_addresses_without_profile_dependencies() -> None:
+    services = _load_compose()["services"]
+    for name in ("airflow-init", "airflow-webserver", "airflow-scheduler"):
+        env = services[name]["environment"]
+        assert env["KAFKA_BOOTSTRAP_SERVERS"] == "kafka:29092"
+        assert env["KAFKA_CONNECT_URL"] == "http://debezium-connect:8083"
+        assert env["CDC_TOPIC_PREFIX"] == "omni.oltp"
+        dependencies = set(services[name].get("depends_on", {}))
+        assert "kafka" not in dependencies
+        assert "debezium-connect" not in dependencies
+        assert "cdc-consumer" not in dependencies
+        assert "clickhouse" not in dependencies
+
+
 def test_airflow_dockerfile_pinned_base_and_nonroot() -> None:
     assert AIRFLOW_DOCKERFILE.is_file(), "airflow Dockerfile is missing"
     text = AIRFLOW_DOCKERFILE.read_text(encoding="utf-8")
@@ -599,7 +617,6 @@ def test_dag_directory_contains_only_expected_dags() -> None:
         "ingest_postgres_snapshot.py",
         "ingest_supplier_files.py",
         "load_bronze.py",
-        "publish_serving.py",
         "transform_lakehouse.py",
     ]
     assert dag_files == expected, f"unexpected DAG files: {dag_files}"

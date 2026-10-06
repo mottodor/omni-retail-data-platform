@@ -1,21 +1,25 @@
 # Runbook — PostgreSQL CDC (Debezium + Kafka -> Iceberg Bronze)
 
-Scope: Phase 8 CDC for `customers`, `orders`, and `payments`: immutable Bronze delivery (ADR 0006) and CDC-authoritative Gold cutover (ADR 0007). This is a local single-node deployment: no HA, TLS, or exactly-once claim.
+Scope: Phase 8 CDC for `customers`, `orders`, and `payments`: immutable Bronze delivery (ADR 0006), CDC-authoritative Gold (ADR 0007), and stable-boundary analytical refresh through Airflow (ADR 0008). This is a local single-node deployment: no HA, TLS, or exactly-once claim.
 
 ## Start and verify
 
 Add unique values for `DEBEZIUM_POSTGRES_USER` and
-`DEBEZIUM_POSTGRES_PASSWORD` to `.env`, then:
+`DEBEZIUM_POSTGRES_PASSWORD` to `.env`. Start profiles in this order:
 
 ```bash
 make up
 make streaming-up
+make bi-up
+make airflow-up
 make streaming-status
 ```
 
 `streaming-up` health-gates PostgreSQL, Trino, Kafka, Connect, and the consumer;
 then idempotently reconciles the role/publication, topics, and connector. It
-never relies on a fixed startup sleep.
+never relies on a fixed startup sleep. Airflow intentionally has no hard
+cross-profile dependency and does not control Docker; a missing streaming,
+core, or BI service fails the owning task loudly.
 
 Expected connector status shape:
 
@@ -34,9 +38,21 @@ ORDER BY 1, 2;
 ```
 
 Initial startup uses `snapshot.mode=initial`: existing source rows appear as
-`r`, then WAL changes as `c/u/d`. Snapshot completion is visible when the
-connector remains `RUNNING`, source-topic offsets stop advancing without new
-OLTP writes, and streaming mutations begin appearing with non-null LSNs.
+`r`, then WAL changes as `c/u/d`. The `transform_lakehouse` DAG starts paused.
+Before its **first** unpause, verify all of the following bootstrap gate:
+
+1. the connector and every connector task remain `RUNNING`;
+2. the production-like consumer group has an active member;
+3. every captured topic reports lag 0 twice, at least 10 seconds apart, with
+   unchanged log-end offsets;
+4. Bronze contains the expected `r` baseline for all three source tables; and
+5. one controlled source mutation appears with a non-null LSN.
+
+Then unpause `transform_lakehouse` in the Airflow UI (or run
+`airflow dags unpause transform_lakehouse` in the scheduler container). This
+is a one-time acknowledgment for a clean CDC bootstrap. Ordinary restarts
+preserve connector/Kafka/slot state and do not repeat the gate. Automated
+snapshot-completion metrics are deferred to the observability phase.
 
 ## State and retention
 
@@ -97,28 +113,48 @@ advancing the production-like group.
 
 ## Build and publish CDC-backed Gold
 
-Gold is not automatically triggered by CDC. First wait for a stable consumed
-boundary across all three data topics:
+`transform_lakehouse` is the coordinated automatic path. It runs after a
+`lakehouse://bronze` dataset update or hourly at `0 * * * *` UTC:
+
+```text
+wait_for_cdc_boundary -> dbt_build -> publish_serving
+```
+
+The boundary task requires a healthy connector/tasks, an active consumer-group
+member, exact partition-0 topology, and lag 0 for all three topics. It then
+requires unchanged high watermarks across two samples separated by the
+configured stability window. The resulting per-topic high watermark is an
+**exclusive** offset. Airflow passes the mapping to dbt as one JSON `--vars`
+argument; each CDC staging view applies `kafka_partition = 0` and
+`kafka_offset < offset_exclusive`. Records arriving after capture therefore do
+not leak into that build. This is a quiescent transport frontier, not a
+cross-topic order or exactly-once claim; PostgreSQL LSN still orders entity
+state and dbt reconciliation remains fail-loud.
+
+Trigger a controlled run after the bootstrap gate:
+
+```bash
+make airflow-dag-test ARGS="transform_lakehouse 2026-10-02"
+# Or in the UI: DAGs -> transform_lakehouse -> Trigger DAG
+```
+
+Do not run host-side dbt or publication commands while this DAG has an active
+run. For recovery or isolated diagnostics, the manual path remains available:
 
 ```bash
 docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
   --bootstrap-server kafka:29092 \
   --group omni-iceberg-bronze-cdc-v1 --describe
-```
-
-Record each topic's `CURRENT-OFFSET`, `LOG-END-OFFSET`, and `LAG`. Proceed only
-when every selected partition has lag 0 and two consecutive checks show the
-same end offsets (or source writes are intentionally paused). Because Kafka
-offers no cross-topic total order, a build during uneven order/payment lag can
-fail reconciliation; wait for lag to clear and rerun rather than weakening the
-test.
-
-Run a coordinated full graph rebuild, then republish the unchanged mart schemas:
-
-```bash
+# Confirm lag 0 and identical log-end offsets twice across the stability window.
 make dbt-build
 make serving-publish
 ```
+
+An unbounded manual `make dbt-build` has no frozen offset predicate. Use it
+against normal CDC-backed schemas only after the explicit stable-lag check and
+never concurrently with Airflow. Because Kafka offers no cross-topic total
+order, uneven order/payment progress can still fail reconciliation; wait for
+lag to clear and rerun rather than weakening the test.
 
 The build derives `dim_customer`, `fact_orders`, and `fact_payments` only from
 CDC. Snapshot Silver stays available for rollback and supplies uncaptured
@@ -258,12 +294,30 @@ the old replay boundary:
 5. document the old/new snapshot boundary. Do not claim gap-free recovery
    without reconciliation against a source snapshot.
 
-### Consumer unhealthy or lag grows
+### Consumer unhealthy, boundary timeout, or lag grows
 
-Check `docker compose logs --tail=200 cdc-consumer`, Trino health, and consumer
-group offsets. Malformed records fail-stop with topic/partition/offset context;
-they are not skipped. Phase 8 has no DLQ. Fix or explicitly reset/replay the
-record only after identifying its contract impact.
+A boundary failure must leave `dbt_build` and `publish_serving` unstarted.
+Inspect the failed Airflow task log for connector/task state and each topic's
+partition, committed offset, exclusive high watermark, lag, attempt, and
+elapsed time. Then check:
+
+```bash
+make streaming-status
+docker compose logs --tail=200 cdc-consumer debezium-connect kafka
+```
+
+Common causes are an inactive consumer-group member, missing/unexpected
+partition, absent committed offset, non-zero lag, or a high watermark that
+keeps moving throughout the stability window. Restore the service or let lag
+clear, then retry the same Airflow task; no Bronze reset is required. Malformed
+records fail-stop with topic/partition/offset context and are not skipped.
+Phase 8 has no DLQ. Fix or explicitly reset/replay the record only after
+identifying its contract impact.
+
+If dbt models or tests fail, publication remains unstarted; fix the typed or
+business contract and rerun the DAG. If ClickHouse fails, Iceberg Gold remains
+authoritative and the old serving snapshot stays visible because exchange is
+never reached; restore ClickHouse and retry `publish_serving` in the same run.
 
 ### Kafka or Connect restart
 
@@ -297,6 +351,14 @@ Then run `make streaming-reset`. Never hide the table drop inside the transport
 reset: analytical history and transport state have separate ownership.
 
 ## Rollback
+
+To roll back only ADR 0008 orchestration, pause `transform_lakehouse`, wait for
+its active run to finish, and restore the previous dataset-triggered transform
+plus standalone publication DAG from version control. The dbt boundary macro
+may remain because omitting `cdc_boundary` preserves manual behavior. No Kafka
+offset, Bronze event, Gold table, or ClickHouse table is reset. Record that the
+rollback restores manual lag checks and removes automatic frozen-frontier
+builds; it is not equivalent orchestration safety.
 
 For a Gold-only rollback, do not delete CDC Bronze or stop capture. Revert
 `dim_customer`, `fact_orders`, and `fact_payments` to their snapshot-backed

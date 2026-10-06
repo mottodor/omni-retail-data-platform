@@ -93,6 +93,8 @@ def run_cdc_dbt(namespace: Namespace, *, target_path: Path) -> None:
             "dbt",
             "--target-path",
             str(target_path),
+            "--indirect-selection",
+            "cautious",
             "--select",
             *CDC_DBT_MODELS,
         ],

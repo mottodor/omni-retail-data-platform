@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), derives typed/delete-aware CDC state and CDC-backed Kimball Gold models, orchestrates batch work with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, automatic stable-boundary CDC refresh, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), derives typed/delete-aware CDC state and CDC-backed Kimball Gold models, orchestrates batch work with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -46,7 +46,7 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
 ```
 
-Implemented today: PostgreSQL OLTP snapshots and restart-safe raw CDC; typed/delete-aware state for customers/orders/payments; CDC-backed customer SCD2 and order/payment Gold facts with parent-gated snapshot children; supplier file and mock REST ingestion; MinIO archive; Polaris + Iceberg Bronze/Silver/Gold and marts (Trino + dbt); Airflow batch orchestration; ClickHouse serving publication; Superset BI (four dashboards as code, ClickHouse + Trino paths); and CI. Not yet built: automatic CDC → dbt → serving scheduling, Spark, OpenLineage/Marquez, or Prometheus/Grafana.
+Implemented today: PostgreSQL OLTP snapshots and restart-safe raw CDC; typed/delete-aware state for customers/orders/payments; CDC-backed customer SCD2 and order/payment Gold facts with parent-gated snapshot children; supplier file and mock REST ingestion; MinIO archive; Polaris + Iceberg Bronze/Silver/Gold and marts (Trino + dbt); coordinated stable-boundary Airflow orchestration through atomic ClickHouse publication; Superset BI (four dashboards as code, ClickHouse + Trino paths); and CI. Not yet built: Spark, OpenLineage/Marquez, or Prometheus/Grafana.
 
 Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
 
@@ -345,10 +345,11 @@ lifecycle's `r`/`c` boundary. Snapshot-backed `fact_order_items` and
 children while allowing a new order to exist until its next child snapshot.
 `dim_date` follows live orders. Snapshot customer/order/payment Silver models
 remain available only for rollback. Every core/CDC model carries a YAML
-contract and dbt tests. Run a full rebuild at a stable consumed Kafka boundary
-with `make dbt-build`; then republish ClickHouse with `make serving-publish`.
-Automatic CDC-triggered scheduling is not implemented. The model reference
-lives in `docs/data-model.md`.
+contract and dbt tests. Airflow captures a stable, lag-zero Kafka consumer boundary and passes exact
+exclusive topic offsets into dbt, then republishes ClickHouse only after the
+full model/test graph succeeds. The manual `make dbt-build` and
+`make serving-publish` recovery path remains available after an explicit stable
+lag check. The model reference lives in `docs/data-model.md`.
 
 On top of Gold, four marts provide dashboard-ready aggregates with all
 financial measures normalized to EUR by `int_orders_fx` (the order
@@ -374,7 +375,10 @@ ingest_postgres_snapshot / ingest_fx_api / ingest_marketing_api / ingest_deliver
     └─ outlet: raw://<source>
           → load_bronze        (watermark-driven `run-new` over all sources)
              └─ outlet: lakehouse://bronze
-                   → transform_lakehouse   (full dbt build: Silver → Gold → marts + tests)
+                   → transform_lakehouse
+                       wait_for_cdc_boundary
+                         → dbt_build (frozen offsets; Silver → Gold → marts + tests)
+                           → publish_serving (atomic ClickHouse snapshot swap)
 ```
 
 Dataset URIs are logical data addresses, not S3 paths. Because supplier files
@@ -388,12 +392,15 @@ the producer's) — the watermark sweep alone decides what to load.
 | `ingest_supplier_files` | `@daily` | 4 independent per-source tasks; param `fail_on_rejected` (default `False`) |
 | `ingest_postgres_snapshot` | `@daily` | 7 independent per-table snapshot tasks; param `full_refresh` (default `False`); outlet `raw://postgres-snapshot` |
 | `load_bronze` | `raw://` datasets (4 ingestion DAGs) | watermark-driven `run-new` Bronze load; outlet `lakehouse://bronze` |
-| `transform_lakehouse` | `lakehouse://bronze` | full `dbt build` (models + tests) via the dbt CLI in the worker process |
+| `transform_lakehouse` | `lakehouse://bronze` **or** hourly `0 * * * *` UTC | stable CDC boundary → full boundary-pinned `dbt build` → atomic ClickHouse rebuild |
 
 Transformation SQL lives in the dbt project, never in DAGs; dbt target/log
 artifacts go to a per-run temp directory (the project dir is mounted
-read-only), and `max_active_runs=1` keeps concurrent dbt builds off the
-single-node Trino/Polaris stack. Dataset wiring is asserted by the DAG
+read-only), and `max_active_runs=1` serializes the complete boundary/build/
+publication chain. The boundary requires healthy Debezium tasks, an active
+consumer, exact single-partition topic topology, lag 0, and unchanged exclusive
+high watermarks over the stability window. New Bronze events above that
+frontier wait for a later run. Dataset/timetable wiring is asserted by the DAG
 structure tests (`make airflow-test`); the exact task code paths — watermark
 sweep, idempotent re-trigger, full build — by the live integration test
 `tests/integration/test_lakehouse_orchestration.py` (`make integration`).
@@ -419,18 +426,22 @@ in Phase 8): hard deletes are invisible and historical backfill is
 impossible (snapshots hold current state).
 
 ```bash
-make up                  # core profile first (postgres, minio, mock-api)
-make airflow-up          # orchestration profile; UI at http://127.0.0.1:8081
+make up                  # core profile first
+make streaming-up        # Kafka, Debezium, Bronze consumer
+make bi-up               # ClickHouse/Superset serving profile
+make airflow-up          # orchestration last; UI at http://127.0.0.1:8081
 make airflow-test        # DAG tests (DagBag) inside the image — no live services needed
 make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
 make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"  # dataset-triggered lakehouse chain
 make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
 ```
 
-Manual verification of the dataset chain: `make airflow-up`, unpause the
-DAGs above, trigger any ingestion DAG (or wait for its schedule), then watch
-`load_bronze` and `transform_lakehouse` fire in sequence in the Datasets
-view of the Airflow UI.
+Before the first unpause on a clean CDC deployment, follow the initial-snapshot
+bootstrap gate in [`docs/runbooks/kafka-cdc.md`](docs/runbooks/kafka-cdc.md).
+Then trigger any ingestion DAG, manually trigger `transform_lakehouse`, or wait
+for its hourly schedule. In the Airflow UI, verify the strict
+`wait_for_cdc_boundary → dbt_build → publish_serving` sequence. Do not run
+manual dbt/publication commands concurrently with this DAG.
 
 ## Data quality and testing
 
@@ -521,9 +532,8 @@ HTTP interface is published to the host (`127.0.0.1:8123`); the native
 port stays docker-network-only. Idempotency, rebuild-from-Gold parity,
 and reader permissions are asserted by
 `tests/integration/test_serving_publication.py`
-(`make up && make bi-up && make integration`). After a successful
-`transform_lakehouse` run, the dataset-triggered `publish_serving` DAG
-rebuilds all four marts from Gold. Compare the representative query with
+(`make up && make bi-up && make integration`). After a successful boundary-pinned dbt task, the `publish_serving` task in the
+same `transform_lakehouse` DAG rebuilds all four marts from Gold. Compare the representative query with
 `make serving-benchmark`; the report is written to
 `docs/benchmarks/phase6-trino-vs-clickhouse.md`. Outage recovery is documented
 in [`docs/runbooks/clickhouse-outage.md`](docs/runbooks/clickhouse-outage.md).

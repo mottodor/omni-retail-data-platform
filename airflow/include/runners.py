@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from collections import Counter
 from collections.abc import Mapping
@@ -42,11 +43,21 @@ from omni_retail.lakehouse.bronze.loader import (
 from omni_retail.lakehouse.bronze.specs import TABLES
 from omni_retail.serving.clickhouse.cli import main as serving_cli_main
 from omni_retail.serving.clickhouse.specs import MARTS
+from omni_retail.streaming.cdc.boundary import (
+    ConfluentKafkaBoundaryReader,
+    HttpConnectStatusReader,
+    wait_for_stable_boundary,
+)
+from omni_retail.streaming.cdc.config import CdcConfig
 
 logger = logging.getLogger(__name__)
 
 #: dbt project location inside the Airflow image (compose mounts it read-only).
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
+#: ``uv pip --target`` installs dbt's modules but not console scripts in the
+#: custom Airflow image. Invoke the locked CLI entry point through the active
+#: interpreter while retaining an argument-list-only subprocess boundary.
+DBT_CLI_ENTRYPOINT = "from dbt.cli.main import cli; cli(prog_name='dbt')"
 
 
 def summarize_manifest(manifest: BatchManifest) -> dict[str, object]:
@@ -187,6 +198,68 @@ class DbtBuildError(RuntimeError):
     """The dbt build subprocess failed (non-zero exit or missing artifacts)."""
 
 
+class CdcBoundaryValidationError(ValueError):
+    """A captured CDC boundary does not match the static three-topic contract."""
+
+
+CDC_BOUNDARY_TOPICS = CdcConfig().topics
+
+
+def validate_cdc_boundary(
+    boundary: Mapping[str, object],
+) -> dict[str, dict[str, int]]:
+    """Validate and normalize an XCom/dbt-safe exclusive-offset boundary."""
+    expected = set(CDC_BOUNDARY_TOPICS)
+    actual = set(boundary)
+    if actual != expected or len(boundary) != len(expected):
+        raise CdcBoundaryValidationError(
+            "CDC boundary topics must match exactly: "
+            f"expected={sorted(expected)} actual={sorted(str(item) for item in actual)}"
+        )
+
+    normalized: dict[str, dict[str, int]] = {}
+    for topic in sorted(CDC_BOUNDARY_TOPICS):
+        position = boundary[topic]
+        if not isinstance(position, Mapping):
+            raise CdcBoundaryValidationError(f"CDC boundary position for {topic} must be a mapping")
+        if set(position) != {"partition", "offset_exclusive"} or len(position) != 2:
+            raise CdcBoundaryValidationError(
+                f"CDC boundary position for {topic} must contain exactly "
+                "partition and offset_exclusive"
+            )
+        partition = position["partition"]
+        offset_exclusive = position["offset_exclusive"]
+        if type(partition) is not int or partition != 0:
+            raise CdcBoundaryValidationError(
+                f"CDC boundary partition for {topic} must be integer 0"
+            )
+        if type(offset_exclusive) is not int or offset_exclusive < 0:
+            raise CdcBoundaryValidationError(
+                f"CDC boundary offset_exclusive for {topic} must be a non-negative integer"
+            )
+        normalized[topic] = {
+            "partition": partition,
+            "offset_exclusive": offset_exclusive,
+        }
+    return normalized
+
+
+def serialize_cdc_boundary(boundary: Mapping[str, object]) -> str:
+    """Return deterministic compact JSON suitable for one ``--vars`` argument."""
+    normalized = validate_cdc_boundary(boundary)
+    return json.dumps({"cdc_boundary": normalized}, sort_keys=True, separators=(",", ":"))
+
+
+def run_cdc_boundary() -> dict[str, dict[str, int]]:
+    """Capture a healthy, lag-zero, stable CDC frontier for downstream dbt."""
+    configure_logging()
+    config = CdcConfig.from_env()
+    connect_reader = HttpConnectStatusReader(config.connect_url)
+    with ConfluentKafkaBoundaryReader(config.bootstrap_servers, config.group_id) as kafka_reader:
+        boundary = wait_for_stable_boundary(config, kafka_reader, connect_reader)
+    return validate_cdc_boundary(boundary.as_dict())
+
+
 def summarize_dbt_results(payload: dict[str, object]) -> dict[str, object]:
     """XCom-friendly summary of a dbt ``run_results.json`` payload."""
     results = cast(list[dict[str, object]], payload.get("results", []))
@@ -198,18 +271,25 @@ def summarize_dbt_results(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
-def run_dbt_build() -> dict[str, object]:
-    """Run a full ``dbt build`` in the worker process (Phase 5 §3).
+def run_dbt_build(
+    boundary: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Run a full ``dbt build``, optionally frozen at a CDC offset boundary.
 
     The dbt project directory is mounted read-only, so target and log
     artifacts are written to a throwaway per-run directory. The summary comes
     from ``run_results.json``; a non-zero dbt exit fails the task explicitly.
+    The boundary is validated before creating artifacts or starting dbt and is
+    passed as one JSON argument without shell interpolation.
     """
     configure_logging()
+    serialized_boundary = serialize_cdc_boundary(boundary) if boundary is not None else None
     project_dir = Path(os.environ.get("DBT_PROJECT_DIR", DBT_PROJECT_DIR))
     run_dir = Path(tempfile.mkdtemp(prefix="dbt-build-"))
     command = [
-        "dbt",
+        sys.executable,
+        "-c",
+        DBT_CLI_ENTRYPOINT,
         "build",
         "--project-dir",
         str(project_dir),
@@ -220,6 +300,8 @@ def run_dbt_build() -> dict[str, object]:
         "--log-path",
         str(run_dir / "logs"),
     ]
+    if serialized_boundary is not None:
+        command.extend(["--vars", serialized_boundary])
     env = {
         **os.environ,
         **resolve_dbt_schema_env(),

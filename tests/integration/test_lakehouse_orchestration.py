@@ -40,10 +40,36 @@ EXPECTED_SEEDED_PARTITIONS = {
     "orders": {DAY_1: 2, DAY_2: 1},
     "fx_rates": {DAY_1: 2, DAY_2: 1},
 }
+CDC_TOPICS = {
+    "customers": "omni.oltp.public.customers",
+    "orders": "omni.oltp.public.orders",
+    "payments": "omni.oltp.public.payments",
+}
+
+
+def cdc_boundary(*, customer_offset: int) -> dict[str, object]:
+    """Exclusive fixture frontier; only the customer watermark advances."""
+    return {
+        CDC_TOPICS["customers"]: {"partition": 0, "offset_exclusive": customer_offset},
+        CDC_TOPICS["orders"]: {"partition": 0, "offset_exclusive": 7},
+        CDC_TOPICS["payments"]: {"partition": 0, "offset_exclusive": 7},
+    }
+
+
+def run_dbt_with_task_retries(boundary: dict[str, object]) -> dict[str, object]:
+    """Mirror the DAG's three whole-task attempts against transient catalog auth."""
+    for attempt in range(3):
+        try:
+            return run_dbt_build(boundary)
+        except DbtBuildError:
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable")
 
 
 class Namespace(Protocol):
     bronze: str
+    gold: str
     analytics: str
 
     def dbt_env(self) -> dict[str, str]: ...
@@ -107,9 +133,38 @@ def test_dataset_triggered_lakehouse_pipeline(
     monkeypatch.setenv("DBT_PROJECT_DIR", str(REPO_ROOT / "dbt"))
     for name, value in namespace.dbt_env().items():
         monkeypatch.setenv(name, value)
-    build_summary = run_dbt_build()
+    frozen_summary = run_dbt_with_task_retries(cdc_boundary(customer_offset=11))
+    assert cast(int, frozen_summary["result_count"]) > 0
+    assert (
+        trino_scalar(
+            f"select region from iceberg.{namespace.gold}.dim_customer "
+            "where customer_id = 9910001 and is_current"
+        )
+        == "cdc-region"
+    )
+
+    build_summary = run_dbt_with_task_retries(cdc_boundary(customer_offset=12))
     statuses = cast(dict[str, int], build_summary["status_counts"])
+    assert (
+        trino_scalar(
+            f"select region from iceberg.{namespace.gold}.dim_customer "
+            "where customer_id = 9910001 and is_current"
+        )
+        == "cdc-later-version"
+    )
     assert cast(int, build_summary["result_count"]) > 0
+
+    # A retry over the identical exclusive frontier repeats the full graph
+    # without changing its deterministic Gold winner.
+    rerun_summary = run_dbt_with_task_retries(cdc_boundary(customer_offset=12))
+    assert cast(int, rerun_summary["result_count"]) == cast(int, build_summary["result_count"])
+    assert (
+        trino_scalar(
+            f"select region from iceberg.{namespace.gold}.dim_customer "
+            "where customer_id = 9910001 and is_current"
+        )
+        == "cdc-later-version"
+    )
     assert set(statuses) <= HEALTHY_DBT_STATUSES, statuses
     assert "success" in statuses, "models must have run, not only tests"
 

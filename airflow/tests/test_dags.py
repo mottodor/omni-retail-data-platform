@@ -11,7 +11,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from airflow.datasets import Dataset
 from airflow.models import DagBag
+from airflow.timetables.datasets import DatasetOrTimeSchedule
 from airflow.timetables.simple import DatasetTriggeredTimetable
+from airflow.timetables.trigger import CronTriggerTimetable
 
 DAG_FOLDER = "/opt/airflow/dags"
 
@@ -24,7 +26,6 @@ EXPECTED_DAG_IDS = {
     "ingest_postgres_snapshot",
     "load_bronze",
     "transform_lakehouse",
-    "publish_serving",
 }
 
 INGESTION_DAG_IDS = {
@@ -35,7 +36,7 @@ INGESTION_DAG_IDS = {
     "ingest_postgres_snapshot",
 }
 
-LAKEHOUSE_DAG_IDS = {"load_bronze", "transform_lakehouse", "publish_serving"}
+LAKEHOUSE_DAG_IDS = {"load_bronze", "transform_lakehouse"}
 
 #: dag_id -> raw dataset URI emitted by the API ingestion task.
 API_DAG_DATASET_URIS = {
@@ -116,8 +117,18 @@ def test_load_bronze_is_triggered_by_raw_datasets(dag_bag: DagBag) -> None:
     }
 
 
-def test_transform_lakehouse_is_triggered_by_bronze_dataset(dag_bag: DagBag) -> None:
-    assert dataset_uris(dag_bag, "transform_lakehouse") == {Dataset("lakehouse://bronze").uri}
+def test_transform_lakehouse_uses_dataset_or_hourly_schedule(dag_bag: DagBag) -> None:
+    timetable = dag_bag.dags["transform_lakehouse"].timetable
+    assert isinstance(timetable, DatasetOrTimeSchedule)
+    assert isinstance(timetable.timetable, CronTriggerTimetable)
+    assert timetable.timetable.serialize() == {
+        "expression": "0 * * * *",
+        "timezone": "UTC",
+        "interval": 0.0,
+    }
+    assert {name for name, _dataset in timetable.dataset_condition.iter_datasets()} == {
+        Dataset("lakehouse://bronze").uri
+    }
 
 
 @pytest.mark.parametrize("dag_id", sorted(INGESTION_DAG_IDS))
@@ -198,34 +209,71 @@ def test_postgres_snapshot_dag_params_defaults(dag_bag: DagBag) -> None:
     assert dag.params["full_refresh"] is False
 
 
-@pytest.mark.parametrize("dag_id", ["load_bronze", "transform_lakehouse", "publish_serving"])
-def test_lakehouse_task_policy(dag_bag: DagBag, dag_id: str) -> None:
-    """Lakehouse tasks retry the whole idempotent step with wider budgets."""
-    expected = {
-        "load_bronze": (2, timedelta(minutes=1), timedelta(minutes=10), timedelta(minutes=30)),
-        "transform_lakehouse": (
+def test_load_bronze_task_policy(dag_bag: DagBag) -> None:
+    task = dag_bag.dags["load_bronze"].get_task("load_new")
+    assert task.retries == 2
+    assert task.retry_delay == timedelta(minutes=1)
+    assert task.retry_exponential_backoff is True
+    assert task.max_retry_delay == timedelta(minutes=10)
+    assert task.execution_timeout == timedelta(minutes=30)
+
+
+@pytest.mark.parametrize(
+    ("task_id", "retries", "delay", "cap", "timeout"),
+    [
+        (
+            "wait_for_cdc_boundary",
+            3,
+            timedelta(minutes=1),
+            timedelta(minutes=10),
+            timedelta(minutes=6),
+        ),
+        (
+            "dbt_build",
             2,
             timedelta(minutes=5),
             timedelta(minutes=30),
             timedelta(minutes=60),
         ),
-        "publish_serving": (2, timedelta(minutes=2), timedelta(minutes=15), timedelta(minutes=30)),
+        (
+            "publish_serving",
+            2,
+            timedelta(minutes=2),
+            timedelta(minutes=15),
+            timedelta(minutes=30),
+        ),
+    ],
+)
+def test_coordinated_refresh_task_policy(
+    dag_bag: DagBag,
+    task_id: str,
+    retries: int,
+    delay: timedelta,
+    cap: timedelta,
+    timeout: timedelta,
+) -> None:
+    task = dag_bag.dags["transform_lakehouse"].get_task(task_id)
+    assert task.retries == retries
+    assert task.retry_delay == delay
+    assert task.retry_exponential_backoff is True
+    assert task.max_retry_delay == cap
+    assert task.execution_timeout == timeout
+
+
+def test_lakehouse_dag_task_graph(dag_bag: DagBag) -> None:
+    load_tasks = dag_bag.dags["load_bronze"].tasks
+    assert [task.task_id for task in load_tasks] == ["load_new"]
+
+    dag = dag_bag.dags["transform_lakehouse"]
+    assert {task.task_id for task in dag.tasks} == {
+        "wait_for_cdc_boundary",
+        "dbt_build",
+        "publish_serving",
     }
-    retries, delay, cap, timeout = expected[dag_id]
-    tasks = dag_bag.dags[dag_id].tasks
-    assert tasks, f"{dag_id} has no tasks"
-    for task in tasks:
-        assert task.retries == retries, f"{dag_id}.{task.task_id}: retries"
-        assert task.retry_delay == delay, f"{dag_id}.{task.task_id}: delay"
-        assert task.retry_exponential_backoff is True, f"{dag_id}.{task.task_id}: backoff"
-        assert task.max_retry_delay == cap, f"{dag_id}.{task.task_id}: cap"
-        assert task.execution_timeout == timeout, f"{dag_id}.{task.task_id}: timeout"
-
-
-def test_lakehouse_dags_have_single_task(dag_bag: DagBag) -> None:
-    assert [task.task_id for task in dag_bag.dags["load_bronze"].tasks] == ["load_new"]
-    assert [task.task_id for task in dag_bag.dags["transform_lakehouse"].tasks] == ["dbt_build"]
-    assert [task.task_id for task in dag_bag.dags["publish_serving"].tasks] == ["publish"]
+    assert dag.get_task("wait_for_cdc_boundary").downstream_task_ids == {"dbt_build"}
+    assert dag.get_task("dbt_build").upstream_task_ids == {"wait_for_cdc_boundary"}
+    assert dag.get_task("dbt_build").downstream_task_ids == {"publish_serving"}
+    assert dag.get_task("publish_serving").upstream_task_ids == {"dbt_build"}
 
 
 def test_lakehouse_tasks_use_default_pool(dag_bag: DagBag) -> None:
@@ -259,10 +307,6 @@ def test_load_bronze_task_emits_bronze_dataset(dag_bag: DagBag) -> None:
     assert task.outlets == [Dataset("lakehouse://bronze")]
 
 
-def test_transform_lakehouse_task_emits_gold_dataset(dag_bag: DagBag) -> None:
-    task = dag_bag.dags["transform_lakehouse"].get_task("dbt_build")
-    assert task.outlets == [Dataset("lakehouse://gold")]
-
-
-def test_publish_serving_is_triggered_by_gold_dataset(dag_bag: DagBag) -> None:
-    assert dataset_uris(dag_bag, "publish_serving") == {Dataset("lakehouse://gold").uri}
+def test_coordinated_refresh_emits_no_intermediate_gold_dataset(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["transform_lakehouse"]
+    assert all(not task.outlets for task in dag.tasks)

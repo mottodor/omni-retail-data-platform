@@ -16,11 +16,11 @@ Contract:
 
 ## Current focus
 
-Phase 8 is in progress. Restart-safe PostgreSQL -> Debezium/Kafka -> immutable
-Iceberg Bronze is authoritative through typed/delete-aware Silver and Gold for
-customers, orders, and payments. Customer SCD2 handles update/delete/recreate;
-order/payment deletes reach marts; snapshot-only order items and shipments are
-parent-gated. Next: design stable-boundary CDC -> dbt -> ClickHouse orchestration.
+Phase 8 is complete. PostgreSQL -> Debezium/Kafka -> immutable Iceberg Bronze
+is restart-safe and authoritative through typed/delete-aware Silver and Gold
+for customers, orders, and payments. Airflow freezes each analytical refresh at
+a healthy, stable Kafka-offset boundary, runs dbt, then atomically republishes
+ClickHouse. Next: design the Phase 9 clickstream and justified Spark workload.
 
 ## Phase status
 
@@ -34,8 +34,8 @@ parent-gated. Next: design stable-boundary CDC -> dbt -> ClickHouse orchestratio
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
 | 6 | ClickHouse serving layer | done |
 | 7 | Apache Superset | done |
-| 8 | CDC: Debezium -> Kafka -> Iceberg | in progress — raw Bronze, typed Silver, and delete-aware Gold cutover done |
-| 9 | Clickstream + Spark | not started |
+| 8 | CDC: Debezium -> Kafka -> Iceberg | done |
+| 9 | Clickstream + Spark | not started — current focus |
 | 10 | Data quality, contracts, failure engineering | not started |
 | 11 | Iceberg maintenance and performance | not started |
 | 12 | Observability and lineage | not started |
