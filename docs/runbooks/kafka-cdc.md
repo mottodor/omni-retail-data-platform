@@ -52,7 +52,9 @@ Then unpause `transform_lakehouse` in the Airflow UI (or run
 `airflow dags unpause transform_lakehouse` in the scheduler container). This
 is a one-time acknowledgment for a clean CDC bootstrap. Ordinary restarts
 preserve connector/Kafka/slot state and do not repeat the gate. Automated
-snapshot-completion metrics are deferred to the observability phase.
+snapshot-completion metrics are not delivered; the manual gate above is the
+accepted operational procedure, and a dedicated monitoring subsystem is
+outside this repository's final scope.
 
 ## State and retention
 

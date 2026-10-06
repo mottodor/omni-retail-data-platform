@@ -1,103 +1,163 @@
-# OmniRetail Data Platform — подробный roadmap
+# OmniRetail Data Platform — завершённый roadmap capstone
 
-**Назначение:** pet-project уровня production-like для отработки проектирования DWH/Lakehouse и ETL/ELT-процессов на Windows 11 + WSL2 с 32 GB RAM.
+**Статус:** feature scope завершён на Phase 8. Репозиторий поддерживается как
+maintenance-only portfolio project в соответствии с
+[ADR 0009](docs/adr/0009-freeze-capstone-scope-at-phase-8.md).
 
-**Основной стек:** Apache Airflow 2.11.2, dbt Core 1.10.x (адаптер dbt-trino 1.9.x), Trino 476+ (целевой pinned release — 483), Apache Iceberg, PostgreSQL 16+, ClickHouse, Apache Superset, MinIO (S3 API), Apache Kafka, Debezium, Apache Spark, Apache Polaris, OpenLineage + Marquez, Prometheus + Grafana, Docker Compose, GitHub + GitHub Actions. Позже — миграция на dbt v2, GitLab CI и Kubernetes.
+> The project is a production-like educational capstone, not a production-ready
+> platform.
 
-> Принцип проекта: сначала рабочая вертикаль end-to-end, затем усложнение. Каждая новая технология должна решать конкретную инженерную задачу, а не добавляться «для галочки».
+Первоначальный roadmap предусматривал дальнейшее расширение платформы. Это
+расширение остановлено осознанно: Phase 0–8 уже образуют самостоятельный
+end-to-end capstone, а добавление новых подсистем снижало бы фокус на отдельных
+этапах обработки данных. История исходного плана сохраняется в Git.
 
 ---
 
-## 1. Цели проекта
+## 1. Цель и границы проекта
 
-Проект должен дать опыт, максимально близкий к задачам Data Engineer в коммерческой команде:
+OmniRetail демонстрирует проектирование и эксплуатацию локальной аналитической
+платформы для e-commerce на Windows 11 + WSL2 с 32 GB RAM.
 
-- проектирование lakehouse/DWH-архитектуры;
-- batch ingestion из S3-compatible storage, REST API и PostgreSQL;
-- CDC из PostgreSQL через Debezium + Kafka;
-- event streaming и обработка clickstream;
-- Bronze/Silver/Gold слои в Apache Iceberg;
-- ELT-моделирование через dbt Core + Trino;
-- Kimball: facts, dimensions, SCD Type 2;
-- небольшой Data Vault 2.0 кейс как дополнительный домен;
-- ClickHouse как serving/OLAP-слой;
-- Apache Superset как BI;
-- data quality, idempotency, backfill, schema evolution, late-arriving data;
-- Iceberg maintenance и small-files problem;
-- observability, lineage и SLA/SLO;
-- GitHub Actions CI, контейнеризация и воспроизводимое локальное окружение;
-- документирование архитектурных решений (ADR) и runbooks;
-- финальные миграционные задачи Airflow 2 -> Airflow 3, dbt Core 1.10 -> dbt v2 и позже GitHub Actions -> GitLab CI.
+Завершённый scope охватывает:
 
-## 2. Бизнес-сценарий
+- детерминированный PostgreSQL OLTP source;
+- batch ingestion из PostgreSQL, REST API и файлов/S3;
+- PostgreSQL CDC через Debezium и Kafka;
+- immutable/raw Bronze в Apache Iceberg;
+- типизированное и delete-aware Silver-состояние;
+- Kimball Gold-модель и бизнес-витрины через dbt + Trino;
+- Airflow orchestration для batch и согласованного аналитического refresh;
+- атомарную публикацию Gold-витрин в ClickHouse;
+- BI-as-code в Apache Superset;
+- unit, integration, dbt и DAG tests;
+- документированные гарантии идемпотентности, restart safety и recovery.
 
-**OmniRetail** — условная e-commerce компания. Есть интернет-магазин, мобильное приложение, рекламные каналы, платежи, доставка и внешние поставщики.
+Проект не заявляет production readiness. Известный технический долг и
+ограничения остаются явно перечислены в [PROGRESS.md](PROGRESS.md).
 
-Основные бизнес-вопросы:
+### 1.1 Финальная граница scope
 
-1. Как меняются GMV, Revenue, Margin и AOV?
-2. Какова конверсия funnel: visit -> product_view -> cart -> checkout -> purchase?
-3. Какие продукты и категории дают максимальную маржу?
-4. Как работают рекламные кампании: CTR, CAC, ROAS?
-5. Какова retention/LTV клиентов?
-6. Какие доставки опаздывают?
-7. Есть ли расхождения между заказами и платежами?
+Phases 0–8 являются полным feature scope этого репозитория. Подробные
+спецификации прежних Phase 9–18 удалены из активного roadmap и не считаются
+отложенным backlog OmniRetail.
 
-## 3. Финальная архитектура
+Разрешённые после завершения изменения:
+
+- документация;
+- исправления ошибок;
+- security и dependency maintenance;
+- устранение технического долга в пределах реализованной архитектуры.
+
+Новая подсистема, новый feature domain или возврат исключённой инициативы
+требуют ADR, явно superseding ADR 0009.
+
+## 2. Бизнес-сценарий и реализованные результаты
+
+**OmniRetail** — условная e-commerce компания с интернет-магазином, клиентами,
+заказами, платежами, доставкой, рекламными кампаниями и внешними поставщиками.
+
+Реализованная платформа позволяет анализировать:
+
+1. GMV, revenue, margin, количество заказов и AOV по времени.
+2. Продажи и маржу по категориям и регионам.
+3. Customer LTV, new/repeat composition и клиентские сегменты.
+4. Delivery performance, transit time и status mix по перевозчикам.
+5. Marketing spend, impressions, clicks, CTR, CPC, CPM и budget utilization.
+6. Согласованность заказов и платежей.
+7. Изменения и удаления customers, orders и payments, доставленные через CDC.
+
+Clickstream funnel, conversion attribution, CAC и ROAS не входят в реализованный
+scope: у платформы нет необходимого clickstream/attribution source.
+
+## 3. Реализованная архитектура
 
 ```text
 SOURCES
-  PostgreSQL OLTP ---- Debezium ---- Kafka -------------------+
-  REST APIs ---------------- Airflow/Python ------------------+
-  S3/CSV/JSON/Parquet ------- Airflow ------------------------+--> MinIO/S3
-  Web/App events ------------ Kafka --------------------------+      |
-                                                                  Iceberg
-                                                         Bronze -> Silver -> Gold
-                                                                    |
-                                                          Trino + dbt Core
-                                                                    |
-                                               +--------------------+------------------+
-                                               |                                       |
-                                          Iceberg Gold                           ClickHouse
-                                           source of truth                       serving layer
-                                                                                      |
-                                                                                  Superset
+
+PostgreSQL OLTP
+  ├── batch snapshots ── MinIO archive ── Bronze loader ──┐
+  └── WAL ── Debezium ── Kafka ── CDC consumer ──────────┤
+                                                          ├──> Iceberg Bronze
+Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──┘
+
+Supplier files ── Airflow/Python ── MinIO archive   [raw/archive only]
+
+Iceberg Bronze
+      │
+      │  Trino + dbt Core
+      ▼
+Typed/delete-aware Silver
+      │
+      ▼
+Kimball Gold facts/dimensions
+      │
+      ▼
+Analytics marts in Iceberg
+      │
+      │  atomic full-snapshot publication
+      ▼
+ClickHouse serving layer
+      │
+      ▼
+Apache Superset dashboards
 
 ORCHESTRATION: Airflow 2.11.2
 CATALOG: Apache Polaris (Iceberg REST catalog)
-BIG DATA: Spark для тяжелых файлов/clickstream/sessionization
-QUALITY: dbt tests + custom SQL/Python reconciliation
-LINEAGE: OpenLineage + Marquez
-MONITORING: Prometheus + Grafana
-DEVOPS: GitHub + GitHub Actions + Docker Compose
-LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
+OBJECT STORAGE: MinIO
+CI: GitHub Actions
+RUNTIME: Docker Compose profiles
 ```
 
-### 3.1 Разделение ответственности
+Airflow координирует batch ingestion и аналитический refresh. Перед запуском
+dbt он фиксирует здоровую и стабильную exclusive Kafka-offset boundary, после
+успешных моделей и тестов атомарно перепубликует ClickHouse. Transformation SQL
+остаётся в dbt, а не в DAG-коде.
 
-| Компонент | Роль |
-|---|---|
-| PostgreSQL 16+ | OLTP source и отдельные служебные БД |
-| Debezium | CDC из WAL PostgreSQL |
-| Kafka | event transport / CDC / clickstream |
-| MinIO | локальный S3-compatible object storage |
-| Iceberg | table format и source of truth для lakehouse |
+### 3.1 Ответственность компонентов
+
+| Компонент | Реализованная роль |
+| --- | --- |
+| PostgreSQL | OLTP source; отдельные metadata databases для сервисов |
+| Python ingestion | API, file и PostgreSQL snapshot extraction; Bronze loading |
+| Debezium | Захват изменений customers, orders и payments из PostgreSQL WAL |
+| Kafka | Persistent transport для CDC events |
+| CDC consumer | Restart-safe insert-only доставка raw CDC в Iceberg Bronze |
+| MinIO | S3-compatible landing, archive, rejected и lakehouse storage |
+| Iceberg | Аналитический source of truth: Bronze, Silver, Gold и marts |
 | Polaris | Iceberg REST catalog |
-| Trino | SQL compute/federation над Iceberg и другими источниками |
-| dbt Core | SQL transformations, tests, documentation |
-| Spark | тяжелая distributed processing, sessionization, backfills |
-| ClickHouse | low-latency serving layer для BI |
-| Superset | BI и аналитические dashboards |
-| Airflow | orchestration и dependency management |
-| Prometheus/Grafana | platform observability |
-| OpenLineage/Marquez | data lineage |
-| GitHub Actions | CI и сборка артефактов |
+| Trino | SQL compute над Iceberg и ad-hoc query path для Superset |
+| dbt Core | Типизация, deduplication, SCD2, facts, dimensions, marts и tests |
+| Airflow | Orchestration, retries, dataset triggers и stable-boundary refresh |
+| ClickHouse | Производный low-latency serving layer, rebuildable из Iceberg Gold |
+| Superset | BI dashboards через ClickHouse; ad-hoc exploration через Trino |
+| GitHub Actions | Lint, unit tests, dbt parse, Compose validation и DAG tests |
 
-## 4. Ограничения среды
+### 3.2 Архитектурные инварианты
 
-Целевая машина: Windows 11 + WSL2, 32 GB RAM.
+- Iceberg остаётся аналитическим source of truth.
+- ClickHouse не содержит единственную копию бизнес-логики или данных и полностью
+  пересобирается из Iceberg Gold.
+- Superset использует ClickHouse для dashboard workload и Trino для ad-hoc
+  exploration.
+- Airflow оркестрирует, но не хранит transformation SQL.
+- CDC Bronze сохраняет raw event semantics и transport/source coordinates.
+- Повторная доставка и повторный запуск не должны искажать итоговое состояние.
+- Конфигурация внешняя; секреты не хранятся в Git.
 
-Рекомендуемый лимит WSL2:
+## 4. Ограничения среды и Compose profiles
+
+Целевая машина:
+
+```text
+Windows 11 + WSL2
+Physical RAM: 32 GB
+Recommended WSL2 memory: 24 GB
+Recommended processors: 6
+Recommended swap: 8 GB
+```
+
+Рекомендуемая конфигурация WSL2:
 
 ```ini
 [wsl2]
@@ -106,28 +166,31 @@ processors=6
 swap=8GB
 ```
 
-Не запускать весь стек постоянно. Docker Compose разбить на profiles:
+Реализованные Compose profiles:
 
-- `core`: PostgreSQL, MinIO, Polaris, Trino;
-- `orchestration`: Airflow + metadata PostgreSQL + Redis при необходимости;
-- `streaming`: Kafka + Kafka Connect/Debezium;
-- `spark`: Spark master/worker;
-- `observability`: Prometheus, Grafana, Marquez;
-- `bi`: ClickHouse + Superset.
+| Profile | Состав и назначение |
+| --- | --- |
+| `core` | PostgreSQL, MinIO, Polaris, Trino, deterministic mock API |
+| `streaming` | Kafka, Debezium Connect, init jobs, CDC consumer |
+| `orchestration` | Airflow webserver/scheduler и metadata PostgreSQL |
+| `bi` | ClickHouse, Superset и их init/metadata services |
+
+Профили запускаются по необходимости; весь стек не обязан постоянно работать
+одновременно. Persistent volumes и destructive reset-команды должны оставаться
+явными. Все host ports привязаны к `127.0.0.1`.
 
 ## 5. Структура репозитория
-
-Фактическая структура репозитория (src-layout: Python-код живет в пакете `src/omni_retail`):
 
 ```text
 omni-retail-data-platform/
 ├── .github/
-│   └── workflows/
-│       └── ci.yml
+│   └── workflows/             # GitHub Actions CI
 ├── airflow/
-│   ├── dags/
-│   ├── include/
-│   └── tests/
+│   ├── dags/                  # ingestion, Bronze и transform DAGs
+│   ├── include/               # shared datasets, policy и runners
+│   └── tests/                 # DAG import/structure tests
+├── clickhouse/
+│   └── migrations/            # versioned serving DDL and grants
 ├── dbt/
 │   ├── macros/
 │   ├── models/
@@ -135,1033 +198,420 @@ omni-retail-data-platform/
 │   │   ├── intermediate/
 │   │   ├── core/
 │   │   └── marts/
-│   └── tests/
-├── clickhouse/             # ClickHouse migrations и тесты (Phase 6, ADR 0004)
+│   └── tests/                 # singular business/reconciliation tests
 ├── infrastructure/
-│   ├── airflow/            # кастомный образ Airflow (Dockerfile, ADR 0003)
-│   ├── mock_api/           # mock API сервис (ADR 0002)
-│   └── scripts/            # minio/polaris init, smoke-тесты
+│   ├── airflow/               # custom Airflow image
+│   ├── cdc/                   # non-root CDC consumer image
+│   ├── mock_api/              # deterministic source simulator
+│   ├── superset/              # custom Superset image
+│   └── scripts/               # bootstrap, recovery and smoke scripts
 ├── postgres/
-│   └── init/               # идемпотентный OLTP DDL
-├── src/
-│   └── omni_retail/        # Python-пакет (src-layout)
-│       ├── generators/     # oltp/, vendor_files/
-│       ├── ingestion/      # api/, files/, postgres_snapshot/, common/
-│       ├── lakehouse/      # bronze/
-│       └── serving/        # clickhouse/ (публикация Gold, Phase 6)
+│   └── init/                  # idempotent OLTP DDL
+├── src/omni_retail/
+│   ├── generators/            # OLTP and vendor-file generators
+│   ├── ingestion/             # API, files, snapshots, Bronze loader
+│   ├── lakehouse/             # Iceberg Bronze operations
+│   ├── serving/               # ClickHouse publisher/benchmark
+│   └── streaming/             # CDC consumer and contracts
+├── superset/
+│   └── assets/                # sanitized dashboards/datasets as code
 ├── tests/
 │   ├── fakes/
 │   ├── integration/
 │   └── unit/
-├── trino/
-│   └── etc/                # конфигурация Trino
-├── docs/
-│   ├── adr/
-│   ├── runbooks/
-│   └── ...                 # data-model.md, data-contracts.md и т.д.
+├── trino/etc/                 # Trino and Iceberg catalog configuration
+├── docs/                      # ADRs, runbooks, model, contracts, evidence
 ├── docker-compose.yml
 ├── Makefile
 ├── pyproject.toml
 ├── uv.lock
 ├── .env.example
 ├── AGENTS.md
+├── PROGRESS.md
 ├── ROADMAP.md
 └── README.md
 ```
 
-Каталоги будущих фаз создаются только при наступлении соответствующей фазы, не заранее:
+Новые top-level каталоги для исключённых инициатив не создаются без нового ADR,
+который пересматривает границу scope.
 
-- Phase 6: `clickhouse/` (migrations, tests);
-- Phase 7: `superset/` (dashboards, config);
-- Phase 8: `kafka/` (producers, schemas, connect);
-- Phase 9: `spark/` (jobs, tests) + `src/omni_retail/generators/clickstream/`;
-- Phase 12: `observability/` (prometheus, grafana, marquez);
-- `postgres/migrations/` — при появлении версионных миграций OLTP-схемы.
+## 6. Зафиксированные технические решения
 
-## 6. Правила работы с AI-агентом
+- Python baseline: 3.12; dependency manager: `uv`; точные Python dependency
+  versions фиксирует `uv.lock`.
+- Runtime: Docker Compose с pinned images, без floating `latest` tags.
+- Airflow baseline: 2.11.2 с LocalExecutor и отдельной metadata database.
+- dbt Core baseline: 1.10.x; dbt-trino: 1.9.x.
+- Trino pinned release: 483.
+- Iceberg REST catalog: Apache Polaris.
+- Object storage: MinIO.
+- CDC: PostgreSQL logical replication → Debezium → Kafka → Iceberg consumer.
+- Analytical model: Kimball-style Gold; customer SCD Type 2.
+- BI: Superset → ClickHouse для dashboards; Superset → Trino для ad-hoc SQL.
+- CI: GitHub Actions.
+- ClickHouse — serving copy, не source of truth.
 
-AI-агент не должен реализовывать весь roadmap одним большим изменением. Каждая задача — отдельная небольшая итерация с тестами.
+Точные container tags и dependency versions принадлежат
+`docker-compose.yml`, Dockerfiles и `uv.lock`; roadmap фиксирует
+ответственность компонентов, а не дублирует каждый patch pin.
 
-### 6.1 Обязательный цикл агента
+## 7. Завершённые фазы
 
-1. Прочитать `AGENTS.md`, `ROADMAP.md`, релевантный ADR и текущий код.
-2. Сформулировать изменяемый scope.
-3. Не менять соседние компоненты без необходимости.
-4. Реализовать минимально достаточное решение.
-5. Добавить/обновить unit/integration tests.
-6. Запустить локальные проверки.
-7. Обновить документацию и `.env.example`, если появились новые настройки.
-8. Сообщить: что изменено, как проверить, известные ограничения.
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 0 | Bootstrap и engineering standards | done |
+| 1 | PostgreSQL, MinIO, Polaris, Trino и Iceberg core | done |
+| 2 | OLTP model и deterministic generator | done |
+| 3 | Batch ingestion: REST APIs, files/S3 и PostgreSQL snapshots | done |
+| 4 | Airflow orchestration | done |
+| 5 | dbt + Trino: Bronze → Silver → Gold | done |
+| 6 | ClickHouse serving layer | done |
+| 7 | Apache Superset BI | done |
+| 8 | PostgreSQL CDC: Debezium → Kafka → Iceberg | done |
 
-### 6.2 Definition of Done для любой задачи
+### Phase 0 — Bootstrap и инженерные стандарты
 
-- код воспроизводимо запускается из чистого clone;
-- секреты не находятся в Git;
-- конфигурация вынесена в env/config;
-- есть healthcheck, если добавлен сервис;
-- есть тесты для критической логики;
-- pipeline идемпотентен там, где это требуется;
-- логи содержат `run_id` / `batch_id` / dataset context;
-- документация обновлена;
-- `make lint`, `make test` и релевантные integration checks проходят.
+**Результат:** воспроизводимый Python repository с контролируемыми изменениями.
 
-### 6.3 Запреты для агента
+Реализовано:
 
-- не писать SQL-transformations внутрь Airflow DAG, если они относятся к dbt layer;
-- не использовать Spark для маленьких объемов без причины;
-- не хранить raw API response только в памяти — сохранять raw payload в Bronze/landing;
-- не делать `SELECT *` для production-like incremental extraction без объяснения;
-- не использовать `latest` Docker tags в закрепленном окружении;
-- не добавлять новый сервис без ADR с причиной и trade-offs;
-- не объединять ingest, transform и serving в один DAG/task;
-- не отключать тесты ради прохождения CI.
+- `pyproject.toml`, Python 3.12 и `uv.lock`;
+- ruff, mypy, pytest и pre-commit;
+- Makefile с безопасными entry points;
+- `.env.example` и правила secrets management;
+- GitHub Actions CI;
+- ADR mechanism и agent instructions.
 
----
+Acceptance criteria:
 
-# 7. Roadmap реализации
+- documented setup создаёт окружение через `uv sync`;
+- `make lint` и `make test` доступны локально;
+- CI запускает lint/tests и configuration checks;
+- repository не содержит committed secrets.
 
-## Phase 0 — Bootstrap и инженерные стандарты
+### Phase 1 — Core lakehouse
 
-**Цель:** создать репозиторий, в котором дальнейшие изменения контролируются автоматически.
+**Результат:** минимальный persistent Iceberg lakehouse на локальном Compose.
 
-### Задачи
+Реализовано:
 
-- создать публичный GitHub repository;
-- настроить Python project через `pyproject.toml`;
-- определить поддерживаемую Python-версию (рекомендуется 3.12 для совместимости с Airflow 2.11.2);
-- добавить `ruff`, `pytest`, `mypy` (постепенно), `pre-commit`;
-- создать `.env.example` и правила secrets management;
-- Makefile: `setup`, `lint`, `test`, `up`, `down`, `logs`, `reset`;
-- создать `AGENTS.md`, ADR template, PR template;
-- настроить GitHub Actions `ci.yml`.
+- PostgreSQL OLTP service;
+- MinIO buckets `landing`, `lakehouse`, `archive`, `rejected`;
+- Polaris REST catalog и metadata PostgreSQL;
+- Trino с Iceberg catalog через Polaris;
+- healthchecks, init jobs и persistent volumes;
+- `make smoke-core` для Trino → Polaris → Iceberg → MinIO.
 
-### CI v1
+Acceptance criteria:
 
-```text
-pull_request / push
-   |
-   +-- ruff check
-   +-- pytest unit
-   +-- mypy (initially non-blocking if needed)
-   +-- docker compose config
-```
+- core services поднимаются через `make up` и readiness checks;
+- Trino создаёт, записывает и читает Iceberg table;
+- данные сохраняются после restart;
+- credentials приходят из `.env`, а не из Git.
 
-### Acceptance criteria
+### Phase 2 — OLTP-модель и генератор данных
 
-- clone -> documented setup -> `make test` проходит;
-- CI автоматически запускается на PR;
-- repository не содержит secrets;
-- README содержит dev prerequisites.
+**Результат:** реалистичный, детерминированный e-commerce source.
 
-### Артефакты
+Таблицы:
 
-`README.md`, `AGENTS.md`, `pyproject.toml`, `Makefile`, `.github/workflows/ci.yml`, `docs/adr/0001-project-architecture.md`.
+- `customers`;
+- `products`;
+- `categories`;
+- `orders`;
+- `order_items`;
+- `payments`;
+- `shipments`.
 
----
+Реализовано:
 
-## Phase 1 — Core infrastructure: PostgreSQL + MinIO + Polaris + Trino + Iceberg
+- PK/FK/CHECK constraints и audit timestamps;
+- deterministic initial load с фиксированным seed;
+- controlled mutation workload с inserts, updates и hard deletes;
+- order/payment/shipment state transitions;
+- защита от неявного destructive reseed.
 
-**Цель:** получить минимальный работающий lakehouse.
+Acceptance criteria:
 
-### Задачи
+- одинаковый seed воспроизводит одинаковый dataset;
+- source rows проходят constraints;
+- update/delete workload можно запустить отдельно;
+- source grain и metrics документированы в `docs/data-model.md`.
 
-- Docker Compose network и volumes;
-- PostgreSQL 16+ как OLTP source;
-- MinIO buckets: `landing`, `lakehouse`, `archive`, `rejected`;
-- Apache Polaris как Iceberg REST catalog;
-- Trino 476+ с pinned release;
-- Iceberg catalog в Trino;
-- healthchecks и dependency conditions;
-- init scripts для bucket/database/schema creation.
+### Phase 3 — Batch ingestion
 
-### Проверочный сценарий
+**Результат:** идемпотентный raw ingestion для типовых batch sources.
 
-```sql
-CREATE SCHEMA iceberg.demo;
-CREATE TABLE iceberg.demo.healthcheck (...);
-INSERT INTO iceberg.demo.healthcheck VALUES (...);
-SELECT * FROM iceberg.demo.healthcheck;
-```
+Реализовано:
 
-### Acceptance criteria
+- REST sources: FX rates, marketing campaigns и delivery status;
+- deterministic mock API с pagination и fault injection;
+- supplier CSV, partner JSON, historical-orders Parquet и XLSX edge case;
+- PostgreSQL snapshots с keyset pagination и durable watermarks;
+- MinIO flow `landing → processing → archive | rejected`;
+- checksums, manifests, quarantine и logical-date backfill;
+- Bronze loading для API и PostgreSQL snapshot archive.
 
-- все core services поднимаются одной командой;
-- Trino создает и читает Iceberg table в MinIO;
-- после restart данные сохраняются;
-- service credentials не захардкожены;
-- `make smoke-core` проверяет end-to-end connectivity.
+Acceptance criteria:
 
----
+- повторный batch не создаёт дубли;
+- malformed file/row попадает в `rejected` с machine-readable reason;
+- API 429/500/timeout использует bounded retry policy;
+- backfill определяется explicit logical dates;
+- interrupted snapshot/load можно безопасно повторить.
 
-## Phase 2 — OLTP-модель и генератор данных
+Known scope boundary: supplier files завершают путь в raw archive и не
+загружаются в Iceberg Bronze; это сохранено как TD-002 в `PROGRESS.md`.
 
-**Цель:** создать реалистичный источник транзакционных данных.
+### Phase 4 — Airflow orchestration
 
-### Таблицы
+**Результат:** ingestion и lakehouse workflow координируются Airflow без
+дублирования transformation logic.
 
-- customers;
-- products;
-- categories;
-- orders;
-- order_items;
-- payments;
-- shipments.
-
-### Требования
-
-- PK/FK/constraints;
-- `created_at`, `updated_at`;
-- реалистичные статусы;
-- generator с deterministic seed;
-- режим initial load и continuous mutations;
-- updates и deletes обязательны для будущего CDC;
-- объемы на старте: 10k customers, 5k products, 100k orders.
-
-### Acceptance criteria
-
-- генератор воспроизводим;
-- данные проходят constraints;
-- можно генерировать update/delete workload;
-- базовые source metrics документированы.
-
----
-
-## Phase 3 — Batch ingestion: REST API + files/S3
-
-**Цель:** закрыть наиболее частые batch ingestion кейсы.
-
-### API sources
-
-1. FX rates.
-2. Marketing campaigns.
-3. Delivery status API.
-
-Для стабильности проекта внешние API можно обернуть mock-сервисом с реалистичным контрактом и fault injection.
-
-### File sources
-
-- CSV supplier prices;
-- JSON partner products;
-- Parquet historical orders;
-- optional XLSX как отдельный edge case.
-
-### Поток файлов
-
-`landing -> processing -> archive` или `rejected`.
-
-### Требования
-
-- raw payload сохраняется неизмененным;
-- metadata: source, ingestion timestamp, batch_id, file name, checksum;
-- schema validation;
-- duplicate-file detection;
-- pagination, timeout, rate-limit, retry для API;
-- quarantine для некорректных записей.
-
-### Acceptance criteria
-
-- повторный запуск одного batch не создает дублей;
-- сломанный файл попадает в rejected;
-- API 429/500 корректно retry-ится;
-- можно сделать backfill за диапазон дат.
-
----
-
-## Phase 4 — Airflow 2.11.2 orchestration
-
-**Цель:** вынести orchestration в Airflow без смешивания с transformation logic.
-
-### DAGs
+Реализованные DAGs:
 
 - `ingest_fx_api`;
 - `ingest_marketing_api`;
 - `ingest_delivery_api`;
 - `ingest_supplier_files`;
 - `ingest_postgres_snapshot`;
-- `lakehouse_bronze_ready` или dataset-triggering pattern.
+- `load_bronze`;
+- `transform_lakehouse`.
 
-### Требования
+Acceptance criteria:
 
-- TaskFlow API там, где уместно;
-- retries/exponential backoff;
-- pools для внешних API;
-- execution timeout;
-- catchup/backfill стратегия;
-- параметры даты через logical date/data interval;
-- Airflow Variables только для non-secret config; secrets через env/secret backend pattern;
-- DAG import tests.
+- DAGs успешно импортируются и проходят structure tests;
+- retry/backoff, timeout, pools и `max_active_runs` заданы явно;
+- logical date используется вместо wall-clock paths;
+- dataset-triggered Bronze и transform paths не дублируют бизнес-SQL;
+- независимые ingestion tasks изолируют сбои источников.
 
-### Acceptance criteria
+### Phase 5 — dbt + Trino: Bronze → Silver → Gold
 
-- DAG-и успешно парсятся в CI;
-- ручной backfill не создает дублей;
-- отдельное падение API не ломает независимые ingest pipeline;
-- failure context виден в логах.
+**Результат:** аналитическая модель над Iceberg с typed CDC state и бизнес
+reconciliation.
 
----
+Реализованные слои:
 
-## Phase 5 — dbt + Trino: Bronze -> Silver -> Gold
+- staging — casting, naming и source normalization;
+- intermediate — deduplication, joins, FX normalization и CDC state derivation;
+- core — facts, dimensions и customer SCD2;
+- marts — dashboard-ready aggregates.
 
-**Цель:** реализовать основное аналитическое моделирование.
+Ключевые Gold datasets:
 
-### dbt layers
-
-**staging:** типизация, naming, минимальная очистка.
-
-**intermediate:** deduplication, joins, normalization, business preparation.
-
-**core:** dimensions/facts.
-
-**marts:** бизнес-витрины.
-
-### Kimball-модель
-
-Dimensions:
-- `dim_customer` (SCD2);
-- `dim_product`;
-- `dim_date`;
-- `dim_campaign`.
-
-Facts:
-- `fact_orders`;
-- `fact_order_items`;
-- `fact_payments`;
-- `fact_shipments`.
-
-Marts:
+- `dim_customer`, `dim_product`, `dim_date`, `dim_campaign`;
+- `fact_orders`, `fact_order_items`, `fact_payments`, `fact_shipments`;
 - `mart_daily_sales`;
 - `mart_customer_ltv`;
 - `mart_marketing_roi`;
 - `mart_delivery_performance`.
 
-### dbt quality
+Acceptance criteria:
+
+- dbt parse/build/test path определён и воспроизводим;
+- CDC-backed customers/orders/payments обрабатывают create/update/delete;
+- SCD2 intervals не пересекаются и имеют одну current row;
+- Gold keys соответствуют текущему CDC state;
+- orders/payments и mart totals проходят business reconciliation;
+- model grain, contracts и lineage на уровне dbt задокументированы.
+
+### Phase 6 — ClickHouse serving layer
+
+**Результат:** rebuildable low-latency serving copy для BI.
+
+Реализовано:
+
+- versioned migrations и schema ledger;
+- mart-specific MergeTree tables;
+- least-privilege `omni_publisher` и read-only `superset_reader`;
+- full-snapshot staging load и atomic `EXCHANGE TABLES` publication;
+- single-mart и all-mart rebuild из Iceberg Gold;
+- Trino/Iceberg vs ClickHouse benchmark.
+
+Acceptance criteria:
+
+- repeated publication не создаёт дубли;
+- reader не видит partial refresh;
+- ClickHouse полностью пересобирается из Iceberg Gold;
+- BI account не имеет write permissions;
+- outage recovery документирован в runbook.
+
+### Phase 7 — Apache Superset
+
+**Результат:** воспроизводимый BI layer и dashboards as code.
+
+Реализовано:
+
+- Superset → ClickHouse primary connection;
+- Superset → Trino ad-hoc connection;
+- sanitized datasets и dashboard bundles в repository;
+- idempotent bootstrap через Compose init job;
+- Sales, Executive, Customer и Marketing dashboards.
+
+Acceptance criteria:
+
+- connection использует Docker-network hostnames и least-privilege accounts;
+- metadata/assets восстанавливаются из clean repository state плюс `.env`;
+- integration test проверяет bootstrap, ClickHouse canary и Trino SQL Lab path;
+- четыре dashboard screenshots сохранены в `docs/screenshots/` и показаны в
+  основном README как обязательный capstone artifact.
+
+### Phase 8 — CDC: PostgreSQL → Debezium → Kafka → Iceberg
+
+**Результат:** restart-safe CDC для ключевых OLTP entities и согласованный
+аналитический refresh.
+
+Реализовано:
+
+- PostgreSQL logical replication initialization;
+- pinned Kafka в single-node KRaft mode;
+- Debezium PostgreSQL connector;
+- topics для customers, orders и payments;
+- persistent Kafka/Connect state;
+- route-aware CDC contract и insert-only Iceberg Bronze table;
+- offset commit только после successful Iceberg MERGE;
+- typed/delete-aware current state по PostgreSQL LSN и Kafka offsets;
+- customer SCD2 lifecycle, hard-delete handling и recreate semantics;
+- stable lag-zero boundary для dbt;
+- atomic ClickHouse republish только после successful dbt graph/tests.
+
+Acceptance criteria:
+
+- source changes появляются в Bronze без повторного full scan;
+- initial Debezium snapshot формирует baseline;
+- create/update/delete корректно меняют analytical state;
+- duplicate delivery не искажает финальный результат;
+- consumer restart продолжает работу с committed offsets;
+- out-of-order event time не заменяет source ordering;
+- refresh не смешивает разные Kafka frontiers;
+- recovery и destructive reset semantics описаны в runbook.
+
+## 8. Capstone completion scenario
+
+Проект считается завершённым в выбранном scope, когда воспроизводимо
+демонстрируется следующий путь:
+
+1. PostgreSQL содержит детерминированный OLTP baseline.
+2. Batch paths сохраняют raw API и PostgreSQL snapshot payloads в MinIO archive
+   и загружают поддерживаемые sources в Iceberg Bronze.
+3. Создание, изменение или удаление customer/order/payment фиксируется Debezium
+   через PostgreSQL WAL и попадает в Kafka.
+4. Restart-safe consumer сохраняет immutable CDC event в Iceberg Bronze и только
+   после успешной записи подтверждает offset.
+5. Airflow фиксирует здоровую стабильную Kafka boundary.
+6. dbt строит typed/delete-aware Silver, Gold facts/dimensions и четыре marts;
+   critical dbt tests и reconciliation проходят.
+7. Publication process загружает полный mart snapshot в staging ClickHouse table
+   и атомарно переключает serving table.
+8. Superset читает обновлённые KPI через read-only ClickHouse connection.
+9. Повторный логический запуск не создаёт дубли и приводит систему к тому же
+   результату.
+10. Основные failure/recovery procedures доступны в runbooks.
 
-- unique;
-- not_null;
-- relationships;
-- accepted_values;
-- source freshness;
-- custom business tests.
+Dashboard screenshots завершают визуальное portfolio evidence, но не заменяют
+автоматические проверки данных и инфраструктуры.
 
-### Acceptance criteria
-
-- `dbt build` проходит;
-- SCD2 корректно хранит историю;
-- marts имеют documentation/description;
-- lineage виден хотя бы на уровне dbt docs;
-- бизнес reconciliation тестирует orders vs payments.
-
----
-
-## Phase 6 — ClickHouse serving layer
-
-**Цель:** отделить исторический lakehouse от low-latency BI-serving.
-
-### Задачи
-
-- создать `analytics` database;
-- выбрать MergeTree engines;
-- определить `ORDER BY`, partitioning и TTL только там, где оправдано;
-- сделать incremental publishing из Gold Iceberg в ClickHouse;
-- реализовать marts: sales, funnel, LTV, marketing, delivery;
-- read-only user `superset_reader`.
-
-### Что измерить
-
-Сравнить один и тот же BI query:
-
-- Trino -> Iceberg;
-- ClickHouse serving table.
-
-Зафиксировать latency и explain plan.
-
-### Acceptance criteria
-
-- публикация идемпотентна;
-- ClickHouse можно полностью пересобрать из Iceberg Gold;
-- Iceberg остается source of truth;
-- BI user не имеет write permissions.
-
----
-
-## Phase 7 — Apache Superset
-
-**Цель:** создать полноценный BI-слой без внешнего сетевого доступа.
-
-### Connections
-
-1. Superset -> ClickHouse: основной dashboard source.
-2. Superset -> Trino: ad-hoc exploration.
-
-Для ClickHouse использовать рекомендуемый `clickhouse-connect` driver.
-
-### Dashboards
-
-1. Executive: GMV, revenue, margin, orders, AOV, conversion.
-2. Sales: revenue by date/category/region, top products.
-3. Customer: new/returning, retention, LTV, cohorts/RFM.
-4. Marketing: impressions, clicks, CTR, CAC, ROAS.
-5. Funnel: visit -> view -> cart -> checkout -> purchase.
-
-### Acceptance criteria
-
-- Superset подключается к ClickHouse по Docker network hostname;
-- dashboards не требуют публикации ClickHouse наружу;
-- metadata export хранится в репозитории;
-- screenshots dashboards добавлены в README.
-
----
-
-## Phase 8 — CDC: PostgreSQL -> Debezium -> Kafka -> Iceberg
-
-**Цель:** заменить polling для ключевых OLTP-таблиц настоящим CDC.
-
-### Задачи
-
-- включить PostgreSQL logical replication;
-- настроить Debezium PostgreSQL connector;
-- topics для customers/orders/payments;
-- хранение offsets/config;
-- consumer/stream ingestion в Bronze;
-- обработка create/update/delete;
-- deduplication по event identity/LSN strategy;
-- recovery после restart.
-
-### Сценарии
-
-- update order status;
-- delete/soft-delete customer;
-- duplicate event;
-- consumer restart;
-- schema change;
-- out-of-order event.
-
-### Acceptance criteria
-
-- изменения source появляются в Bronze без full scan;
-- повторная доставка не портит итоговое состояние;
-- delete semantics документирована;
-- restart не теряет committed events.
-
----
-
-## Phase 9 — Clickstream + Spark
-
-**Цель:** добавить workload, где Spark действительно оправдан.
-
-### Events
-
-- visit;
-- product_view;
-- search;
-- add_to_cart;
-- checkout;
-- purchase.
-
-### Pipeline
-
-`Kafka/landing files -> Spark -> sessionization/dedup -> Iceberg Silver -> dbt Gold`.
-
-### Обязательные темы
-
-- event time vs processing time;
-- late-arriving events;
-- deduplication;
-- session window;
-- partition sizing;
-- small files;
-- Spark explain plan;
-- broadcast vs shuffle join на отдельном benchmark.
-
-### Acceptance criteria
-
-- funnel строится из event data;
-- late event корректно меняет нужную сессию в заданном окне;
-- Spark job тестируется на deterministic fixture;
-- memory/resource settings адаптированы к 32 GB ноутбуку.
-
----
-
-## Phase 10 — Data Quality, contracts и failure engineering
-
-**Цель:** научиться не только загружать данные, но и безопасно эксплуатировать pipelines.
-
-### Data quality levels
-
-**Source:** schema, nullability, volume, freshness.
-
-**Pipeline:** duplicates, row counts, referential integrity, completeness.
-
-**Business:** revenue/payment reconciliation, delivery dates, non-negative amounts.
-
-### Data contracts
-
-Для ключевых datasets YAML contract:
-
-- owner;
-- schema;
-- types;
-- nullability;
-- SLA freshness;
-- compatibility policy.
-
-### Fault injection scenarios
-
-- API 500/timeout/429;
-- malformed CSV;
-- missing S3 object;
-- duplicate file;
-- Kafka duplicate;
-- ClickHouse unavailable;
-- dbt test failure;
-- Trino failure;
-- late-arriving dimension/fact;
-- schema evolution;
-- partial batch.
-
-### Acceptance criteria
-
-Для каждого сценария описаны:
-
-- expected behavior;
-- retry policy;
-- idempotency behavior;
-- quarantine/DLQ behavior;
-- alert;
-- recovery runbook.
-
----
-
-## Phase 11 — Iceberg maintenance и performance engineering
-
-**Цель:** получить практический опыт эксплуатации lakehouse.
-
-### Задачи
-
-- snapshots/time travel;
-- rollback после ошибочной загрузки;
-- compact small files через optimize;
-- expire snapshots;
-- remove orphan files;
-- partition evolution;
-- schema evolution;
-- benchmark partition pruning/predicate pushdown;
-- собрать before/after metrics.
-
-### Airflow DAG
-
-`iceberg_maintenance` с отдельными задачами и безопасными retention settings.
-
-### Acceptance criteria
-
-- создан сценарий с большим количеством small files;
-- optimize дает измеримое улучшение;
-- rollback восстанавливает ошибочно измененный dataset;
-- maintenance не удаляет актуальные данные.
-
----
-
-## Phase 12 — Observability и lineage
-
-**Цель:** сделать платформу диагностируемой.
-
-### Prometheus/Grafana
-
-Метрики:
-
-- DAG success/failure/duration;
-- dataset freshness;
-- Kafka consumer lag;
-- Trino query latency/errors/memory;
-- ClickHouse query latency;
-- PostgreSQL connections/WAL;
-- MinIO storage/object metrics.
-
-Dashboards:
-
-1. Data Platform Health.
-2. Pipeline SLA/Freshness.
-3. Trino/ClickHouse Performance.
-4. Kafka/CDC Health.
-
-### OpenLineage + Marquez
-
-Минимальная цепочка:
-
-`PostgreSQL.orders -> bronze.orders -> silver.orders -> fact_orders -> mart_daily_sales -> ClickHouse`.
-
-### Acceptance criteria
-
-- можно определить, где упал pipeline и какой dataset устарел;
-- lineage показывает upstream/downstream для ключевой витрины;
-- runbook описывает диагностику трех типовых инцидентов.
-
----
-
-## Phase 13 — GitHub Actions CI/CD v2
-
-**Цель:** получить production-like delivery process.
-
-### Workflow 1: `ci.yml`
-
-На каждый PR:
-
-- checkout;
-- Python dependency cache;
-- ruff;
-- mypy;
-- pytest unit;
-- Airflow DAG import tests;
-- dbt parse/compile;
-- Docker Compose config validation.
-
-### Workflow 2: `integration.yml`
-
-На PR в `main` или вручную:
-
-- поднять минимальный service subset на GitHub-hosted Linux runner;
-- PostgreSQL + MinIO + catalog + Trino;
-- выполнить smoke/integration tests;
-- teardown always.
-
-### Workflow 3: `docker-images.yml`
-
-После merge в main/tag:
-
-- build custom images;
-- security scan;
-- push versioned images в GHCR;
-- запрещены mutable-only `latest` dependencies.
-
-### Workflow 4: `release.yml`
-
-- semantic tag/version;
-- changelog;
-- release notes;
-- compose manifest versions.
-
-### CD стратегия для WSL2
-
-Основной вариант: локальный `make deploy`/`make upgrade` после успешного CI.
-
-Опционально: self-hosted GitHub runner только для доверенных защищенных событий. Для публичного репозитория не разрешать fork PR выполнять job на локальном runner.
-
-### Acceptance criteria
-
-- PR нельзя merge без обязательных checks;
-- integration test поднимает реальную минимальную инфраструктуру;
-- images versioned и воспроизводимы;
-- deployment procedure документирована.
-
----
-
-## Phase 14 — Data Vault 2.0 mini-domain
-
-**Цель:** получить знакомство с Data Vault без перегрузки основной архитектуры.
-
-Реализовать для customer-order домена:
-
-- `hub_customer`;
-- `hub_order`;
-- `link_customer_order`;
-- `sat_customer_details`;
-- `sat_order_details`.
-
-Сравнить с Kimball:
-
-- ingestion/history;
-- complexity;
-- query ergonomics;
-- когда какой подход использовать.
-
-Результат — отдельный ADR, а не замена основной Gold-модели.
-
----
-
-## Phase 15 — Production simulation / capstone
-
-**Цель:** проверить систему как единый продукт.
-
-### Scenario A — обычный день
-
-- OLTP continuous workload;
-- CDC;
-- API loads;
-- supplier file;
-- clickstream;
-- dbt builds;
-- ClickHouse publish;
-- Superset dashboards.
-
-### Scenario B — incident day
-
-Одновременно:
-
-- API дает 429;
-- supplier CSV меняет schema;
-- consumer перезапускается;
-- ClickHouse недоступен 10 минут;
-- один dbt business test падает.
-
-Нужно восстановить систему без потери/дублирования данных.
-
-### Scenario C — backfill
-
-Пересчитать 30 дней исторических данных с контролем нагрузки и без дублирования.
-
-### Итоговые метрики
-
-- end-to-end freshness;
-- pipeline success rate;
-- records/sec ingestion;
-- Trino query latency;
-- ClickHouse query latency;
-- storage size;
-- small-file count;
-- Spark processing time.
-
----
-
-## Phase 16 — Airflow 2 -> Airflow 3 migration exercise
-
-**Цель:** превратить обязательное использование Airflow 2 в дополнительный коммерчески полезный кейс.
-
-- inventory deprecated APIs;
-- provider compatibility audit;
-- DAG compatibility tests;
-- migration branch;
-- обновление Docker images/config;
-- regression run;
-- ADR с breaking changes и rollback plan.
-
-Airflow 2.11.2 остается baseline проекта, migration фиксируется отдельным release/branch.
-
----
-
-## Phase 17 — dbt Core 1.10 -> dbt v2 migration exercise
-
-**Цель:** убрать накопленные deprecations и перевести аналитический проект на
-воспроизводимый dbt v2 runtime без изменения бизнес-семантики моделей.
-
-Миграция начинается только после появления стабильного dbt v2 release и
-подтвержденного пути работы с Trino; dbt Core 1.10.x остается baseline до
-отдельного migration release/branch.
-
-### Задачи
-
-- inventory всех dbt deprecations и behavior flags на последнем поддерживаемом
-  dbt v1;
-- перенести аргументы generic tests под `arguments` и добиться parse без
-  `MissingArgumentsPropertyInGenericTestDeprecation`;
-- выбрать и зафиксировать ADR для dbt v2 distribution (`dbt` или `dbt OSS`),
-  способа установки/pinning и совместимости с локальной Apache 2.0 stack;
-- проверить поддержку Trino, Iceberg REST catalog/Polaris и используемых
-  materializations/macros;
-- обновить reproducible dependency/install path, CI и runtime images без
-  floating versions;
-- проверить совместимость `manifest.json` и `run_results.json` с Airflow
-  runner, документацией и тестовыми инструментами;
-- сравнить результаты dbt v1 и v2 на deterministic fixture: модели, тесты,
-  row counts и ключевые business reconciliation;
-- выполнить полный regression run и задокументировать rollback на закрепленный
-  dbt Core 1.x baseline.
-
-### Acceptance criteria
-
-- `dbt parse`, `dbt compile`, `dbt build` и `dbt test` проходят на dbt v2 с
-  Trino против disposable lakehouse schemas;
-- проект не использует удаленные в dbt v2 deprecated features и не выдает
-  migration deprecation warnings;
-- Airflow runner корректно читает dbt v2 artifacts и сохраняет прежний
-  failure/success contract;
-- generated SQL и бизнес-результаты эквивалентны зафиксированному dbt v1
-  baseline либо каждое намеренное отличие документировано;
-- CI, lock/pin и инструкции clean-clone setup воспроизводят выбранный dbt v2
-  runtime;
-- ADR содержит compatibility matrix, breaking changes и проверенный rollback
-  plan.
-
----
-
-## Phase 18 — GitLab CI migration (позже)
-
-**Цель:** перенести существующую CI-модель, не переписывая инженерные правила.
-
-Соответствие:
-
-| GitHub Actions | GitLab CI |
-|---|---|
-| workflow | pipeline |
-| job | job |
-| GitHub-hosted runner | shared runner |
-| self-hosted runner | GitLab Runner |
-| repository secrets | CI/CD variables |
-| GHCR | GitLab Container Registry |
-| required checks | merge request pipeline rules |
-
-Артефакт этапа: `.gitlab-ci.yml` с теми же lint/test/integration/build gates.
-
----
-
-# 8. Порядок выполнения и ориентировочные итерации
-
-Roadmap лучше выполнять не по календарю, а по завершенным вертикальным slices.
-
-| Итерация | Результат |
-|---|---|
-| 1 | Repository + CI + standards |
-| 2 | Core lakehouse работает end-to-end |
-| 3 | OLTP generator + batch sources |
-| 4 | Airflow ingestion |
-| 5 | dbt Silver/Gold + Kimball |
-| 6 | ClickHouse + Superset |
-| 7 | CDC + Kafka |
-| 8 | Spark clickstream |
-| 9 | Data Quality + contracts + failure scenarios |
-| 10 | Iceberg maintenance/performance |
-| 11 | Observability + lineage |
-| 12 | CI/CD hardening + GHCR |
-| 13 | Data Vault mini-domain |
-| 14 | Capstone production simulation |
-| 15 | Airflow 3 migration |
-| 16 | dbt v2 migration |
-| 17 | GitLab CI migration / Kubernetes optional |
-
-Если работать по 8-12 часов в неделю, не привязывать качество к жесткому сроку: каждая итерация завершается только после acceptance criteria.
-
-# 9. Приоритеты: что обязательно, а что опционально
-
-## Must-have для portfolio v1
-
-- PostgreSQL source;
-- API + S3/file ingestion;
-- Airflow 2.11.2;
-- MinIO;
-- Iceberg;
-- Polaris;
-- Trino;
-- dbt Core;
-- Kimball + SCD2;
-- ClickHouse;
-- Superset;
-- GitHub Actions;
-- unit/integration tests;
-- idempotency/backfill;
-- data quality;
-- README + architecture diagram.
-
-## Portfolio v2
-
-- Kafka;
-- Debezium;
-- Spark;
-- Iceberg maintenance;
-- Prometheus/Grafana;
-- OpenLineage/Marquez;
-- performance benchmarks;
-- fault injection.
-
-## Later
-
-- Data Vault mini-domain;
-- Airflow 3 migration;
-- dbt v2 migration после stable release и подтверждения Trino compatibility;
-- GitLab CI;
-- Kubernetes;
-- Terraform только при появлении реальной cloud-инфраструктуры.
-
-# 10. GitHub branching и delivery model
+## 9. Testing и validation model
 
 ```text
-main                 production-like stable state
+                  E2E acceptance paths
+                /                      \
+       live integration tests      dbt business tests
+              /                           \
+       unit tests                 contracts + reconciliation
+```
+
+Минимальные validation entry points:
+
+```bash
+make lint
+make test
+make dbt-parse
+make airflow-test
+
+docker compose config
+make smoke-core       # live core required
+make integration      # live profiles required for their tests
+```
+
+Правила:
+
+- команда считается прошедшей только после фактического successful run;
+- unit tests не зависят от public APIs или containers;
+- integration tests используют disposable schemas и rollback journals;
+- deterministic fixtures используют fixed seeds и timestamps;
+- destructive tests не должны сбрасывать shared production-like schemas;
+- новые проверки добавляются только для delivered scope или его maintenance.
+
+## 10. Известные ограничения и технический долг
+
+Текущий status и полный реестр принадлежат [PROGRESS.md](PROGRESS.md). На момент
+фиксации capstone существенны следующие ограничения:
+
+- clean-host bootstrap зависит от восстановления воспроизводимой поставки
+  pinned MinIO images (TD-001);
+- supplier file sources не загружаются из archive в Iceberg Bronze (TD-002);
+- Bronze snapshot history и CDC microbatches требуют controlled maintenance при
+  длительной эксплуатации (TD-003, TD-006);
+- dbt contracts документированы и тестируются, но не полностью enforced
+  adapter-ом (TD-004);
+- отдельные generic-test definitions сохраняют dbt v2 migration debt (TD-005).
+
+Capstone status не закрывает и не скрывает эти пункты. Технический долг можно
+устранять как maintenance, если изменение не добавляет новую platform subsystem
+и не восстанавливает удалённую фазу как инициативу.
+
+## 11. Maintenance и delivery policy
+
+Основная ветка содержит стабильное состояние capstone:
+
+```text
+main
   ^
   |
 pull request
   ^
   |
-feature/<issue>-...
+fix/<issue>-... | docs/<issue>-... | chore/<issue>-...
 ```
 
-Правила:
+Требования к изменениям:
 
-- изменения только через PR;
-- минимум один green CI перед merge;
-- Conventional Commits желательно;
-- squash merge;
-- GitHub Issues соответствуют roadmap tasks;
-- milestone соответствует Phase;
-- ADR нужен для значимого архитектурного решения.
+- focused PR и green применимые CI checks;
+- pinned/reproducible dependencies;
+- tests вместе с исправлением поведения;
+- documentation update при изменении usage или operations;
+- отсутствие новых secrets;
+- ADR до изменения архитектурной границы;
+- сохранение Iceberg source-of-truth и ClickHouse rebuildability;
+- честное обновление `PROGRESS.md` для debt/status changes.
 
-Labels:
+Remote issues, существующие только для реализации удалённого future scope,
+закрываются как `not planned` со ссылкой на ADR 0009; соответствующие milestones
+закрываются или выводятся из использования.
 
-`area/airflow`, `area/dbt`, `area/trino`, `area/iceberg`, `area/kafka`, `area/spark`, `area/clickhouse`, `area/bi`, `area/infra`, `type/bug`, `type/feature`, `type/test`, `priority/p0..p2`.
+## 12. Документационный пакет
 
-# 11. Testing pyramid
+| Документ | Ответственность |
+| --- | --- |
+| `README.md` | Portfolio overview, implemented architecture, quick start и evidence |
+| `ROADMAP.md` | Финальный scope, completed phases и acceptance criteria |
+| `PROGRESS.md` | Текущее состояние и открытый technical debt |
+| `docs/adr/` | Архитектурные решения и история изменения scope |
+| `docs/data-model.md` | Grain, facts, dimensions и source/model semantics |
+| `docs/data-contracts.md` | Source и modeled-data contracts |
+| `docs/runbooks/` | Recovery и типовые operational procedures |
+| `docs/benchmarks/` | Воспроизводимые performance comparisons |
+| `docs/screenshots/` | Визуальные dashboard artifacts и capture procedure |
+| `AGENTS.md`, `docs/agent/` | Нормативные правила для coding agents |
 
-```text
-                  E2E
-               /       \
-        integration tests
-       /                 \
- unit tests + dbt tests + contract tests
-```
+Audit trail исходного расширенного roadmap сохраняется в Git history. Активная
+документация описывает только текущее состояние и выбранную границу capstone.
 
-### Unit
+## 13. Отдельные проекты
 
-- Python transforms/parsers;
-- API clients;
-- file validators;
-- generators;
-- Spark functions.
-
-### Integration
-
-- PostgreSQL -> ingestion;
-- MinIO -> Iceberg -> Trino;
-- dbt -> Trino;
-- Gold -> ClickHouse;
-- Debezium -> Kafka;
-- Superset connectivity smoke test.
-
-### E2E
-
-`source mutation -> CDC/batch -> Iceberg -> dbt -> ClickHouse -> query KPI`.
-
-# 12. Security baseline
-
-- `.env` в `.gitignore`;
-- `.env.example` без реальных secrets;
-- отдельные service accounts;
-- принцип least privilege;
-- Superset user только SELECT;
-- GitHub Actions secrets для registry/remote credentials;
-- pinned action major versions и dependency pinning;
-- network ports наружу публиковать только необходимые dev UI;
-- MinIO/PostgreSQL/ClickHouse admin endpoints не публиковать без необходимости.
-
-# 13. Documentation package
-
-К концу проекта должны существовать:
-
-- `README.md` — portfolio overview;
-- `docs/architecture.md` — C4/container-level architecture;
-- `docs/data-model.md` — facts/dimensions и grain;
-- `docs/data-contracts.md`;
-- `docs/sla-slo.md`;
-- ADR directory;
-- runbooks: failed API, Kafka lag, dbt failure, ClickHouse outage, bad supplier file;
-- benchmark report;
-- screenshots Superset/Grafana/Marquez;
-- sample incident postmortem.
-
-# 14. Финальные portfolio deliverables
-
-1. Публичный GitHub repository.
-2. Architecture diagram.
-3. One-command local bootstrap для core environment.
-4. Demonstration dataset generator.
-5. 5 Superset dashboards.
-6. Grafana monitoring dashboards.
-7. Marquez lineage screenshot.
-8. GitHub Actions green pipeline.
-9. Performance comparison Trino/Iceberg vs ClickHouse.
-10. Incident/backfill demonstration.
-11. ADR collection.
-12. Short demo video 5-10 минут.
-
-# 15. Что считать успешным завершением проекта
-
-Проект завершен не тогда, когда «все контейнеры запустились», а когда можно показать следующий сценарий:
-
-1. Создается заказ в PostgreSQL.
-2. Debezium фиксирует изменение через WAL.
-3. Событие попадает в Kafka.
-4. Bronze сохраняет immutable/raw representation.
-5. Silver формирует очищенное текущее состояние.
-6. dbt обновляет fact/dimension модели.
-7. Gold формирует бизнес-витрину.
-8. Publication process обновляет ClickHouse.
-9. Superset показывает изменившийся KPI.
-10. Airflow отображает orchestration state.
-11. Grafana показывает health/freshness.
-12. Marquez показывает lineage.
-13. Повторный запуск не создает дублей.
-14. Backfill и failure recovery описаны и воспроизводимы.
-
-Если этот сценарий воспроизводится из чистого clone и документирован, проект уже можно уверенно использовать как серьезную portfolio-работу Data Engineer.
-
-# 16. Первый backlog для AI-агента
-
-Не начинать с Kafka/Spark. Первые задачи должны создать короткую рабочую вертикаль.
-
-### Epic 0 — Repository foundation
-- #1 Bootstrap repository and Python tooling.
-- #2 Add Makefile and environment conventions.
-- #3 Add GitHub Actions CI.
-- #4 Add ADR and AGENTS.md conventions.
-
-### Epic 1 — Core lakehouse
-- #5 Add PostgreSQL source container.
-- #6 Add MinIO and initialize buckets.
-- #7 Add Polaris catalog.
-- #8 Add Trino and Iceberg catalog.
-- #9 Add core smoke test.
-
-### Epic 2 — First end-to-end dataset
-- #10 Create orders source schema and seed generator.
-- #11 Implement batch extraction to landing.
-- #12 Load orders into Iceberg Bronze.
-- #13 Create dbt staging/Silver model.
-- #14 Create `fact_orders` Gold model.
-- #15 Publish `mart_daily_sales` to ClickHouse.
-- #16 Connect Superset and create first Revenue dashboard.
-
-Только после #16 переходить к Airflow orchestration, нескольким источникам, CDC и Spark.
-
-# 17. Рекомендуемый prompt для запуска каждой задачи агентом
-
-Использовать шаблон:
-
-```text
-Implement GitHub issue <N> for OmniRetail Data Platform.
-
-Before changing code:
-1. Read AGENTS.md, ROADMAP.md and relevant ADRs.
-2. Inspect the existing implementation and tests.
-3. Keep the scope limited to this issue.
-
-Requirements:
-- preserve existing behavior unless the issue explicitly changes it;
-- use pinned/reproducible dependencies;
-- do not hardcode secrets;
-- add or update tests;
-- add healthchecks/config validation where applicable;
-- update documentation and .env.example if configuration changes;
-- prefer idempotent operations;
-- do not introduce a new technology without an ADR.
-
-Before finishing:
-- run the relevant lint/tests/smoke checks;
-- report changed files;
-- report commands executed and their result;
-- report known limitations and the next logical issue.
-```
-
----
-
-## Технические решения, зафиксированные на старте
-
-- BI: Apache Superset вместо DataLens.
-- CI: GitHub + GitHub Actions вместо GitLab на первой версии.
-- Container registry: GHCR.
-- GitLab CI: отдельный поздний migration exercise.
-- Airflow baseline: 2.11.2; затем отдельная миграция на Airflow 3.
-- dbt Core: baseline 1.10.x, адаптер dbt-trino 1.9.x; диапазоны закреплены в `pyproject.toml`, точные версии — в `uv.lock`.
-- dbt v2: отдельная Phase 17 migration exercise после stable release и подтверждения Trino compatibility; выбор distribution и rollback оформляются ADR, а dbt Core 1.10.x остается baseline до migration release.
-- Trino: требование 476+, конкретный release pin фиксируется в compose и Dependabot/Renovate обновляет через PR; initial target — 483.
-- ClickHouse: serving layer, не master storage.
-- Iceberg: source of truth.
-- Superset -> ClickHouse: основной BI path; Superset -> Trino: ad-hoc path.
-- Grafana: только observability, не основной BI.
-- Spark: только для оправданных объемов/алгоритмов.
-- Kubernetes: после полной Docker Compose версии.
+Продолжение работы по отдельным темам обработки данных намеренно вынесено в
+самостоятельные репозитории этого профиля. Они имеют собственные границы,
+архитектурные решения и критерии завершения и не являются незавершёнными фазами
+OmniRetail.

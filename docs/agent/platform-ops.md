@@ -1,10 +1,10 @@
-# Agent guide — Platform operations (Docker, Make, Git, CI, observability, lineage)
+# Agent guide — Platform operations (Docker, Make, Git, CI, diagnostics)
 
 Part of the repository agent rules, split out of the monolithic `AGENTS.md`.
 
 Read this guide before working on: `docker-compose.yml`, service profiles and
 healthchecks, the `Makefile`, Git branches/commits/PRs, GitHub Actions
-workflows, Prometheus/Grafana observability, or OpenLineage/Marquez lineage.
+workflows, or runtime diagnostics for delivered services.
 
 Precedence: explicit user request > `AGENTS.md` core > accepted ADRs > this
 guide > `ROADMAP.md` > existing implementation conventions. On conflict with
@@ -21,14 +21,15 @@ Docker Compose is the primary local orchestration mechanism.
 
 ### 12.1 Compose profiles
 
-Preserve logical profiles:
+Preserve the implemented logical profiles:
 
 - `core`;
 - `orchestration`;
 - `streaming`;
-- `spark`;
-- `observability`;
 - `bi`.
+
+A new profile for an excluded subsystem requires an ADR that explicitly
+supersedes ADR 0009.
 
 Do not make all services start by default if they are not required.
 
@@ -48,7 +49,8 @@ Physical RAM: 32 GB
 
 Do not allocate excessive heap/memory defaults.
 
-Spark, Kafka, Trino, Airflow, Superset, Grafana, and Marquez do not need to run simultaneously during early phases.
+Kafka, Trino, Airflow, ClickHouse, and Superset do not need to run
+simultaneously for every maintenance task.
 
 ### 12.3 Healthchecks
 
@@ -89,7 +91,7 @@ A reset command may destroy local state only when clearly named and documented.
 
 Prefer stable entry points for developer actions.
 
-Expected commands should evolve toward:
+Stable developer entry points include:
 
 ```bash
 make setup
@@ -104,7 +106,6 @@ make reset
 make smoke-core
 make dbt-build
 make airflow-test
-make deploy
 ```
 
 Commands should be:
@@ -118,51 +119,51 @@ Do not hide destructive operations under harmless names.
 
 ---
 
-## 33. Observability rules
+## 33. Runtime diagnostics
 
-Prometheus and Grafana are used for platform observability.
+A dedicated Prometheus/Grafana subsystem is not implemented and is outside the
+final scope. Do not claim platform-wide monitoring or add a monitoring service
+through routine maintenance.
 
-Expected metrics eventually include:
+Delivered diagnostics rely on:
 
-- DAG success/failure/duration;
-- data freshness;
-- Kafka consumer lag;
-- Trino latency/errors/memory;
-- ClickHouse latency;
-- PostgreSQL connections/WAL;
-- MinIO storage/object metrics.
+- Docker healthchecks and service status;
+- structured pipeline/task logs;
+- Airflow run and task state;
+- Kafka consumer-group lag and connector/task status;
+- dbt tests and artifacts;
+- smoke/integration checks;
+- documented recovery procedures.
 
-Dashboards should help answer:
-
-- what failed?
-- when?
-- which dataset is stale?
-- what is the upstream cause?
-- what is the downstream impact?
+Maintenance changes must preserve enough context to identify what failed,
+which dataset or service is affected, and how to recover. Adding a dedicated
+monitoring subsystem requires an ADR that explicitly supersedes ADR 0009.
 
 ---
 
-## 34. Lineage rules
+## 34. Lineage documentation
 
-OpenLineage + Marquez are used for lineage.
-
-The target lineage should eventually make a chain similar to this visible:
+A dedicated OpenLineage/Marquez subsystem is not implemented and is outside the
+final scope. Logical lineage is documented through dbt dependencies/artifacts,
+the data model, and architecture documentation, including the chain:
 
 ```text
 PostgreSQL.orders
     ->
-bronze.orders
+Iceberg Bronze CDC/snapshot state
     ->
-silver.orders
+dbt Silver
     ->
-fact_orders
+gold.fact_orders
     ->
-mart_daily_sales
+analytics.mart_daily_sales
     ->
 ClickHouse
 ```
 
-Do not add lineage instrumentation before core pipelines are stable unless the roadmap phase explicitly calls for it.
+Preserve that documented lineage when maintaining models or publication paths.
+Adding an automated lineage service requires an ADR that explicitly supersedes
+ADR 0009.
 
 ---
 
@@ -177,7 +178,7 @@ main
 pull request
   ^
   |
-feature/<issue>-description
+fix/<issue>-description | docs/<issue>-description | chore/<issue>-description
 ```
 
 Changes should normally go through pull requests.
@@ -198,7 +199,6 @@ Avoid:
 ### 35.1 Suggested commit types
 
 ```text
-feat:
 fix:
 refactor:
 test:
@@ -208,13 +208,15 @@ chore:
 perf:
 ```
 
+Use `feat:` only after an accepted ADR explicitly reopens the relevant scope.
+
 Examples:
 
 ```text
-feat(ingestion): add supplier CSV validator
-test(dbt): add order payment reconciliation test
-ci(actions): add core integration workflow
-docs(adr): document ClickHouse serving strategy
+fix(ingestion): preserve watermark on failed upload
+test(dbt): strengthen order payment reconciliation
+ci(actions): pin setup action version
+docs(runbook): clarify CDC restart recovery
 ```
 
 ---
@@ -225,24 +227,28 @@ GitHub Actions is the primary CI system.
 
 ### 36.1 PR CI
 
-Expected checks eventually include:
+The delivered PR CI includes:
 
 - checkout;
 - Python dependency cache;
-- ruff;
-- mypy;
-- pytest unit;
-- Airflow DAG import tests;
-- dbt parse/compile;
+- ruff check and format validation;
+- non-blocking mypy;
+- pytest;
+- Airflow DAG import/structure tests;
+- offline dbt parse;
 - Docker Compose config validation.
 
-### 36.2 Integration CI
+Do not document a CI check as delivered unless the workflow actually runs it.
 
-Integration workflows may start a minimal infrastructure subset on GitHub-hosted Linux runners.
+### 36.2 Integration validation
 
-Keep the subset minimal.
+Full-stack hosted integration CI is not delivered and must not be claimed.
+`make integration` is the documented local entry point against the relevant
+live profiles.
 
-Always tear down services.
+If a maintenance task adds a hosted integration workflow, keep the service
+subset minimal and always tear down services. A broad CI/CD expansion must be
+checked against ADR 0009 before implementation.
 
 ### 36.3 Container builds
 
@@ -251,8 +257,9 @@ Custom images should be:
 - versioned;
 - reproducible;
 - scanned where configured;
-- pushed to GHCR after trusted merge/tag events.
+- published only from trusted events if registry publication is introduced.
 
+Registry publication is not a delivered capability and must not be claimed.
 Do not depend only on mutable tags.
 
 ### 36.4 Self-hosted runners

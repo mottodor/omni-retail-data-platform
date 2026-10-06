@@ -96,7 +96,7 @@ Interrupted runs need no manual action: objects stranded in
 
 ## 5. Alerting / prevention
 
-- In scheduled operation (Phase 4+), non-`completed` manifests should page the
-  data on-call; today the signal is the run exit code and logs.
+- In scheduled Airflow operation, non-`completed` manifests are surfaced by
+  the task exit state and logs. No external paging integration is delivered.
 - Repeated schema drift from one supplier is a contract governance issue —
   escalate to the contract owner rather than repeatedly hotfixing validators.

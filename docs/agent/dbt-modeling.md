@@ -146,11 +146,12 @@ Tests should verify:
 - one current row per business key;
 - historical versions are retained.
 
-### 21.2 Data Vault
+### 21.2 Alternate modeling domains
 
-Data Vault is a later mini-domain exercise only.
-
-Do not replace the primary Gold Kimball model with Data Vault.
+Data Vault is not implemented and is outside this repository's final scope.
+Do not introduce it through routine maintenance or replace the delivered Gold
+Kimball model with it. An alternate modeling domain requires a new ADR that
+explicitly supersedes ADR 0009.
 
 ---
 

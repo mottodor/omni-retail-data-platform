@@ -132,6 +132,6 @@ and in memory.
 
 Screenshots of every delivered dashboard belong in the main README gallery;
 the capture procedure (URLs by slug, save-as names, login) lives in
-[`docs/screenshots/README.md`](../screenshots/README.md). No browser
-exists in the agent environment — capture from the web UI and commit the
-PNG files to `docs/screenshots/`.
+[`docs/screenshots/README.md`](../screenshots/README.md). Capture from the web
+UI and commit the JPEG files to `docs/screenshots/` using the stable names
+documented there.

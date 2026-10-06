@@ -83,10 +83,11 @@ ClickHouse for every mart and assert that `superset_reader` INSERTs are
 rejected, so the read-only boundary is re-verified as part of recovery.
 Credentials stay in `.env`; never copy them into tickets or logs.
 
-Finally, verify the Airflow scheduler sees `publish_serving` and that the DAG
-is triggered by the `lakehouse://gold` dataset after a successful
-`transform_lakehouse` run. The DAG is paused by default in a new environment;
-unpause it only after validating the profile and credentials.
+Finally, verify that the `transform_lakehouse` DAG can run its
+`publish_serving` task after `dbt_build`; publication is part of that same
+stable-boundary workflow. The DAG is paused by default in a new environment;
+unpause it only after validating the profiles, credentials, and CDC bootstrap
+gate in the Kafka runbook.
 
 ## Known limitations
 
@@ -94,4 +95,5 @@ unpause it only after validating the profile and credentials.
   replacement.
 - A failed all-mart rebuild may leave earlier marts refreshed and later marts
   unchanged; rerun `make serving-rebuild` to converge the complete layer.
-- Superset is a later phase and is not required to validate the serving layer.
+- Superset dashboard rendering is a manual post-recovery check; automated
+  serving tests validate data and permissions but do not exercise a browser.

@@ -1,596 +1,423 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), derives typed/delete-aware CDC state and CDC-backed Kimball Gold models, orchestrates batch work with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
+A production-like educational data engineering capstone for a fictional
+e-commerce company. OmniRetail combines batch ingestion and PostgreSQL CDC with
+an Iceberg lakehouse, dbt dimensional modeling, Airflow orchestration,
+ClickHouse serving, and Superset BI on a local Docker Compose stack.
 
-## Business problem
+**Status: Phase 8 capstone complete; maintenance-only.** Feature development
+ends at the delivered Phase 0–8 scope. See
+[ADR 0009](docs/adr/0009-freeze-capstone-scope-at-phase-8.md) and the
+[completed roadmap](ROADMAP.md).
 
-**OmniRetail** is a fictional e-commerce company. The platform answers questions such as:
+> This project is a production-like educational capstone, not a
+> production-ready platform.
 
-- How do GMV, Revenue, Margin, and AOV evolve?
-- What is the visit → product_view → cart → checkout → purchase funnel?
-- Which products and categories generate the highest margin?
-- How do marketing campaigns perform (CTR, CAC, ROAS)?
-- What is customer retention/LTV?
-- Which deliveries are late?
-- Are there discrepancies between orders and payments?
+## What this project demonstrates
 
-## Architecture
+- **Heterogeneous batch ingestion** from PostgreSQL snapshots, paginated REST
+  APIs, CSV, JSON, Parquet, and XLSX sources.
+- **Restart-safe CDC** from PostgreSQL WAL through Debezium and Kafka into an
+  insert-only Iceberg Bronze event table.
+- **Lakehouse modeling** with MinIO, Apache Iceberg, Apache Polaris, Trino, and
+  dbt staging/intermediate/core/mart layers.
+- **CDC-aware analytics** with typed events, delete-aware current state,
+  customer SCD Type 2, hard-delete handling, and recreate semantics.
+- **Safe orchestration** with Airflow dataset triggers and analytical refreshes
+  pinned to a healthy, stable Kafka-offset boundary.
+- **Rebuildable serving** through atomic full-snapshot publication from Iceberg
+  Gold to ClickHouse.
+- **BI as code** with sanitized Superset datasets and dashboards committed to
+  the repository.
+- **Engineering controls** including deterministic fixtures, idempotent paths,
+  reconciliation tests, recovery runbooks, pinned dependencies, and CI.
 
-Target architecture (per [ROADMAP.md](ROADMAP.md)):
+## Business outputs
+
+The delivered analytical layer supports:
+
+- GMV, revenue, margin, orders, and AOV over time;
+- sales and margin by category and region;
+- customer LTV, new/repeat composition, and customer segments;
+- delivery transit time and status mix by carrier;
+- marketing spend, impressions, clicks, CTR, CPC, CPM, and budget utilization;
+- order-to-payment reconciliation;
+- analytical propagation of customer, order, and payment changes and deletes.
+
+Clickstream funnel, conversion attribution, CAC, and ROAS are not claimed:
+the required clickstream and attribution sources are intentionally outside this
+repository's final scope.
+
+## Implemented architecture
 
 ```text
 SOURCES
-  PostgreSQL OLTP ---- Debezium ---- Kafka -------------------+
-  REST APIs ---------------- Airflow/Python ------------------+
-  S3/CSV/JSON/Parquet ------- Airflow ------------------------+--> MinIO/S3
-  Web/App events ------------ Kafka --------------------------+      |
-                                                                   Iceberg
-                                                          Bronze -> Silver -> Gold
-                                                                     |
-                                                           Trino + dbt Core
-                                                                     |
-                                                +--------------------+------------------+
-                                                |                                       |
-                                           Iceberg Gold                           ClickHouse
-                                            source of truth                      serving layer
-                                                                                       |
-                                                                                   Superset
+
+PostgreSQL OLTP
+  ├── batch snapshots ── MinIO archive ── Bronze loader ──┐
+  └── WAL ── Debezium ── Kafka ── CDC consumer ──────────┤
+                                                          ├──> Iceberg Bronze
+Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──┘
+
+Supplier files ── Airflow/Python ── MinIO archive   [raw/archive only]
+
+Iceberg Bronze
+      │
+      │  Trino + dbt Core
+      ▼
+Typed/delete-aware Silver
+      │
+      ▼
+Kimball Gold facts/dimensions
+      │
+      ▼
+Analytics marts in Iceberg
+      │
+      │  atomic full-snapshot publication
+      ▼
+ClickHouse serving layer
+      │
+      ▼
+Apache Superset dashboards
 
 ORCHESTRATION: Airflow 2.11.2
-CATALOG: Apache Polaris (Iceberg REST catalog)
-BIG DATA: Spark for heavy files/clickstream/sessionization
-QUALITY: dbt tests + custom SQL/Python reconciliation
-LINEAGE: OpenLineage + Marquez
-MONITORING: Prometheus + Grafana
-DEVOPS: GitHub + GitHub Actions + Docker Compose
-LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
+CATALOG: Apache Polaris
+OBJECT STORAGE: MinIO
+RUNTIME: Docker Compose profiles
+CI: GitHub Actions
 ```
 
-Implemented today: PostgreSQL OLTP snapshots and restart-safe raw CDC; typed/delete-aware state for customers/orders/payments; CDC-backed customer SCD2 and order/payment Gold facts with parent-gated snapshot children; supplier file and mock REST ingestion; MinIO archive; Polaris + Iceberg Bronze/Silver/Gold and marts (Trino + dbt); coordinated stable-boundary Airflow orchestration through atomic ClickHouse publication; Superset BI (four dashboards as code, ClickHouse + Trino paths); and CI. Not yet built: Spark, OpenLineage/Marquez, or Prometheus/Grafana.
+### Component responsibilities
 
-Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
+| Component | Responsibility |
+| --- | --- |
+| PostgreSQL | OLTP source with deterministic initial data and mutation workload |
+| Python ingestion | API, file, snapshot, and Bronze-loading flows |
+| Debezium | PostgreSQL WAL change capture for customers, orders, and payments |
+| Kafka | Persistent CDC event transport |
+| CDC consumer | Restart-safe insertion of raw CDC events into Iceberg Bronze |
+| MinIO | S3-compatible landing, archive, rejected, and lakehouse storage |
+| Iceberg | Analytical source of truth for Bronze, Silver, Gold, and marts |
+| Polaris | Iceberg REST catalog |
+| Trino | SQL compute over Iceberg and Superset ad-hoc query path |
+| dbt Core | Typing, deduplication, SCD2, facts, dimensions, marts, and tests |
+| Airflow | Batch orchestration and stable-boundary analytical refresh |
+| ClickHouse | Derived low-latency serving copy, rebuildable from Iceberg Gold |
+| Superset | BI dashboards through ClickHouse and ad-hoc SQL through Trino |
 
-## Project status
+Iceberg is the analytical source of truth. ClickHouse contains no unique
+business state and can be rebuilt from Gold.
 
-End-to-end today: **PostgreSQL / supplier files / mock APIs → MinIO archive → Iceberg Bronze → dbt Silver/Gold → analytics marts → ClickHouse serving copy, orchestrated by Airflow.**
+## End-to-end capstone flow
 
-Slice-level status, current focus, and deferred follow-ups live in [PROGRESS.md](PROGRESS.md); plans and acceptance criteria live in [ROADMAP.md](ROADMAP.md).
+1. The deterministic generator creates an OLTP baseline in PostgreSQL.
+2. Batch extractors preserve raw API and PostgreSQL snapshot payloads in the
+   MinIO archive and load supported sources into Iceberg Bronze.
+3. Debezium captures customer, order, and payment mutations from PostgreSQL WAL
+   and writes them to table-specific Kafka topics.
+4. The CDC consumer writes raw events to Iceberg and commits Kafka offsets only
+   after a successful Iceberg operation.
+5. Airflow waits for healthy Debezium tasks, an active consumer, lag zero, and
+   an unchanged exclusive high-watermark boundary.
+6. dbt builds typed/delete-aware Silver state, Kimball Gold models, and four
+   analytics marts at that exact boundary.
+7. Critical dbt tests and business reconciliation must pass before publication.
+8. The publisher loads complete mart snapshots into ClickHouse staging twins
+   and atomically swaps them into service.
+9. Superset reads the refreshed KPI state through a read-only ClickHouse user.
+10. Re-running the same logical work converges without duplicate business data.
 
-## Prerequisites
+## Correctness and reliability design
 
-- Linux/WSL2 (target machine: Windows 11 + WSL2, 32 GB RAM)
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
-- Python 3.12 (installed automatically by uv)
-- Docker + Docker Compose
-- make
+### Batch paths
 
-## Setup
+- Raw API pages and accepted files are preserved unchanged in MinIO.
+- Logical dates, not wall-clock time, define object paths and batch identity.
+- File checksums and manifests provide duplicate detection and audit metadata.
+- PostgreSQL snapshots use keyset pagination and advance durable watermarks only
+  after a successful upload.
+- Bronze loads verify manifest counts before DML and replace deterministic
+  source/date coordinates.
+- Invalid files and rows are quarantined with machine-readable reasons.
+
+### CDC path
+
+- Debezium initial `r` records provide the pre-streaming baseline.
+- Raw Bronze preserves source LSN, transaction metadata, Kafka coordinates, and
+  delete operations.
+- Current state is ordered by source LSN and Kafka offset, not event or ingestion
+  timestamps.
+- Duplicate delivery does not change final analytical state.
+- Winning deletes remove current Gold keys; a later create starts a new
+  lifecycle.
+- Snapshot-backed order items and shipments are filtered through the live CDC
+  order set to suppress stale cascade-deleted children.
+
+### Analytical refresh and serving
+
+- Airflow freezes a stable Kafka frontier before dbt starts.
+- `max_active_runs=1` serializes the boundary/build/publication chain.
+- New CDC events above the frozen boundary wait for a later refresh.
+- ClickHouse publication uses staging tables plus atomic `EXCHANGE TABLES`;
+  readers never observe a partial mart refresh.
+- Routine refresh, retry, and full rebuild use the same publisher code path.
+
+Detailed semantics are documented in the
+[data model](docs/data-model.md), [data contracts](docs/data-contracts.md), and
+[CDC runbook](docs/runbooks/kafka-cdc.md).
+
+## Dashboard gallery
+
+Superset assets are committed as sanitized bundles under `superset/assets/`.
+The delivered dashboards are:
+
+- **Sales** — GMV/revenue/margin trends, AOV, category and region breakdowns;
+- **Executive** — business KPI and delivery overview;
+- **Customer** — acquisition cohorts, new/repeat mix, repeat rate, LTV, and top
+  customers;
+- **Marketing** — spend, budget utilization, CTR, CPC/CPM, and campaign
+  scorecards.
+
+### Sales
+
+![Superset Sales dashboard](docs/screenshots/sales-dashboard.jpg)
+
+### Executive
+
+![Superset Executive dashboard](docs/screenshots/executive-dashboard.jpg)
+
+### Customer
+
+![Superset Customer dashboard](docs/screenshots/customer-dashboard.jpg)
+
+### Marketing
+
+![Superset Marketing dashboard](docs/screenshots/marketing-dashboard.jpg)
+
+The reproducible capture procedure is documented in
+[`docs/screenshots/README.md`](docs/screenshots/README.md).
+
+## Local setup
+
+### Prerequisites
+
+- Linux or WSL2; the target workstation is Windows 11 + WSL2 with 32 GB RAM;
+- Docker with Docker Compose;
+- [`uv`](https://docs.astral.sh/uv/);
+- `make`.
+
+Recommended WSL2 allocation:
+
+```ini
+[wsl2]
+memory=24GB
+processors=6
+swap=8GB
+```
+
+### Python environment and core smoke test
 
 ```bash
-# Copy and fill the environment file (placeholders only; never commit .env)
-cp .env.example .env
-
-# Create the virtualenv, install dependencies, install pre-commit hooks
-make setup
+cp .env.example .env      # fill local values; never commit .env
+make setup                # uv sync + pre-commit install
+make up                   # core profile, health-gated
+make smoke-core           # Trino -> Polaris -> Iceberg -> MinIO
 ```
 
-## Commands
+`make down` stops services while preserving named volumes. `make reset` is
+explicitly destructive and removes core volumes.
 
-```bash
-# --- Environment and code quality ---
-make setup      # uv sync + pre-commit install
-make lint       # ruff check + ruff format --check + mypy
-make test       # pytest (unit tests; `unit` is an alias)
+> Known limitation: clean-host bootstrap currently depends on restoring a
+> reproducible supply for pinned MinIO images. See TD-001 in
+> [PROGRESS.md](PROGRESS.md); this README does not claim unconditional
+> clean-clone reproducibility while that debt remains open.
 
-# --- Stack lifecycle ---
-make up         # start the core profile and wait until healthy
-make down       # stop services (named volumes are preserved)
-make logs       # follow service logs
-make reset      # DESTRUCTIVE: down -v, destroys all local volumes
-make smoke-core # end-to-end check: Trino -> Polaris -> Iceberg -> MinIO
+### Compose profiles
 
-# --- Streaming CDC (requires core + CDC credentials in .env) ---
-make streaming-up     # Kafka + Debezium + restart-safe Iceberg Bronze consumer
-make streaming-status # connector/task state and consumer-group offsets
-make streaming-down   # preserve Kafka/Connect/slot/Bronze state
-make streaming-reset  # DESTRUCTIVE transport reset; preserves OLTP and Bronze
+The stack is intentionally profile-based so a 32 GB workstation does not need
+to run every service continuously.
 
-# --- Source data ---
-make generate-oltp       # apply OLTP schema + load initial data (10k customers / 5k products / 100k orders)
-make mutate-oltp         # apply a batch of random inserts/updates/deletes (EVENTS=200 by default)
-make seed-supplier-files # generate deterministic vendor files and upload to landing (ROWS/SEED)
+| Profile | Start command | Services |
+| --- | --- | --- |
+| Core | `make up` | PostgreSQL, MinIO, Polaris, Trino, mock API |
+| Streaming | `make streaming-up` | Kafka, Debezium, CDC consumer |
+| BI | `make bi-up` | ClickHouse, Superset, metadata/init services |
+| Orchestration | `make airflow-up` | Airflow scheduler/webserver and metadata DB |
 
-# --- Ingestion ---
-make ingest-files ARGS="--source supplier-prices"  # run the file ingestion flow
-make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # fetch raw API pages into archive
-make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"  # date-range backfill
-
-# --- Lakehouse ---
-make bronze-load # load raw archive data into Iceberg Bronze (ARGS="run --source orders --date 2026-09-18" / "run-all --date ..." / "run-new")
-make bronze-rebuild # DESTRUCTIVE for Bronze only: rebuild it from immutable archive with bounded Polaris recovery
-make dbt-parse   # offline dbt manifest check
-make dbt-build   # run dbt models + tests against the live stack (ARGS="--select staging")
-make dbt-test    # run dbt tests
-
-# --- Orchestration ---
-make airflow-build     # build the custom Airflow image (omni-retail/airflow:0.1.0)
-make airflow-up        # start the orchestration profile (requires the core profile up)
-make airflow-down      # stop Airflow services (metadata/logs volumes preserved)
-make airflow-test      # DAG import/structure tests inside the Airflow image
-make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"     # run one DAG for a logical date
-make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # backfill a DAG
-
-# --- Integration testing ---
-make integration # integration tests against the live core stack (requires `make up`)
-```
-
-## Platform stack
-
-The `core` Compose profile provides the lakehouse and the sources:
-
-| Service | Image | Purpose |
-|---|---|---|
-| `postgres` | `postgres:16.15-alpine` | OLTP source (schema and data — see [Data sources](#data-sources-and-ingestion)) |
-| `minio` + `minio-init` | pinned `minio/minio` + `mc` | S3 storage; buckets `landing`, `lakehouse`, `archive`, `rejected` |
-| `polaris-postgres` | `postgres:16.15-alpine` | metadata database for Polaris (network-internal) |
-| `polaris` + `polaris-bootstrap` + `polaris-init` | `apache/polaris:1.7.0` | Iceberg REST catalog (`lakehouse` catalog backed by MinIO) |
-| `trino` | `trinodb/trino:483` | SQL engine; catalog `iceberg` via Polaris REST API |
-| `mock-api` | `omni-retail/mock-api:0.1.0` (built locally) | deterministic external API simulator with fault injection (ADR 0002) |
-
-The `orchestration` profile adds Airflow: a custom image `omni-retail/airflow:0.1.0`
-built from `apache/airflow:2.11.2-python3.12` (webserver + scheduler, LocalExecutor)
-with a dedicated metadata PostgreSQL (`airflow-postgres`) separated from the OLTP
-source, so `make reset` cannot wipe Airflow state.
-
-The resource-bounded `streaming` profile adds Kafka 4.3 in single-node KRaft mode,
-Debezium Connect 3.6, and a non-root Python consumer. Kafka/Connect state is
-persistent; the consumer commits offsets only after an insert-only Iceberg MERGE
-into `bronze.postgres_cdc_events`. The raw contract accepts additive non-key
-source fields, enforces route-specific primary keys, and preserves event-time-
-out-of-order records. Parallel dbt views strictly type those events and derive
-current state by PostgreSQL LSN/Kafka offset with rank-before-delete semantics.
-Details and recovery procedures:
-[`docs/runbooks/kafka-cdc.md`](docs/runbooks/kafka-cdc.md).
-
-All host ports bind to `127.0.0.1` only: PostgreSQL `5432`, MinIO `9000`/`9001`,
-mock-api `9002`, Polaris `8181`, Trino `8080`, Airflow UI `8081`. All images are
-pinned; environment-driven credentials come from `.env` (see `.env.example`).
-
-Verification:
-
-```bash
-make up          # one command to start everything (healthchecks, no sleeps)
-make smoke-core  # creates iceberg.demo.healthcheck, inserts, and counts rows
-make down && make up && make smoke-core  # data survives a full restart
-```
-
-Known simplification: Trino authenticates to Polaris with the bootstrap `root`
-client credentials; dedicated least-privilege Polaris principals are a planned
-follow-up.
-
-## Data sources and ingestion
-
-### OLTP source and data generator
-
-The PostgreSQL database carries a realistic e-commerce OLTP schema
-(`categories`, `products`, `customers`, `orders`, `order_items`, `payments`,
-`shipments`) with PK/FK constraints, `CHECK` constraints on statuses and
-amounts, and `created_at`/`updated_at` on every table. The DDL is idempotent
-(`postgres/init/01_oltp_schema.sql`) and is applied automatically on a fresh
-volume or explicitly via the generator.
-
-The generator (`python -m omni_retail.generators.oltp`) is fully
-deterministic: the same seed reproduces the same dataset (fixed anchor
-timestamp, single `random.Random` instance).
-
-```bash
-make up                  # core stack, if not running yet
-make generate-oltp       # schema + initial load: seed 42, 10k/5k/100k, ~365 days of history
-make mutate-oltp EVENTS=300  # one batch: ~40% order updates, 35% inserts, 10% hard deletes, ...
-```
-
-Behavior highlights:
-
-- initial load ages orders realistically (older orders are mostly `delivered`,
-  recent ones `pending`/`paid`) with consistent payment and shipment state;
-- mutations follow a strict state machine (`pending → paid → shipped →
-  delivered`, cancellations/refunds update payments, `paid → shipped` creates
-  an `in_transit` shipment);
-- hard deletes only target `pending` orders and cascade to their items and
-  payments — this provides the delete workload required for future CDC;
-- re-running `initial` on a non-empty database refuses to proceed unless
-  `--truncate-oltp-data` is passed (explicit, destructive).
-
-Table documentation, grain, and source metrics: `docs/data-model.md`.
-
-### File ingestion
-
-External file sources flow through a durable, idempotent pipeline:
-
-```text
-supplier CSV / partner JSON / historical-orders Parquet / supplier stock XLSX
-  → landing/<source>/incoming/            (drop zone)
-  → landing/<source>/processing/          (transit; marker of an interrupted run)
-  → validation (schema + per-row)
-      ├─ ok       → archive/<source>/<yyyy>/<mm>/<dd>/<file>   (raw, unchanged)
-      ├─ bad rows → rejected/<source>/<yyyy>/<mm>/<dd>/<file>.badrows.<ext>
-      └─ bad file → rejected/<source>/<yyyy>/<mm>/<dd>/<file> (+ .rejection.json)
-  → manifest: archive/_manifests/<source>/<batch_id>.json
-  → dedup marker: archive/_dedup/<source>/<sha256>.json
-```
-
-Guarantees:
-
-- **raw payload is preserved unchanged** — validation never rewrites the archived object;
-- **idempotent re-runs** — `batch_id` is content-addressed (`<source>-<sha256[:16>]`);
-  a re-upload of the same content is skipped with status `duplicate`;
-- **interrupted-run recovery** — objects stranded in `processing` are reprocessed;
-  `incoming` objects are deleted only after a successful archive/reject;
-- **explicit quarantine** — broken files and malformed rows land in `rejected`
-  with machine-readable reasons; `--fail-on-rejected` turns quarantine into a failure;
-- **backfill-friendly** — archive paths use an explicit logical `--date`, never wall-clock.
-
-Sources (schema-driven, see `omni_retail.ingestion.files.schemas`): `supplier-prices`
-(CSV), `partner-products` (JSON), `historical-orders` (Parquet with typed columns),
-and `supplier-stock` (XLSX edge case). All generated payloads are byte-deterministic
-for the same seed — including XLSX, whose volatile Excel timestamps are normalized —
-so checksum-based deduplication stays meaningful. Source contracts: `docs/data-contracts.md`;
-quarantine handling: `docs/runbooks/bad-supplier-file.md`.
+Typical service order for a full local environment:
 
 ```bash
 make up
-make seed-supplier-files ROWS=500 SEED=11   # deterministic payload → landing
+make generate-oltp
+make streaming-up
+make streaming-status
+make bi-up
+make airflow-up
+```
+
+Before the first analytical refresh on a new CDC deployment, complete the
+initial-snapshot gate in the
+[Kafka/CDC runbook](docs/runbooks/kafka-cdc.md). Do not run manual dbt or
+publication commands concurrently with `transform_lakehouse`.
+
+### Representative commands
+
+```bash
+# Source data
+make generate-oltp
+make mutate-oltp EVENTS=300
+make seed-supplier-files ROWS=500 SEED=11
+
+# Raw ingestion
 make ingest-files ARGS="--source supplier-prices --date 2026-09-11"
-make ingest-files ARGS="--source supplier-prices --date 2026-09-11"  # again → duplicate, no double archive
-```
-
-The pipeline runs as the least-privilege MinIO user `omni-ingestion`
-(rw on `landing`/`archive`/`rejected`, read-only on `lakehouse`), created
-automatically by `minio-init` from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`.
-
-Note for proxied environments: host-side `make` targets automatically add
-`127.0.0.1,localhost` to both `no_proxy` and `NO_PROXY` while preserving existing
-exclusions. When invoking the Python or dbt CLI directly, configure the equivalent
-localhost bypass in the caller environment.
-
-### API ingestion
-
-REST sources are served by the `mock-api` container (ADR 0002): a FastAPI
-service with **deterministic data** (same `MOCK_API_SEED` + logical date always
-produce the same payload, so backfills are reproducible) and **fault injection**
-(`?fault=429|500|timeout&fault_rate=...`; each request fingerprints faults at
-most once per server lifetime, so 429 → retry → success is demonstrable).
-
-Endpoints: `GET /api/v1/fx-rates` (offset pagination, required `date`),
-`GET /api/v1/marketing/campaigns` (offset pagination, `status` filter),
-`GET /api/v1/deliveries` (cursor pagination, `updated_since`), plus `/healthz`.
-
-```text
-mock-api (127.0.0.1:9002)
-  → typed clients (httpx: timeout, retry + exp backoff + jitter, Retry-After,
-    rate limit; 4xx != 429 fails fast as non-retryable)
-  → raw page JSON: archive/api/<source>/<yyyymmdd>/page_XXXX.json (unchanged)
-  → manifest:       archive/_manifests/<source>/<source>-<yyyymmdd>.json
-```
-
-Guarantees:
-
-- **idempotent re-runs** — `batch_id = <source>-<yyyymmdd>` and page keys are
-  date-addressed; a re-run of the same date overwrites the same objects;
-- **backfill** — `backfill --from --to` walks logical dates sequentially,
-  fails fast, and is restartable (already-done dates re-run without duplicates);
-- **no wall-clock in paths or identifiers** — dates come only from explicit
-  CLI arguments (the Airflow DAGs pass their logical date).
-
-```bash
-make up                                                          # includes mock-api
 make ingest-api ARGS="run --source fx-rates --date 2026-09-10"
-make ingest-api ARGS="run --source fx-rates --date 2026-09-10"  # again → same objects, no duplicates
-make ingest-api ARGS="backfill --source marketing-campaigns --from 2026-09-09 --to 2026-09-10"
+make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"
+
+# Lakehouse
+make bronze-load ARGS="run-new"
+make dbt-parse
+make dbt-build
+make dbt-test
+
+# CDC
+make streaming-status
+make streaming-down       # preserves Kafka/Connect/slot/Bronze state
+make streaming-reset      # destructive transport reset; clearly prompted
+
+# Serving and BI
+make serving-publish ARGS="--mart mart_daily_sales"
+make serving-rebuild
+make serving-benchmark
+
+# Airflow
+make airflow-test
+make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"
 ```
 
-### PostgreSQL snapshots
+Use `make help` for the complete command list. Operational recovery procedures
+live under [`docs/runbooks/`](docs/runbooks/).
 
-`omni_retail.ingestion.postgres_snapshot` extracts each OLTP table as Parquet
-with an explicit pyarrow schema:
-`archive/postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet`, manifest in the
-shared registry (`source_kind="postgres"`), and a durable watermark
-`archive/_watermarks/postgres/<table>.json`. Keyset pagination on
-`(updated_at, pk)` makes same-second events safe; the watermark moves only
-after a successful upload, so interruptions re-extract and overwrite the
-same window. Known limitation of this batch path: hard deletes are invisible to snapshots,
-and historical backfill of past states is impossible (a snapshot holds the
-current state). Phase 8 CDC captures those deletes and is authoritative for
-customer/order/payment Gold state. Snapshots remain the rollback input and
-continue to supply uncaptured `order_items` and `shipments`, which are filtered
-through the live CDC order set.
+## Analytical model
 
-## Lakehouse: Bronze → Silver → Gold → marts
+### Core dimensions and facts
 
-### Bronze
+- `dim_customer` — CDC-backed SCD Type 2 customer history;
+- `dim_product`, `dim_date`, `dim_campaign`;
+- `fact_orders`, `fact_payments` — CDC-backed current facts;
+- `fact_order_items`, `fact_shipments` — snapshot-backed children gated by live
+  CDC orders.
 
-Raw archive objects (PG snapshot Parquet, API JSON pages) are loaded into
-Iceberg `bronze.*` tables partitioned by `_batch_date` via `make bronze-load`.
-Loads are idempotent per (source, logical date): the day's partition is
-`DELETE`d and re-filled with batched `INSERT` statements, verified against
-the raw manifest row count before any DML is issued. Empty days are warnings;
-schema drift and row-count mismatches fail before touching the partition.
+### Marts
 
-CLI modes: `run --source --date` (one day), `run-all --date` (every source),
-and `run-new`. Explicit-date modes replace their entire day partition.
-`run-new` uses a deterministic `(_source_object, _source_object_row_position)`
-coordinate to replace and resume only incomplete INSERT chunks, including a
-partially committed watermark day; it verifies manifest count and coordinate
-uniqueness at completion. `make bronze-rebuild` is the explicit destructive
-entry point: it clears only the configured Bronze schema, rebuilds from the
-immutable archive, and performs bounded Polaris or Trino recovery for the
-known Trino 483 catalog failure and a failed Trino connection. See [the Bronze
-rebuild runbook](docs/runbooks/bronze-rebuild.md).
-This is the mode the `load_bronze` DAG uses. Supplier files currently stop at
-the raw archive — loading them into Bronze is a tracked follow-up
-([PROGRESS.md](PROGRESS.md)).
+- `mart_daily_sales` — date × category × region sales metrics;
+- `mart_customer_ltv` — customer order, GMV, AOV, and segment metrics;
+- `mart_marketing_roi` — campaign spend and engagement metrics; the historical
+  table name is retained, but ROAS is not claimed without attribution data;
+- `mart_delivery_performance` — carrier transit and status metrics.
 
-### Silver and Gold
+Financial measures are normalized to EUR using order-date FX rates. Full grain,
+key, and lifecycle semantics are in [`docs/data-model.md`](docs/data-model.md).
 
-dbt builds the analytical model over Bronze. Typed
-`stg_cdc_{customers,orders,payments}` events feed delete-aware current state;
-initial `r` records are always the pre-streaming baseline, while streamed
-changes are ordered by PostgreSQL LSN and per-table Kafka offset, never by
-event or ingestion time. `int_cdc_customer_versions` collapses same-LSN
-changes and produces half-open LSN SCD2 intervals. CDC is authoritative for
-`dim_customer`, `fact_orders`, and `fact_payments`; hard deletes therefore
-remove current Gold rows. An order freezes its `customer_key` at its current
-lifecycle's `r`/`c` boundary. Snapshot-backed `fact_order_items` and
-`fact_shipments` join the live order set, suppressing stale cascade-deleted
-children while allowing a new order to exist until its next child snapshot.
-`dim_date` follows live orders. Snapshot customer/order/payment Silver models
-remain available only for rollback. Every core/CDC model carries a YAML
-contract and dbt tests. Airflow captures a stable, lag-zero Kafka consumer boundary and passes exact
-exclusive topic offsets into dbt, then republishes ClickHouse only after the
-full model/test graph succeeds. The manual `make dbt-build` and
-`make serving-publish` recovery path remains available after an explicit stable
-lag check. The model reference lives in `docs/data-model.md`.
+## Testing and CI
 
-On top of Gold, four marts provide dashboard-ready aggregates with all
-financial measures normalized to EUR by `int_orders_fx` (the order
-currency's FX rate at the order date):
-
-- `mart_daily_sales` — daily GMV/revenue/margin per date × category × region;
-- `mart_customer_ltv` — orders/GMV/AOV per customer with current segment;
-- `mart_marketing_roi` — spend/CTR/CPC/CPM per campaign;
-- `mart_delivery_performance` — transit times and status mix per carrier.
-
-## Orchestration (Airflow)
-
-Orchestration lives in the `orchestration` Compose profile (ADR 0003):
-tasks call the ingestion and lakehouse functions in the worker process
-(no shell-outs, no logic duplicated in DAGs), with dependency versions
-exported from the committed `uv.lock` and the `omni_retail` package baked
-into the image.
-
-Ingestion and lakehouse transformation are chained with Airflow datasets:
-
-```text
-ingest_postgres_snapshot / ingest_fx_api / ingest_marketing_api / ingest_delivery_api
-    └─ outlet: raw://<source>
-          → load_bronze        (watermark-driven `run-new` over all sources)
-             └─ outlet: lakehouse://bronze
-                   → transform_lakehouse
-                       wait_for_cdc_boundary
-                         → dbt_build (frozen offsets; Silver → Gold → marts + tests)
-                           → publish_serving (atomic ClickHouse snapshot swap)
-```
-
-Dataset URIs are logical data addresses, not S3 paths. Because supplier files
-are not loaded into Bronze yet, `ingest_supplier_files` emits no dataset.
-Dataset-triggered runs never rely on their own logical date (it differs from
-the producer's) — the watermark sweep alone decides what to load.
-
-| DAG | Schedule | Shape |
-|---|---|---|
-| `ingest_fx_api` / `ingest_marketing_api` / `ingest_delivery_api` | `@daily` | single `ingest` task, pool `mock_api`, XCom summary; outlet `raw://<source>` |
-| `ingest_supplier_files` | `@daily` | 4 independent per-source tasks; param `fail_on_rejected` (default `False`) |
-| `ingest_postgres_snapshot` | `@daily` | 7 independent per-table snapshot tasks; param `full_refresh` (default `False`); outlet `raw://postgres-snapshot` |
-| `load_bronze` | `raw://` datasets (4 ingestion DAGs) | watermark-driven `run-new` Bronze load; outlet `lakehouse://bronze` |
-| `transform_lakehouse` | `lakehouse://bronze` **or** hourly `0 * * * *` UTC | stable CDC boundary → full boundary-pinned `dbt build` → atomic ClickHouse rebuild |
-
-Transformation SQL lives in the dbt project, never in DAGs; dbt target/log
-artifacts go to a per-run temp directory (the project dir is mounted
-read-only), and `max_active_runs=1` serializes the complete boundary/build/
-publication chain. The boundary requires healthy Debezium tasks, an active
-consumer, exact single-partition topic topology, lag 0, and unchanged exclusive
-high watermarks over the stability window. New Bronze events above that
-frontier wait for a later run. Dataset/timetable wiring is asserted by the DAG
-structure tests (`make airflow-test`); the exact task code paths — watermark
-sweep, idempotent re-trigger, full build — by the live integration test
-`tests/integration/test_lakehouse_orchestration.py` (`make integration`).
-
-Shared policy: `retries=3` with exponential backoff (capped at 5 min) on top
-of the http-level retries inside the API client, `execution_timeout=5min`,
-`max_active_runs=1`, `catchup=False`, new DAGs start paused, and the logical
-date (`ds`) is the only date input — wall-clock `now()` never appears in
-paths or identifiers.
-
-PostgreSQL snapshots (`omni_retail.ingestion.postgres_snapshot`) extract
-each OLTP table as Parquet with an explicit pyarrow schema:
-`archive/postgres/<table>/<yyyy>/<mm>/<dd>/data.parquet`, manifest in the
-shared registry (`source_kind="postgres"`), and a durable watermark
-`archive/_watermarks/postgres/<table>.json`. Keyset pagination on
-`(updated_at, pk)` makes same-second events safe; the watermark moves only
-after a successful upload, so interruptions re-extract and overwrite the
-same window. After re-seeding the source (`make generate-oltp` with a
-truncate), purge the stale watermarks first: `uv run python -m
-omni_retail.ingestion.postgres_snapshot purge-watermarks` (all tables) or
-`… purge-watermarks --table orders` (one table). Limitations (closed by CDC
-in Phase 8): hard deletes are invisible and historical backfill is
-impossible (snapshots hold current state).
+Local validation entry points:
 
 ```bash
-make up                  # core profile first
-make streaming-up        # Kafka, Debezium, Bronze consumer
-make bi-up               # ClickHouse/Superset serving profile
-make airflow-up          # orchestration last; UI at http://127.0.0.1:8081
-make airflow-test        # DAG tests (DagBag) inside the image — no live services needed
-make airflow-dag-test ARGS="ingest_fx_api 2026-09-10"
-make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"  # dataset-triggered lakehouse chain
-make airflow-backfill ARGS="ingest_fx_api -s 2026-09-01 -e 2026-09-10"  # idempotent by construction
+make lint             # ruff check, format check, mypy
+make test             # hermetic unit/contract tests
+make dbt-parse        # offline dbt manifest validation
+make airflow-test     # DAG pytest + import-error check in the Airflow image
+
+docker compose config
+make smoke-core       # requires live core
+make integration      # requires the relevant live profiles
 ```
 
-Before the first unpause on a clean CDC deployment, follow the initial-snapshot
-bootstrap gate in [`docs/runbooks/kafka-cdc.md`](docs/runbooks/kafka-cdc.md).
-Then trigger any ingestion DAG, manually trigger `transform_lakehouse`, or wait
-for its hourly schedule. In the Airflow UI, verify the strict
-`wait_for_cdc_boundary → dbt_build → publish_serving` sequence. Do not run
-manual dbt/publication commands concurrently with this DAG.
+The integration suite uses disposable lakehouse schemas and exact-key rollback
+journals rather than resetting shared schemas. Covered boundaries include:
 
-## Data quality and testing
+- files and APIs through real MinIO;
+- PostgreSQL snapshot lifecycle and watermarks;
+- Bronze loading and idempotent reruns;
+- dbt core build and business reconciliation;
+- Debezium/Kafka CDC recovery and duplicate handling;
+- Gold-to-ClickHouse publication and rebuildability;
+- Superset bootstrap, ClickHouse canary, and Trino SQL Lab connectivity;
+- dataset-triggered Bronze → dbt orchestration.
 
-- Unit tests (`make test`) stay hermetic; no network, no containers.
-- dbt tests: built-in constraints plus singular business tests, including
-  fail-loud orders ↔ payments reconciliation, streamed-LSN requirements,
-  customer half-open interval/current-state checks, exact CDC-vs-Gold key-set
-  parity, parent/child integrity, and CDC raw-route/transport identity.
-- `make integration` runs the acceptance scenarios against the live core
-  stack (MinIO + mock-api + Trino), gated by `OMNI_INTEGRATION=1`.
-  The suite is safe on a long-lived stack: deterministic object coordinates
-  are borrowed through exact-key rollback journals, a session checksum
-  invariant verifies the complete archive byte-for-byte, and lakehouse tests
-  use UUID-prefixed disposable Bronze/Silver/Gold/analytics schemas. Shared
-  production schemas are never reset and no Bronze reload is required after
-  tests:
-  - re-running the same file batch archives exactly once (content-addressed dedup);
-  - a corrupted file is quarantined with a machine-readable `.rejection.json`;
-  - Parquet and XLSX sources flow end-to-end through real object storage;
-  - an injected HTTP 429 is retried and succeeds;
-  - an API backfill over a date range is idempotent (deterministic page keys);
-  - a PostgreSQL snapshot lifecycle: full extract → parquet + manifest + watermark,
-    re-run with an empty window (no duplicates), incremental extract after a
-    controlled mutation, and `full_refresh` rebase;
-  - a dataset-triggered lakehouse orchestration run: seeded raw data →
-    watermark-swept Bronze load → full dbt build, with an idempotent
-    re-trigger (no duplicates).
+GitHub Actions runs ruff, pytest, non-blocking mypy, offline dbt parse, Docker
+Compose validation, and Airflow DAG tests. It does not claim a hosted full-stack
+integration environment.
 
-## Project layout
+## Performance evidence
+
+The repository includes a reproducible representative comparison of the same
+aggregation over Trino/Iceberg and ClickHouse:
+
+- [Phase 6 Trino vs ClickHouse benchmark](docs/benchmarks/phase6-trino-vs-clickhouse.md)
+
+The recorded numbers are local-workstation observations for a small fixture,
+not general engine performance claims. The report preserves query equivalence,
+plans, and measurement context.
+
+## Repository layout
 
 ```text
-src/omni_retail/    Python package: ingestion (files, api, postgres_snapshot),
-                   streaming CDC, generators, lakehouse, serving publisher
-dbt/               dbt project: staging → intermediate → core → marts
-airflow/           DAGs, dataset definitions, shared policy and runners
-postgres/          OLTP schema DDL (idempotent, applied on first volume init)
-infrastructure/    custom Dockerfiles, init/bootstrap scripts, smoke and DAG-test scripts
-trino/             Trino configuration
-tests/             unit tests + opt-in integration tests (OMNI_INTEGRATION=1)
-docs/              data model, data contracts, ADRs, runbooks, agent guides
+src/omni_retail/    Python package: generators, ingestion, Bronze, CDC, serving
+postgres/           Idempotent OLTP schema
+trino/              Trino and Iceberg catalog configuration
+dbt/                staging -> intermediate -> core -> marts
+airflow/            DAGs, datasets, runners, policy, DAG tests
+clickhouse/          Versioned serving migrations
+superset/            Sanitized BI assets as code
+infrastructure/      Custom images, bootstrap, smoke, and recovery scripts
+tests/               Unit, contract, and opt-in integration tests
+docs/                ADRs, model, contracts, runbooks, benchmarks, screenshots
 ```
 
 ## Documentation map
 
-Each documentation artifact has a single role:
-
-| Document | Owns |
-|---|---|
-| [AGENTS.md](AGENTS.md) | Core rules for AI coding agents: invariants, workflow, Definition of Done, prohibitions, phase gates; routes to the topical guides |
-| [docs/agent/](docs/agent/) | Normative topical guides (ingestion, dbt modeling, lakehouse, Airflow, reliability, testing, …) — read on demand via the AGENTS.md routing table |
-| [docs/adr/](docs/adr/README.md) | Architecture Decision Records (index, template); significant decisions only |
-| [ROADMAP.md](ROADMAP.md) | Phases, scope, acceptance criteria, target architecture, repository structure |
-| [PROGRESS.md](PROGRESS.md) | Current state only: phase/slice status, current focus, deferred follow-ups |
-| `docs/plans/active.md` (when present) | Execution detail of the single active task (session-resume checklist; removed when the task closes) |
-| [docs/data-model.md](docs/data-model.md) | Table documentation, grain, source metrics |
-| [docs/data-contracts.md](docs/data-contracts.md) | Source data contracts |
-| [docs/runbooks/](docs/runbooks/) | Operational failure runbooks |
-
-Precedence on conflict: explicit request > AGENTS.md (core + guides) > accepted
-ADRs > ROADMAP.md > existing conventions. The audit trail of *when* things
-changed is git history — these documents describe only the current state and
-the rules that govern changing it.
-
-## ClickHouse serving layer
-
-Gold marts are published from Iceberg to ClickHouse as a rebuildable,
-read-only-for-BI serving copy ([ADR 0004](docs/adr/0004-clickhouse-serving-publication.md)):
-the publisher reads a full mart snapshot through Trino, inserts it into a
-`_staging` twin, and atomically swaps the pair with `EXCHANGE TABLES` — BI
-never sees a partial publish, and re-running a publish can never duplicate
-rows. Routine refresh, retry after failure, and rebuild share this one code
-path.
-
-```bash
-make bi-up            # profile bi: ClickHouse + one-shot versioned migrations
-make serving-publish ARGS="--mart mart_daily_sales"
-make serving-rebuild   # every mart, drop-safe: recreate DDL + republish from Gold
-make serving-rebuild ARGS="--mart mart_daily_sales"   # ...or a single mart
-make serving-benchmark                            # Trino vs ClickHouse report
-```
-
-Schema changes are versioned migrations under `clickhouse/migrations/`,
-applied by the `clickhouse-init` container and tracked in the
-`analytics.schema_migrations` ledger. Service accounts follow least
-privilege: `omni_publisher` (write grants on `analytics.*` only) and
-`superset_reader` (SELECT-only, reserved for the Superset BI layer). Only the
-HTTP interface is published to the host (`127.0.0.1:8123`); the native
-port stays docker-network-only. Idempotency, rebuild-from-Gold parity,
-and reader permissions are asserted by
-`tests/integration/test_serving_publication.py`
-(`make up && make bi-up && make integration`). After a successful boundary-pinned dbt task, the `publish_serving` task in the
-same `transform_lakehouse` DAG rebuilds all four marts from Gold. Compare the representative query with
-`make serving-benchmark`; the report is written to
-`docs/benchmarks/phase6-trino-vs-clickhouse.md`. Outage recovery is documented
-in [`docs/runbooks/clickhouse-outage.md`](docs/runbooks/clickhouse-outage.md).
-
-## Superset BI
-
-The `bi` profile also runs Apache Superset ([ADR 0005](docs/adr/0005-superset-deployment.md))
-as a custom pinned image (`omni-retail/superset:0.1.0`) with a dedicated
-metadata PostgreSQL and an idempotent one-shot bootstrap: schema migrations,
-admin user, the two connections (`ClickHouse analytics` over the docker
-network with the read-only `superset_reader` account, and `Trino iceberg`
-for ad-hoc exploration), and an import of the BI assets committed under
-[`superset/`](superset/). Web UI: `http://127.0.0.1:8088` (loopback only).
-
-BI assets are code: the four mart datasets with their documented metrics and
-four dashboards — **Sales** (KPI tiles, revenue/margin and AOV trends,
-category/region breakdowns), **Executive** (monthly revenue/margin/orders
-trends, GMV, region/category mix, delivery operations), **Customer**
-(acquisition cohorts by first-order month, new-vs-repeat composition, repeat
-rate, LTV by segment/region, AOV distribution, top customers) and
-**Marketing** (spend vs budget, CTR, CPC/CPM, budget utilization, campaign
-scorecard) — live in `superset/assets/*.zip` and are re-imported on every
-`make bi-up`: a clean clone converges to the same BI state from the
-repository plus `.env`, with no manual UI steps. Bundle exports are
-sanitized before committing (`infrastructure/scripts/superset_bundle_sanitize.py`):
-connection credentials never enter Git. The round-trip loop and operational
-procedures live in [`docs/runbooks/superset.md`](docs/runbooks/superset.md);
-bootstrap invariants, a Superset-vs-ClickHouse canary reconciliation and the
-Trino SQL Lab ad-hoc path are asserted by `tests/integration/test_superset_bootstrap.py`.
-
-### Dashboard gallery
-
-Screenshots of every delivered dashboard belong in the README (ROADMAP
-Phase 7 acceptance); capture steps live in
-[`docs/screenshots/README.md`](docs/screenshots/README.md):
-
-| Dashboard | Screenshot |
+| Document | Purpose |
 | --- | --- |
-| Sales | `docs/screenshots/sales-dashboard.png` |
-| Executive | `docs/screenshots/executive-dashboard.png` |
-| Customer | `docs/screenshots/customer-dashboard.png` |
-| Marketing | `docs/screenshots/marketing-dashboard.png` |
+| [ROADMAP.md](ROADMAP.md) | Final Phase 0–8 scope, completed phases, and acceptance criteria |
+| [PROGRESS.md](PROGRESS.md) | Current maintenance status and open technical debt |
+| [Architecture ADRs](docs/adr/README.md) | Technology and lifecycle decisions, including the scope freeze |
+| [Data model](docs/data-model.md) | Source/model grain, keys, CDC and SCD2 semantics |
+| [Data contracts](docs/data-contracts.md) | Source and modeled-data contracts |
+| [Runbooks](docs/runbooks/) | CDC, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
+| [Dashboard capture](docs/screenshots/README.md) | Manual screenshot procedure |
+| [AGENTS.md](AGENTS.md) | Repository rules for coding agents |
 
-The Funnel dashboard and conversion/ROAS metrics wait for Phase 9
-clickstream data (see `PROGRESS.md`).
+## Known limitations and non-goals
 
-### Ad-hoc exploration: Superset → Trino → Iceberg
+Open debt is tracked in [PROGRESS.md](PROGRESS.md), not hidden by the capstone
+label. Material limitations include:
 
-Dashboards always read the published ClickHouse marts (low latency,
-read-only serving copy). For ad-hoc exploration over the full lakehouse —
-Bronze/Silver internals, Gold history, or queries the marts do not cover —
-switch the SQL Lab database to **Trino iceberg** and query Iceberg directly
-(`SELECT count(*) FROM gold.fact_orders`). Prefer ClickHouse for repeated
-dashboard-style aggregation; prefer the Trino path when you need the whole
-modeled history or non-mart grains. The path is exercised by
-`tests/integration/test_superset_bootstrap.py::test_sqllab_trino_adhoc_path`.
+- pinned MinIO image availability prevents an unconditional clean-host bootstrap
+  claim;
+- supplier file sources stop in MinIO archive and do not enter Iceberg Bronze;
+- long-running Bronze and CDC workloads need bounded snapshot/file maintenance;
+- dbt model contracts are documented and tested but are not fully enforced by
+  the current adapter;
+- the local benchmark fixture is evidence of the method, not a scale claim;
+- this repository does not provide production HA, disaster recovery, enterprise
+  security controls, or managed-cloud deployment.
 
-## CI
+The following are intentional non-goals of this completed repository:
 
-GitHub Actions runs on every push and pull request: ruff check, ruff format, mypy (non-blocking at bootstrap), pytest, `docker compose config` validation, plus an `airflow` job that builds the custom image and runs the DAG test harness (pytest + `airflow dags list-import-errors`) inside it.
+- clickstream processing and distributed sessionization;
+- platform-wide metrics dashboards and automated lineage infrastructure;
+- Data Vault as a second modeling domain;
+- major runtime/platform migration exercises;
+- Kubernetes or cloud infrastructure deployment.
+
+Topic-focused continuation work is intentionally separated into independent
+repositories in the same profile. Those projects have their own scope and are
+not unfinished OmniRetail phases.
+
+## Maintenance policy
+
+Normal changes are limited to documentation, bug fixes, security/dependency
+maintenance, and technical-debt resolution within the delivered architecture.
+Adding a new service, feature domain, or previously excluded initiative requires
+a new ADR that explicitly supersedes ADR 0009.

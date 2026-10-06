@@ -1,13 +1,13 @@
-# Agent guide — Serving and BI (ClickHouse, Superset, Spark)
+# Agent guide — Serving and BI (ClickHouse, Superset)
 
 Part of the repository agent rules, split out of the monolithic `AGENTS.md`.
 
-**Phase note:** ClickHouse and Superset belong to the first vertical slice /
-serving phases; Spark belongs to Phase F and is justified per workload only —
-see the implementation order and phase gates in the `AGENTS.md` core.
+ClickHouse and Superset are delivered components of the Phase 8 capstone.
+Distributed processing and clickstream/sessionization are outside this
+repository's maintenance scope under ADR 0009.
 
-Read this guide before working on: ClickHouse table design and publication,
-Superset connections and dashboards, Spark jobs.
+Read this guide before working on: ClickHouse table design and publication or
+Superset connections and dashboards.
 
 Precedence: explicit user request > `AGENTS.md` core > accepted ADRs > this
 guide > `ROADMAP.md` > existing implementation conventions. On conflict with
@@ -18,31 +18,15 @@ existing references of the form "AGENTS §N" keep resolving.
 
 ---
 
-## 25. Spark rules
+## 25. Distributed-processing scope
 
-Spark is not a default transformation engine for the project.
+Apache Spark is not implemented and is not part of this repository's final
+scope. Use the delivered Trino/dbt/Python paths for maintenance work.
 
-Use Spark only where it demonstrates a meaningful distributed-processing case, such as:
-
-- clickstream sessionization;
-- large backfills;
-- expensive distributed joins;
-- large file transformations.
-
-Do not use Spark for a dataset that is trivially handled by Trino/dbt/Python unless the issue is specifically a Spark learning benchmark.
-
-Spark jobs should consider:
-
-- partition count;
-- shuffle;
-- broadcast join;
-- skew;
-- event time;
-- late events;
-- deterministic tests;
-- memory limits appropriate for the laptop.
-
-For benchmark tasks, capture `explain` output and before/after metrics.
+Do not add Spark, clickstream sessionization, or another distributed-processing
+subsystem through an ordinary issue. Such an expansion requires a new ADR that
+explicitly supersedes ADR 0009 and explains why an independent repository is
+not the better boundary.
 
 ---
 
@@ -114,12 +98,13 @@ Do not require public exposure of ClickHouse for normal local use.
 
 Store exportable Superset metadata in the repository where practical.
 
-Expected dashboards eventually include:
+The delivered dashboards are:
 
 - Executive;
 - Sales;
 - Customer;
-- Marketing;
-- Funnel.
+- Marketing.
 
-Dashboard queries should primarily use prepared serving marts rather than expensive raw queries.
+A Funnel dashboard is outside scope because the capstone has no clickstream or
+attribution source. Dashboard queries should primarily use prepared serving
+marts rather than expensive raw queries.

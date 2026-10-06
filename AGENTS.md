@@ -7,7 +7,10 @@ It is the **core** of a two-layer rule set:
 - this file — always loaded; contains the invariants that apply to every task;
 - `docs/agent/*.md` — topical guides, read on demand per the routing table below.
 
-The repository is a production-like Data Engineering portfolio project. The goal is not to maximize the number of technologies used. The goal is to build a reproducible, testable, observable, and explainable data platform that demonstrates commercial-grade engineering practices.
+The repository is a completed, production-like educational Data Engineering
+capstone. The goal is to preserve a reproducible, testable, and explainable
+Phase 8 platform—not to expand the number of technologies or resume the removed
+roadmap.
 
 ---
 
@@ -17,7 +20,7 @@ Before changing code, always read:
 
 1. `AGENTS.md` (this file) — mandatory engineering and agent rules.
 2. The topical guide(s) under `docs/agent/` that match the task — routing table below.
-3. `ROADMAP.md` — implementation order, scope, acceptance criteria, and target architecture.
+3. `ROADMAP.md` — final Phase 0–8 scope, acceptance criteria, and implemented architecture.
 4. Relevant files under `docs/adr/` (index: `docs/adr/README.md`) — architectural decisions already made.
 5. Relevant tests and current implementation.
 
@@ -40,15 +43,15 @@ If an architectural change is required, create or update an ADR before implement
 Detailed component rules live under `docs/agent/` and are **normative**: before working in one of these areas, read the matching guide. Each rule has a single home — this core file does not duplicate guide content.
 
 | Task involves | Read first |
-|---|---|
+| --- | --- |
 | Ingestion (batch, REST API, files/S3), source generator, PostgreSQL source schema, pipeline logging | `docs/agent/ingestion.md` |
 | dbt models, analytical modeling, marts, SQL style | `docs/agent/dbt-modeling.md` |
 | Iceberg, Polaris, Trino | `docs/agent/lakehouse.md` |
 | Airflow DAGs and orchestration | `docs/agent/airflow.md` |
-| Kafka, Debezium, CDC (Phase E) | `docs/agent/streaming.md` |
-| ClickHouse, Superset, Spark (serving, Phase F) | `docs/agent/serving-bi.md` |
+| Kafka, Debezium, CDC | `docs/agent/streaming.md` |
+| ClickHouse, Superset, serving publication | `docs/agent/serving-bi.md` |
 | Data quality, data contracts, backfills, late-arriving data, failure engineering | `docs/agent/reliability.md` |
-| Docker Compose, Makefile, Git/GitHub workflow, GitHub Actions, observability, lineage | `docs/agent/platform-ops.md` |
+| Docker Compose, Makefile, Git/GitHub workflow, GitHub Actions, runtime diagnostics | `docs/agent/platform-ops.md` |
 | Testing strategy, test data, performance engineering | `docs/agent/testing-perf.md` |
 | Security baseline, documentation rules, ADR policy, migrations, task prompt template | `docs/agent/engineering-practices.md` |
 
@@ -71,15 +74,17 @@ Sections that remain in this core file: §1–8, §10–11, §43, §47–49, §5
 
 ## 2. Project objective
 
-OmniRetail is a production-like e-commerce data platform intended to
-demonstrate commercial-grade Data Engineering practices: reproducible,
-testable, observable, and explainable.
+OmniRetail is a completed, production-like educational e-commerce data
+platform. It demonstrates reproducible and testable batch/CDC ingestion,
+lakehouse modeling, orchestration, serving, and BI through the delivered
+Phase 8 boundary. It is not a production-ready platform.
 
-What the platform must deliver — the capability list, business scenario, and
-target architecture — is defined in `ROADMAP.md` §1–§3.
+The final capability scope, business scenario, and implemented architecture are
+defined in `ROADMAP.md` §1–§3. The platform must remain suitable for a single
+local workstation; environment constraints are defined in `ROADMAP.md` §4.
 
-The platform must remain suitable for a single local workstation; environment
-constraints are defined in `ROADMAP.md` §4.
+ADR 0009 freezes feature development at Phase 8. This repository is maintained
+rather than extended into the former Phase 9–18 initiatives.
 
 ---
 
@@ -89,18 +94,19 @@ The following decisions are already accepted and MUST NOT be changed without an 
 
 ### 3.1 Core stack
 
-The technology stack is fixed: it is defined in `ROADMAP.md` §3 (final
-architecture and component responsibilities); pinned baselines are recorded in
-`ROADMAP.md` ("Технические решения, зафиксированные на старте") and
-ADR 0001; exact Python versions live in the committed `uv.lock` (§11).
+The delivered technology stack is fixed by `ROADMAP.md` §3 and §6, ADR 0001,
+and the implementation. Exact Python versions live in the committed `uv.lock`
+(§11).
 
-Any change to the stack requires an ADR (§42,
-`docs/agent/engineering-practices.md`).
+ADR 0009 is the scope fence. Normal work is limited to documentation, bug
+fixes, security/dependency maintenance, and technical-debt resolution inside
+the delivered architecture. A debt item inherited from the former roadmap may
+be addressed only when it protects or repairs delivered behavior and does not
+introduce a new platform subsystem or restore a removed phase as an initiative.
 
-Later exercises — Airflow 2 -> 3 migration, dbt Core 1.10 -> dbt v2
-migration, GitHub Actions -> GitLab CI, and Kubernetes only after the Docker
-Compose platform is complete — are scheduled by `ROADMAP.md` (phases 16–18
-and the "Later" section) and must not be started early.
+Any stack change, new service, feature-domain expansion, or migration exercise
+requires an ADR that explicitly supersedes ADR 0009 (§42,
+`docs/agent/engineering-practices.md`). A GitHub issue alone is insufficient.
 
 ### 3.2 Storage and serving responsibilities
 
@@ -126,37 +132,39 @@ Ad-hoc exploration path:
 Superset -> Trino -> Iceberg
 ```
 
-Grafana is for platform observability, not business BI.
-
 ### 3.4 Processing responsibilities
 
 Use:
 
 - dbt + Trino for relational analytical transformations;
-- Spark only when the workload justifies distributed processing;
 - Airflow for orchestration, not for storing transformation SQL;
-- Kafka for transport/event streaming;
+- Kafka for delivered PostgreSQL CDC transport;
 - Debezium for PostgreSQL CDC;
 - MinIO for object storage;
 - Polaris for Iceberg catalog metadata.
 
+Distributed clickstream processing and other new processing domains are outside
+this repository's scope.
+
 ---
 
-## 4. Implementation order is mandatory
+## 4. Maintenance scope is mandatory
 
-Do not build the final architecture all at once.
+The vertical slice is complete through Phase 8:
 
-The project follows a **vertical-slice-first** strategy: the first slice must
-work end-to-end — source -> Bronze -> dbt Silver/Gold -> serving -> BI
-(diagram in ADR 0001) — before any later-phase technology enters.
+```text
+source -> batch/CDC -> Iceberg Bronze -> dbt Silver/Gold -> ClickHouse -> Superset
+```
 
-Phase sequence, scope, and acceptance criteria are owned by `ROADMAP.md`; the
-issue sequence follows its backlog.
+`ROADMAP.md` owns the final scope and acceptance criteria; it has no next
+implementation phase. Preserve the delivered architecture and the invariants in
+§51.
 
-Do not introduce Kafka, Debezium, Spark, Marquez, or full observability
-before the current roadmap phase requires them, unless the current GitHub
-issue explicitly belongs to those later phases (see also the phase gates,
-§51).
+Do not introduce former future-scope subsystems such as distributed clickstream
+processing, platform-wide monitoring/lineage services, alternate modeling
+domains, CI-platform migrations, or cluster orchestration. Such work belongs in
+independently scoped repositories unless a new ADR explicitly supersedes ADR
+0009.
 
 ---
 
@@ -177,7 +185,7 @@ For every task, follow this sequence.
 9. Identify affected services, contracts, schemas, and documentation.
 10. Check whether the task requires a new dependency or architectural decision.
 11. If a new technology or architecture decision is required, create an ADR first.
-12. When checking upstream documentation for any technology (Trino, dbt, Airflow, Iceberg, ClickHouse, Superset, Debezium, Spark, etc.), use the `context7` tool.
+12. When checking upstream documentation for any technology in the delivered stack (Trino, dbt, Airflow, Iceberg, ClickHouse, Superset, Debezium, etc.), use the `context7` tool.
 
 Do not start by rewriting unrelated files.
 
@@ -260,8 +268,9 @@ Rules:
 - Python code lives under `src/omni_retail/`;
 - custom Dockerfiles and init scripts live under `infrastructure/`;
 - agent topical guides live under `docs/agent/` (see the routing table above);
-- directories for later phases are created only when their roadmap phase is
-  reached, not in advance (the per-phase list is in `ROADMAP.md` §5);
+- preserve the existing top-level component boundaries in `ROADMAP.md` §5;
+- do not create directories for excluded feature domains or new services
+  without an ADR that supersedes ADR 0009;
 - do not create alternative top-level directories for existing concerns
   without a clear reason;
 - prefer grouping configuration with its owning component.
@@ -466,8 +475,9 @@ Do not expand a GitHub issue because an adjacent improvement "would be nice".
 If you notice unrelated work:
 
 1. document it in the completion summary;
-2. propose a follow-up issue;
-3. do not implement it unless required for correctness.
+2. propose a follow-up only when it fits ADR 0009 maintenance scope;
+3. otherwise classify it as an accepted limitation or separate-project concern;
+4. do not implement it unless required for correctness.
 
 This rule is especially important for AI-generated refactors.
 
@@ -480,7 +490,8 @@ restate rules from earlier sections):
 
 - rewrite the repository without need;
 - add technologies for novelty;
-- use Spark for tiny workloads without justification;
+- introduce distributed processing or another excluded subsystem without an
+  ADR that explicitly reopens the scope;
 - place dbt business SQL inside Airflow DAGs;
 - use ClickHouse as the only persistent source of business truth;
 - expose ClickHouse publicly just for Superset;
@@ -496,7 +507,7 @@ restate rules from earlier sections):
 - introduce a service without a reason/ADR;
 - claim exactly-once processing without end-to-end evidence;
 - claim a test was executed when it was not;
-- bypass roadmap ordering without an explicit task requirement.
+- bypass the ADR 0009 maintenance scope without an explicit superseding ADR.
 
 ---
 
@@ -537,91 +548,69 @@ State remaining limitations honestly.
 
 ### Follow-up
 
-Recommend the next logical GitHub issue, but do not implement it unless requested. Record lasting follow-ups in `PROGRESS.md` (Deferred / follow-ups).
+Recommend the next logical maintenance action, if any, but do not invent a new
+feature phase. Record lasting debt or maintenance follow-ups in `PROGRESS.md`.
 
 ---
 
-## 51. Phase gates
+## 51. Delivered architecture gates
 
-The agent must respect the following gates.
+These gates are now maintenance invariants. A change must not regress them.
 
 ### Gate A — Repository foundation
 
-Before data-platform implementation:
-
 - Python tooling works;
-- `make lint` works;
-- `make test` works;
+- `make lint` and `make test` remain valid entry points;
 - GitHub Actions basic CI exists;
 - `.env.example` exists;
 - ADR mechanism exists.
 
 ### Gate B — Core lakehouse
 
-Before orchestration:
-
-- PostgreSQL runs;
-- MinIO runs;
-- Polaris runs;
-- Trino runs;
+- PostgreSQL, MinIO, Polaris, and Trino compose the core;
 - Trino can create/read an Iceberg table in MinIO;
-- persistence survives restart;
-- smoke test exists.
+- persistent data survives restart;
+- a core smoke test exists.
 
-### Gate C — First vertical slice
+### Gate C — Batch analytical vertical
 
-Before Kafka/Spark:
-
-- source orders exist;
-- batch extraction exists;
-- Bronze exists;
-- dbt Silver exists;
-- Gold `fact_orders` exists;
-- `mart_daily_sales` exists;
-- ClickHouse publication exists;
-- Superset Revenue dashboard works.
+- source orders and deterministic generation exist;
+- supported batch sources preserve raw data and load Bronze;
+- dbt Silver/Gold and `mart_daily_sales` exist;
+- ClickHouse publication is rebuildable from Iceberg;
+- Superset reads the serving layer.
 
 ### Gate D — Orchestration
 
-Before advanced streaming:
-
 - Airflow DAGs parse;
-- batch ingestion is orchestrated;
-- retries/backfills are safe;
-- independent pipelines fail independently.
+- batch ingestion and lakehouse refresh are orchestrated;
+- retries/backfills are safe where implemented;
+- independent ingestion tasks isolate failure;
+- transformation SQL remains in dbt.
 
 ### Gate E — CDC
 
-Before calling CDC complete:
+- Debezium captures source changes and Kafka transports them;
+- create/update/delete semantics work for the captured entities;
+- committed offsets recover after consumer restart;
+- duplicate delivery does not corrupt analytical state;
+- dbt and ClickHouse publication use a healthy stable Kafka boundary.
 
-- Debezium captures source changes;
-- Kafka transports events;
-- create/update/delete work;
-- consumer restart recovers;
-- duplicate events do not corrupt final state.
+### Gate F — Phase 8 capstone evidence
 
-### Gate F — Spark
+Before describing the repository as portfolio-ready within its selected scope:
 
-Before calling Spark complete:
-
-- workload justifies Spark;
-- deterministic test exists;
-- sessionization or equivalent distributed logic works;
-- resource configuration fits the local workstation.
-
-### Gate G — Production-like operation
-
-Before declaring the project portfolio-ready:
-
-- data quality exists;
-- failure scenarios exist;
-- backfill works;
-- Iceberg maintenance works;
-- monitoring exists;
-- lineage exists;
-- CI integration tests exist;
-- ClickHouse is rebuildable from Iceberg;
-- documentation and runbooks exist.
+- the source-to-Superset path is documented and reproducible within disclosed
+  environment limitations;
+- critical dbt and reconciliation tests protect analytical state;
+- ClickHouse remains atomically published and rebuildable from Iceberg;
+- reruns/retries do not create duplicate business data;
+- recovery procedures exist for delivered failure modes;
+- CI and relevant local validation entry points are documented;
+- README architecture, dashboard screenshots, ADRs, and runbooks match the
+  implementation;
+- known technical debt and non-goals remain explicit in `PROGRESS.md` and
+  portfolio documentation.
 
 ---
 
@@ -636,4 +625,5 @@ When choosing between:
 
 choose the simpler implementation.
 
-Complexity should be introduced only when the roadmap creates a real requirement for it.
+Complexity should be introduced only when maintenance of delivered behavior
+requires it, or after an ADR explicitly supersedes the Phase 8 scope freeze.

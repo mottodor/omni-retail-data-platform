@@ -20,7 +20,8 @@ a clean clone converges to the same BI state from this tree plus `.env`.
   revenue / margin / orders / AOV / items KPI tiles, monthly revenue-and-
   margin and orders trends, region and category mix, and delivered-vs-
   delayed by carrier (delivery ops). GMV is lifetime (customer grain) and
-  is excluded from the order-date filter; conversion waits for Phase 9;
+  is excluded from the order-date filter; conversion is not claimed because
+  this repository has no clickstream/attribution source;
 - `assets/customer_dashboard.zip` — the **Customer** dashboard: customers /
   GMV / orders / repeat-rate tiles, new-vs-repeat composition and repeat
   rate by first-order cohort month, GMV by segment and region, GMV per
@@ -32,7 +33,7 @@ a clean clone converges to the same BI state from this tree plus `.env`.
   impressions / clicks / spend / CTR tiles, spend vs budget, CTR, CPC/CPM
   by channel, budget utilization by campaign, and a campaign scorecard
   table, with a native campaign-start-date filter. ROAS/CAC are not
-  computable (no revenue attribution in source data — Phase 9).
+  computable because the delivered sources contain no revenue attribution.
 
 Bundles are sanitized exports (`infrastructure/scripts/superset_bundle_sanitize.py`):
 no `databases/` entries (they would carry the ClickHouse URI **with the
@@ -54,5 +55,5 @@ Notes and known simplifications:
 - "top products" would need a product-grain mart; the Sales dashboard's
   top table works at category × region grain (the finest the published
   marts provide);
-- ROAS/CAC and funnel/conversion metrics are deferred to Phase 9 (no
-  clickstream/attribution data yet).
+- ROAS/CAC and funnel/conversion metrics are outside this repository's final
+  scope because no clickstream/attribution source is delivered.

@@ -2,9 +2,8 @@
 
 Part of the repository agent rules, split out of the monolithic `AGENTS.md`.
 
-**Phase note:** Kafka and Debezium belong to Phase E (CDC). Do not introduce
-these technologies before the roadmap phase that requires them — see the
-implementation order and phase gates in the `AGENTS.md` core.
+Kafka and Debezium are delivered Phase 8 components. Maintenance must preserve
+the CDC semantics and architecture gates in the `AGENTS.md` core.
 
 Read this guide before working on: Kafka topics and consumers, Debezium
 connectors, CDC-derived datasets.
@@ -20,13 +19,8 @@ existing references of the form "AGENTS §N" keep resolving.
 
 ## 18. Kafka and Debezium rules
 
-Do not introduce Kafka before the roadmap phase that requires it.
-
-Kafka is used for:
-
-- CDC transport;
-- application events;
-- clickstream.
+Kafka is used for the delivered PostgreSQL CDC transport. Application-event
+and clickstream domains are outside this repository's final scope.
 
 Debezium is used for PostgreSQL CDC.
 

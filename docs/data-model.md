@@ -18,8 +18,8 @@ Source of truth for the synthetic e-commerce OLTP database running in the
 
 Every table carries `created_at`/`updated_at` (`timestamptz`). Indexes cover
 foreign keys plus `orders.created_at`/`orders.updated_at` and
-`customers.updated_at` for future watermark-based incremental extraction and
-CDC.
+`customers.updated_at` for the delivered watermark-based snapshot extraction
+and CDC paths.
 
 ## Status model
 
@@ -125,7 +125,7 @@ coordinate and is the insert-only MERGE key, so replay is a no-op.
 | Identity | `event_id`, `kafka_topic`, `kafka_partition`, `kafka_offset` | stable transport identity; not a business key |
 | Kafka time | `kafka_timestamp` | broker record timestamp; fallback for partition date |
 | Source routing | `source_schema`, `source_table`, `operation` | allow-listed `public` table; `r/c/u/d` |
-| Source ordering | `source_lsn`, `source_tx_id`, `source_timestamp` | retained for later current-state derivation; LSN is not globally unique |
+| Source ordering | `source_lsn`, `source_tx_id`, `source_timestamp` | retained for current-state derivation; LSN is not globally unique |
 | Raw payload | `key_json`, `envelope_json` | exact UTF-8-decoded schema-less JSON from Kafka |
 | Convenience payload | `before_json`, `after_json` | parsed object JSON; nullable according to operation |
 | Lakehouse metadata | `event_date`, `ingested_at` | source timestamp date (Kafka fallback), UTC ingestion time |
@@ -261,15 +261,16 @@ safe because their Gold facts are parent-gated by live CDC orders.
   `mart_delivery_performance` (slice 3) only;
 - currency normalization to EUR happens in marts (slice 3) via
   `int_fx_rates_daily`; facts keep source currency;
-- CDC → dbt → ClickHouse refresh is not triggered automatically; operators
-  wait for a stable consumed boundary, run a full dbt build, then republish;
+- the host-side recovery `make dbt-build` path does not freeze a Kafka
+  boundary; operators must verify stable lag and avoid overlap with the
+  coordinated Airflow refresh before building and publishing;
 - order items and shipments remain snapshot-only, so a new live order can lack
   child facts until the next snapshot; stale children are suppressed immediately
   when the CDC parent order disappears.
 
 ## Analytics marts (Phase 5 slice 3)
 
-The `analytics` schema holds the business-facing marts for the four planned
+The `analytics` schema holds the business-facing marts for the four delivered
 dashboards. All EUR measures are normalized through `int_orders_fx` — an
 order-grain intermediate view shared by the marts: `rate_to_eur` is the latest
 `int_fx_rates_daily` rate on or before the order date ("latest", not "exact
@@ -310,7 +311,8 @@ Per-mart semantics (source of truth: `dbt/models/marts/schema.yml`):
   `budget_utilization` can exceed 1.0 (the source overspends up to 5 %).
   LIMITATION (spec §2): campaigns are not linked to orders, so revenue
   attribution is impossible with current data — no ROAS is computed and none
-  may be faked; ROAS arrives with clickstream attribution (Phase 9).
+  may be faked. Clickstream attribution is outside this repository's final
+  scope.
 - `mart_delivery_performance` — carrier scorecard (transit times, status mix).
   Fixed status columns follow the API status domain; the counts-sum business
   test makes an unknown new status loud instead of silently dropped.
@@ -376,5 +378,5 @@ full row-by-row equality Gold vs serving), republish idempotency, the
 one-command full rebuild, and reader permissions are asserted by
 `tests/integration/test_serving_publication.py`.
 
-The funnel mart is deferred until its clickstream source exists in
-Phase 9.
+A funnel mart is not delivered because the required clickstream source is
+outside this repository's final scope.

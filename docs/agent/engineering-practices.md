@@ -38,17 +38,17 @@ Do not weaken security simply to make local connectivity easier.
 
 Code changes that affect usage, architecture, or operations require documentation updates.
 
-Expected documentation eventually includes:
+Maintained documentation includes, where applicable to the delivered scope:
 
 - `README.md`;
-- `docs/architecture.md`;
+- `ROADMAP.md`;
+- `PROGRESS.md`;
 - `docs/data-model.md`;
 - `docs/data-contracts.md`;
-- `docs/sla-slo.md`;
 - ADRs;
 - runbooks;
 - benchmark reports;
-- incident postmortem example.
+- dashboard screenshots.
 
 ### 41.1 README
 
@@ -68,7 +68,8 @@ Do not turn README into an internal development dump.
 
 ### 41.2 Runbooks
 
-Operational failures should eventually have runbooks.
+Delivered operational failure modes should have runbooks where recovery is not
+obvious.
 
 Examples:
 
@@ -101,6 +102,7 @@ execution detail of the single current task.
 
 An ADR is required for significant decisions such as:
 
+- reopening or expanding the Phase 8 scope frozen by ADR 0009;
 - adding/removing a platform technology;
 - replacing a catalog;
 - changing source-of-truth ownership;
@@ -108,7 +110,8 @@ An ADR is required for significant decisions such as:
 - introducing a new persistence pattern;
 - changing CI platform;
 - changing major serving architecture;
-- introducing Kubernetes.
+- introducing cluster orchestration such as Kubernetes (which also requires
+  explicitly reopening the ADR 0009 scope).
 
 An ADR should contain:
 
@@ -155,43 +158,47 @@ Before changing code:
 
 Requirements:
 - preserve existing behavior unless the issue explicitly changes it;
-- follow the architecture and sequencing rules in AGENTS.md;
+- follow the maintenance scope and architecture rules in AGENTS.md and ADR 0009;
 - use pinned/reproducible dependencies;
 - do not hardcode secrets;
 - add or update tests;
 - add healthchecks/config validation where applicable;
 - update documentation and .env.example if configuration changes;
 - prefer idempotent operations;
-- do not introduce a new platform technology without an ADR.
+- do not introduce a new feature domain or platform technology without an ADR
+  that explicitly reopens the scope.
 
 Before finishing:
 - run relevant lint/tests/smoke checks;
 - report changed files;
 - report commands actually executed and their result;
 - report known limitations;
-- identify the next logical issue without implementing it.
+- identify the next logical maintenance action, if any, without inventing a
+  new feature phase.
 ```
 
 ---
 
 ## 52. Portfolio completion scenario
 
-The final platform should reproducibly demonstrate:
+The completed Phase 8 capstone should reproducibly demonstrate, within the
+limitations disclosed in `PROGRESS.md`:
 
-1. An order is created or changed in PostgreSQL.
-2. Debezium captures the change from PostgreSQL WAL.
-3. The change enters Kafka.
-4. Bronze preserves raw/immutable representation.
-5. Silver produces cleaned/current analytical state.
-6. dbt updates facts/dimensions.
-7. Gold updates business marts.
-8. The serving publication updates ClickHouse.
-9. Superset reflects the KPI change.
-10. Airflow shows orchestration state.
-11. Grafana shows platform health/freshness.
-12. Marquez shows lineage.
-13. Re-running the same logical work does not create duplicates.
-14. Historical backfill is reproducible.
-15. Failure recovery is documented and demonstrable.
+1. A deterministic PostgreSQL baseline exists.
+2. Supported batch sources preserve raw payloads and load Iceberg Bronze.
+3. A customer, order, or payment is created, changed, or deleted in PostgreSQL.
+4. Debezium captures the change from PostgreSQL WAL and Kafka transports it.
+5. The consumer preserves the raw/immutable CDC representation in Bronze before
+   committing the corresponding offset.
+6. Airflow freezes a healthy, stable Kafka boundary.
+7. dbt produces typed/delete-aware Silver state, Gold facts/dimensions, and
+   business marts; critical tests pass.
+8. The serving publication atomically updates rebuildable ClickHouse tables.
+9. Superset reflects the KPI state through a read-only connection.
+10. Re-running the same logical work does not create duplicate business data.
+11. Recovery procedures for delivered failure modes are documented and
+    demonstrable.
 
-The project is not considered complete merely because all containers start.
+The project is not considered complete merely because all containers start,
+and its production-like educational status must not be presented as production
+readiness.

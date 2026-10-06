@@ -6,7 +6,9 @@ Project architecture and technology stack for OmniRetail Data Platform.
 
 ## Status
 
-Accepted.
+Accepted. The unimplemented future-expansion scope is partially superseded by
+[ADR 0009](0009-freeze-capstone-scope-at-phase-8.md); the architecture and
+technology responsibilities delivered through Phase 8 remain accepted.
 
 ## Context
 

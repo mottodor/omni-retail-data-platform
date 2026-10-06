@@ -35,7 +35,6 @@ Use for:
 - validators;
 - data generators;
 - deterministic transformations;
-- Spark transformation helpers;
 - config parsing.
 
 ### 37.2 Integration tests
@@ -111,7 +110,6 @@ Relevant topics:
 - Trino scan volume;
 - Iceberg partition pruning;
 - small files;
-- Spark shuffle;
 - ClickHouse `ORDER BY`;
 - ClickHouse query latency;
 - batch size;

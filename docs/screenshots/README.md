@@ -1,9 +1,8 @@
 # Dashboard screenshots
 
 ROADMAP Phase 7 acceptance: every delivered dashboard has a screenshot in
-the main README. Screenshots are a one-time visual artifact — they are
-captured manually from the web UI (no browser exists in the agent
-environment) and committed here as PNG files.
+the main README. Screenshots are one-time visual artifacts captured manually
+from the web UI and committed here as JPEG files.
 
 ## Capture procedure
 
@@ -13,15 +12,15 @@ tool of choice) at a typical desktop width (~1600px):
 
 | Dashboard | URL | Save as |
 | --- | --- | --- |
-| Sales | `http://127.0.0.1:8088/superset/dashboard/sales/` | `sales-dashboard.png` |
-| Executive | `http://127.0.0.1:8088/superset/dashboard/executive/` | `executive-dashboard.png` |
-| Customer | `http://127.0.0.1:8088/superset/dashboard/customer/` | `customer-dashboard.png` |
-| Marketing | `http://127.0.0.1:8088/superset/dashboard/marketing/` | `marketing-dashboard.png` |
+| Sales | `http://127.0.0.1:8088/superset/dashboard/sales/` | `sales-dashboard.jpg` |
+| Executive | `http://127.0.0.1:8088/superset/dashboard/executive/` | `executive-dashboard.jpg` |
+| Customer | `http://127.0.0.1:8088/superset/dashboard/customer/` | `customer-dashboard.jpg` |
+| Marketing | `http://127.0.0.1:8088/superset/dashboard/marketing/` | `marketing-dashboard.jpg` |
 
 Login: `SUPERSET_ADMIN_USER` / `SUPERSET_ADMIN_PASSWORD` from `.env`.
 
-The README gallery table links these files by name — no README edit is
-needed, just drop the PNGs into this directory and commit.
+The main README embeds these files directly. Preserve the names when
+recapturing a dashboard so its portfolio link remains stable.
 
 Notes:
 

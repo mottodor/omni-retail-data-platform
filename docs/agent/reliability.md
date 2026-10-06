@@ -60,7 +60,8 @@ The handling policy must be explicit:
 
 ## 29. Data contracts
 
-Important datasets should eventually have contracts containing:
+Important delivered datasets should have contracts containing, where the
+current adapter and source semantics support them:
 
 - owner;
 - schema;
@@ -108,23 +109,18 @@ Pipelines must explicitly define behavior for late-arriving:
 
 - facts;
 - dimensions;
-- clickstream events;
-- API corrections.
+- API corrections;
+- captured CDC events.
 
-Do not assume source events always arrive in event-time order.
-
-For streaming/sessionization tasks, distinguish:
-
-- event time;
-- processing time.
+Do not assume source events always arrive in event-time order. For CDC-derived
+state, distinguish source ordering (for example PostgreSQL LSN and Kafka
+offset) from event, ingestion, and processing timestamps.
 
 ---
 
 ## 32. Failure engineering
 
-The project intentionally includes failures.
-
-Implement explicit handling for scenarios such as:
+Delivered paths require explicit failure behavior for scenarios such as:
 
 - API 429;
 - API 500;
@@ -146,7 +142,7 @@ For every significant failure mode, define:
 - retry policy;
 - idempotency behavior;
 - quarantine or DLQ behavior;
-- alert/observability signal;
+- diagnostic log, health, or status signal;
 - recovery steps.
 
 Do not hide failure to keep a demo green.

@@ -208,9 +208,8 @@ Do not manually mutate production-like schema outside migrations unless the task
 
 ## 46. Generated data
 
-The synthetic data generator is part of the product.
-
-It should produce plausible data for:
+The synthetic data generators and deterministic source simulators are part of
+the delivered capstone. Preserve plausible data for:
 
 - customers;
 - products;
@@ -219,11 +218,11 @@ It should produce plausible data for:
 - order items;
 - payments;
 - shipments;
-- marketing;
-- clickstream.
+- supplier files;
+- mock API sources.
 
-Use deterministic seeds where test reproducibility matters.
-
-The generator should eventually support continuous mutations.
+Clickstream generation is outside this repository's final scope. Use
+deterministic seeds where test reproducibility matters, and preserve the OLTP
+generator's initial-load and mutation modes.
 
 Avoid creating random values that violate database constraints unless testing invalid data explicitly.

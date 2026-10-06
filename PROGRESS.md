@@ -16,16 +16,15 @@ Contract:
 
 ## Current focus
 
-Phase 8 is complete. PostgreSQL -> Debezium/Kafka -> immutable Iceberg Bronze
-is restart-safe and authoritative through typed/delete-aware Silver and Gold
-for customers, orders, and payments. Airflow freezes each analytical refresh at
-a healthy, stable Kafka-offset boundary, runs dbt, then atomically republishes
-ClickHouse. Next: design the Phase 9 clickstream and justified Spark workload.
+Phase 8 is complete and the repository is maintenance-only under ADR 0009.
+Portfolio documentation, dashboard evidence, roadmap scope, and normative agent
+rules are aligned with the final Phase 0–8 boundary. There is no active feature
+phase; maintenance priorities are the tracked technical-debt items below.
 
 ## Phase status
 
 | Phase | Scope | Status |
-|---|---|---|
+| --- | --- | --- |
 | 0 | Bootstrap and engineering standards | done |
 | 1 | Core infrastructure (PostgreSQL, MinIO, Polaris, Trino, Iceberg) | done |
 | 2 | OLTP model and deterministic data generator | done |
@@ -34,32 +33,23 @@ ClickHouse. Next: design the Phase 9 clickstream and justified Spark workload.
 | 5 | dbt + Trino: Bronze -> Silver -> Gold | done |
 | 6 | ClickHouse serving layer | done |
 | 7 | Apache Superset | done |
-| 8 | CDC: Debezium -> Kafka -> Iceberg | done |
-| 9 | Clickstream + Spark | not started — current focus |
-| 10 | Data quality, contracts, failure engineering | not started |
-| 11 | Iceberg maintenance and performance | not started |
-| 12 | Observability and lineage | not started |
-| 13 | GitHub Actions CI/CD v2 | not started |
-| 14 | Data Vault 2.0 mini-domain | not started |
-| 15 | Production simulation / capstone | not started |
-| 16 | Airflow 2 -> 3 migration exercise | not started |
-| 17 | dbt Core 1.10 -> dbt v2 migration exercise | deferred until stable dbt v2 + confirmed Trino compatibility |
-| 18 | GitLab CI migration | not started |
+| 8 | CDC: Debezium -> Kafka -> Iceberg | done — final feature phase |
 
 ## Tracked technical debt
 
 | ID | Debt / risk | Status | Disposition |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | TD-001 | `make up` is not reproducible on a clean host because the pinned MinIO images disappeared from Docker Hub; current workstations use locally built images from checksum-verified release binaries. | open | [#17](https://github.com/mottodor/omni-retail-data-platform/issues/17): restore a reproducible image supply; changing the S3 store requires an ADR. |
-| TD-002 | Four supplier file sources stop in MinIO landing/archive and are not loaded into Iceberg Bronze. | open | [#18](https://github.com/mottodor/omni-retail-data-platform/issues/18): add manifest-driven, idempotent file-source Bronze loading. |
-| TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | scheduled: Phase 11 | Add snapshot expiration/maintenance with retention and rollback safety. |
+| TD-002 | Four supplier file sources stop in MinIO landing/archive and are not loaded into Iceberg Bronze. | open — eligible maintenance | [#18](https://github.com/mottodor/omni-retail-data-platform/issues/18): may add manifest-driven, idempotent Bronze loading inside the delivered batch-ingestion scope; no phase commitment. |
+| TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | open — eligible maintenance | Safe retention/expiration may be added as bounded maintenance with rollback protection; no scheduled phase. |
 | TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
-| TD-005 | The dbt v1 project has 13 generic-test definitions using syntax that must move under `arguments` for dbt v2. | deferred: Phase 17 | Migrate after stable dbt v2 and confirmed Trino compatibility; clear v1 deprecation warnings first. |
-| TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | scheduled: Phase 11 | Measure file growth, then add safe compaction and snapshot expiration without changing raw event semantics. |
+| TD-005 | The dbt v1 project has 13 generic-test definitions using syntax that must move under `arguments` for dbt v2. | accepted capstone limitation | Keep the pinned dbt 1.10 baseline. Syntax cleanup may be maintenance; a dbt major-version migration requires an ADR superseding ADR 0009. |
+| TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | open — eligible maintenance | Compaction/retention may be added only as bounded maintenance that preserves raw event semantics; no scheduled phase. |
 
-## Deferred / follow-ups
+## Scope exclusions
 
-- Superset dashboard screenshots are still a manual step; the README gallery
-  and capture procedure are ready in `docs/screenshots/README.md`.
-- Funnel, conversion, ROAS, and CAC marts remain deferred to Phase 9 because
-  clickstream and attribution data do not exist yet.
+- Clickstream, funnel attribution, CAC, and ROAS are intentional non-goals, not
+  deferred OmniRetail work.
+- Distributed processing, dedicated monitoring/lineage services, alternate
+  modeling domains, and platform migration exercises belong in independently
+  scoped repositories unless a new ADR explicitly supersedes ADR 0009.

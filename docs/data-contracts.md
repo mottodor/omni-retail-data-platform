@@ -1,10 +1,19 @@
-# Data Contracts — DRAFT
+# Data Contracts
 
-- **Status:** draft (ownership and SLA numbers will be finalized in Phase 10 — Data Quality & contracts)
-- **Scope:** Phase 3 external batch sources plus the Phase 8 PostgreSQL raw CDC ledger, typed Silver projections, and CDC-backed customer/order/payment Gold models
-- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas`, API envelope checks, fail-stop Debezium envelope/route validation in `omni_retail.streaming.cdc`, and dbt typed/current/Gold tests; file violations quarantine data, malformed CDC records block offset advancement, and incompatible typed or Gold CDC state fails the dbt build
+- **Status:** maintained baseline for the delivered interfaces; ownership and
+  freshness values are educational placeholders, not production SLAs
+- **Scope:** external batch sources plus the delivered PostgreSQL raw CDC
+  ledger, typed Silver projections, and CDC-backed customer/order/payment Gold
+  models
+- **Enforcement:** schema definitions in
+  `omni_retail.ingestion.files.schemas`, API envelope checks, fail-stop
+  Debezium envelope/route validation in `omni_retail.streaming.cdc`, and dbt
+  typed/current/Gold tests; file violations quarantine data, malformed CDC
+  records block offset advancement, and incompatible typed or Gold CDC state
+  fails the dbt build
 
-Additional internal modeled datasets will receive contracts in later phases.
+Contract coverage is intentionally limited to the delivered interfaces listed
+here; this repository makes no commitment to a broader future contract layer.
 
 ## Conventions
 
@@ -139,7 +148,7 @@ All API sources share the same mechanics:
 | Raw payload | exact decoded key and Debezium envelope JSON retained as text |
 | Delivery | at-least-once; Iceberg MERGE before synchronous Kafka offset commit |
 | Invalid record | fail-stop with topic/partition/offset context; offset is not committed |
-| Retention | Kafka: 7 days or 5 GiB per data-topic partition; Iceberg history has no Phase 8 expiry |
+| Retention | Kafka: 7 days or 5 GiB per data-topic partition; automated Iceberg history expiration is not delivered (see TD-006 in `../PROGRESS.md`) |
 
 Each route has one exact primary-key contract: `customers.customer_id`,
 `orders.order_id`, or `payments.payment_id`. The Kafka key must contain exactly
