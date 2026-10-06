@@ -1,11 +1,57 @@
 version: 2
 
 models:
+  - name: int_cdc_customer_versions
+    description: >
+      Deterministic transaction-boundary customer SCD2 history derived from
+      the immutable CDC ledger. Grain: one row per committed non-delete
+      customer version. Initial r events are the pre-streaming baseline;
+      c/u/d events sharing a source LSN collapse to the final customer-topic
+      offset. Validity is half-open in PostgreSQL LSN space, while source
+      timestamps are audit-only. Deletes close the prior version and emit no
+      attribute-less row; a later create begins a new lifecycle.
+    columns:
+      - name: customer_key
+        description: Deterministic '<customer_id>_<event_id>' surrogate key.
+        tests: [unique, not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: event_id
+        tests: [unique, not_null]
+      - name: customer_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["active", "inactive", "churned"]
+      - name: segment
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["standard", "premium", "vip"]
+      - name: operation
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["r", "c", "u"]
+      - name: valid_from_lsn
+        description: Inclusive stream boundary; NULL only for an r baseline.
+      - name: valid_to_lsn
+        description: Exclusive next customer boundary; NULL only while live and open.
+      - name: is_snapshot_baseline
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
+      - name: kafka_offset
+        tests: [not_null]
+
   - name: int_cdc_customers_current
     description: >
       Delete-aware current customer state derived from stg_cdc_customers.
-      Grain: one row per live customer_id. All events are ranked by source_lsn,
-      then single-partition Kafka offset, before a winning delete is filtered.
+      Grain: one row per live customer_id. Initial r events rank as the
+      pre-streaming baseline; streamed events rank by source_lsn and then the
+      single-partition Kafka offset before a winning delete is filtered.
       Event timestamps, row updated_at, and ingestion time never choose state.
     columns:
       - name: customer_id
@@ -35,8 +81,9 @@ models:
   - name: int_cdc_orders_current
     description: >
       Delete-aware current order state derived from stg_cdc_orders. Grain: one
-      row per live order_id. PostgreSQL LSN and then Kafka offset select the
-      winner before deletes are removed.
+      row per live order_id. Initial r events rank as the baseline;
+      PostgreSQL LSN and then Kafka offset select the streamed winner before
+      deletes are removed.
     columns:
       - name: order_id
         tests: [unique, not_null]
@@ -69,8 +116,9 @@ models:
   - name: int_cdc_payments_current
     description: >
       Delete-aware current payment state derived from stg_cdc_payments. Grain:
-      one row per live payment_id. PostgreSQL LSN and then Kafka offset select
-      the winner before deletes are removed.
+      one row per live payment_id. Initial r events rank as the baseline;
+      PostgreSQL LSN and then Kafka offset select the streamed winner before
+      deletes are removed.
     columns:
       - name: payment_id
         tests: [unique, not_null]

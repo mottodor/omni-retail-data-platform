@@ -145,9 +145,9 @@ does not sort or overwrite by business key, LSN, or timestamp, and it makes no
 cross-topic total-order claim.
 
 This table does not replace the snapshot-shaped
-`bronze.customers/orders/payments` tables. It now feeds parallel typed/current-
-state Silver models; switching the established Gold path remains a separate
-Phase 8 cutover.
+`bronze.customers/orders/payments` tables. It feeds typed/current-state Silver
+and is authoritative for captured Gold entities; snapshot tables remain
+rollback inputs and continue to support uncaptured children.
 
 ## CDC typed/current-state Silver (Phase 8)
 
@@ -170,18 +170,24 @@ The corresponding `int_cdc_<entity>_current` views have one row per live
 business key. They rank all operations before filtering deletes:
 
 ```text
-source_lsn DESC NULLS LAST -> kafka_offset DESC -> event_id DESC
+streamed c/u/d after initial r baseline
+  -> source_lsn DESC
+  -> kafka_offset DESC
+  -> event_id DESC
 ```
 
-LSN is the PostgreSQL source-order boundary; offset resolves snapshot/null-LSN
-and same-LSN events inside each single-partition table topic. Event time, row
-`updated_at`, Kafka time, transaction ID, and ingestion time do not select
+An `r` event is always the pre-streaming baseline even if Debezium supplies an
+LSN. LSN is the PostgreSQL source-order boundary for streamed events; offset
+resolves same-LSN events inside each single-partition table topic. Event time,
+row `updated_at`, Kafka time, transaction ID, and ingestion time do not select
 state. A winning delete removes the key, while a later recreate wins normally.
-There is no cross-topic order claim.
+There is no cross-topic Kafka order claim.
 
-These models deliberately run alongside the established snapshot-backed
-`stg_*`/`int_*` and Gold models. Gold cutover must first define customer SCD2
-delete intervals and stale snapshot-only `order_items`/`shipments` behavior.
+`int_cdc_customer_versions` additionally collapses customer events at each
+transaction LSN and emits one row per non-delete SCD2 version. It feeds the
+CDC-authoritative Gold dimension described below. Snapshot-backed `stg_*` and
+`int_*` models remain operational as rollback inputs and as the source for
+uncaptured child tables; they are not unioned into captured Gold entities.
 
 ## Silver layer (Phase 5 slice 2)
 
@@ -192,11 +198,11 @@ _ingested_at desc` on the business key. `int_fx_rates_daily` keeps the
 latest rate per (currency, day); `int_campaigns` keeps the latest daily
 campaign snapshot; `int_deliveries` keeps the latest carrier status.
 
-Known limitation of this established path: snapshot extraction cannot see hard
-deletes, so a deleted source row retains its last version in the snapshot-backed
-`int_*` and downstream facts/dimensions. The parallel Phase 8
-`int_cdc_*_current` views close that gap for their three entities, but Gold has
-not switched to them yet.
+Known limitation of this retained path: snapshot extraction cannot see hard
+deletes, so a deleted source row retains its last version in snapshot-backed
+`int_*`. Gold no longer reads snapshot customers/orders/payments, preventing
+those rows from being resurrected. Snapshot-only order items and shipments are
+safe because their Gold facts are parent-gated by live CDC orders.
 
 ## Gold layer — Kimball (Phase 5 slice 2)
 
@@ -204,36 +210,45 @@ not switched to them yet.
 
 | Model | Grain | PK | Type | Upstream |
 |---|---|---|---|---|
-| `dim_date` | calendar day | `date_key` (yyyymmdd int) | generated | `int_orders` bounds (created/updated) |
+| `dim_date` | calendar day | `date_key` (yyyymmdd int) | generated | live `fact_orders` bounds (created/updated) |
 | `dim_product` | product | `product_id` | SCD1 | `int_products`, `int_categories` |
 | `dim_campaign` | campaign | `campaign_id` | SCD1 | `int_campaigns` |
-| `dim_customer` | customer **version** | `customer_key` | SCD2 | `stg_customers` history |
+| `dim_customer` | committed non-delete customer **version** | `customer_key` | CDC SCD2 | `int_cdc_customer_versions` |
 
 `dim_customer` SCD2 semantics:
 
-- every bronze row of a customer is one version (incremental batches carry
-  only changed rows);
-- `valid_from` = `_batch_date` of the version; `valid_to` = the day before
-  the next version (inclusive); open versions use `9999-12-31`;
-- `customer_key = '<customer_id>_<valid_from>'` — deterministic, rebuildable;
-- `is_current` marks the single open version (tested);
-- daily grain: multiple same-day source changes collapse into that day's
-  version.
+- an initial `r` winner is the pre-streaming baseline, independent of its LSN;
+- streamed `c/u/d` events are ordered by PostgreSQL source LSN and collapsed to
+  the final customer-topic offset at each LSN;
+- every winning `r/c/u` emits one version; `d` closes the previous version but
+  emits no attribute-less row; a later `c` begins a new lifecycle;
+- `customer_key = '<customer_id>_<event_id>'` is deterministic and cannot
+  collide for same-day changes or delete/recreate cycles;
+- `valid_from_lsn` is inclusive and null only for the baseline;
+  `valid_to_lsn` is the exclusive next customer boundary and null only for a
+  live open version; `is_snapshot_baseline` makes the null lower bound explicit;
+- `opened_at_source_timestamp` / `closed_at_source_timestamp` are audit fields,
+  not validity boundaries; regressing clocks cannot reorder history;
+- live customers have exactly one current version; deleted customers retain
+  history with zero current versions.
 
 ### Facts
 
 | Model | Grain | PK | FKs | Measures | Notes |
 |---|---|---|---|---|---|
-| `fact_orders` | order | `order_id` | `customer_key` → `dim_customer` (point-in-time on `created_at`, earliest-version fallback) | `shipping_cost`, `order_total` (source currency) | degenerate `customer_id` |
-| `fact_order_items` | order line | `order_item_id` | `order_id` → `fact_orders`; `product_id` → `dim_product` | `quantity`, `unit_price`, `line_total` | immutable |
-| `fact_payments` | payment | `payment_id` | `order_id` → `fact_orders` | `payment_amount` | degenerate `transaction_id`; reconciled vs orders by test |
-| `fact_shipments` | shipment | `shipment_id` | `order_id` → `fact_orders` | — | degenerate `tracking_number` |
+| `fact_orders` | live order | `order_id` | lifecycle-start `customer_key` → `dim_customer` | `shipping_cost`, `order_total` (source currency) | CDC current state; delete removes row |
+| `fact_order_items` | captured snapshot order line with live parent | `order_item_id` | `order_id` → `fact_orders`; `product_id` → `dim_product` | `quantity`, `unit_price`, `line_total` | parent gate removes stale cascade children; new children can lag |
+| `fact_payments` | live payment | `payment_id` | `order_id` → `fact_orders` | `payment_amount` | CDC current state; reconciled vs orders at stable boundary |
+| `fact_shipments` | captured snapshot shipment with live parent | `shipment_id` | `order_id` → `fact_orders` | — | parent gate removes stale cascade children; new children can lag |
 
 ### Business tests (dbt singular)
 
 - orders ↔ payments: exactly one payment per order, equal amounts,
-  consistent status pairs, no orphans;
-- SCD2: non-overlapping contiguous intervals; exactly one current version;
+  consistent status pairs, no orphans (fail-loud at a stable consumed boundary);
+- captured Gold order/payment key sets exactly equal CDC live current state;
+- streamed `c/u/d` events always carry a source LSN;
+- SCD2: non-overlapping half-open intervals, at most one current version,
+  exactly one for each live customer and zero after delete;
 - non-negative amounts; strictly positive FX rates;
 - temporal ordering (created ≤ updated; shipped ≤ delivered; payment
   created ≥ order created; campaign start ≤ end);
@@ -246,8 +261,11 @@ not switched to them yet.
   `mart_delivery_performance` (slice 3) only;
 - currency normalization to EUR happens in marts (slice 3) via
   `int_fx_rates_daily`; facts keep source currency;
-- snapshot extracts hide hard deletes until CDC (Phase 8);
-- SCD2 versions have daily granularity (see above).
+- CDC → dbt → ClickHouse refresh is not triggered automatically; operators
+  wait for a stable consumed boundary, run a full dbt build, then republish;
+- order items and shipments remain snapshot-only, so a new live order can lack
+  child facts until the next snapshot; stale children are suppressed immediately
+  when the CDC parent order disappears.
 
 ## Analytics marts (Phase 5 slice 3)
 
@@ -278,8 +296,10 @@ Per-mart semantics (source of truth: `dbt/models/marts/schema.yml`):
   `revenue_eur` is item-line revenue excluding shipping (shipping is
   order-grain and stays in `fact_orders`/`int_orders_fx`). `region` is the
   customer's point-in-time version (order `customer_key` → `dim_customer`).
-  Known simplification (mock source): product prices are currency-naive; line
-  amounts are normalized with the order currency's FX rate.
+  Snapshot-only lines are parent-gated by live CDC orders: deleted-order lines
+  disappear immediately, while new-order revenue can lag until the next child
+  snapshot. Known simplification (mock source): product prices are
+  currency-naive; line amounts are normalized with the order currency's FX rate.
 - `mart_customer_ltv` — retention/LTV/activation analysis. `gmv_eur` is
   realized order value (`order_total` incl. shipping, EUR); `orders_count`
   counts every order (activity); `avg_order_value_eur` = `gmv_eur` / realized

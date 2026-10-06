@@ -1,8 +1,9 @@
 -- Cross-grain reconciliation (Review Focus 5): per order date, the mart's
 -- item-line revenue (EUR, realized orders only) must equal the order-grain
--- truth (order_total - shipping_cost) / rate from int_orders_fx. Different
--- source grain catches fan-out/join bugs; both sides exclude cancelled and
--- refunded orders (realized-revenue policy, Global Constraints).
+-- truth (order_total - shipping_cost) / rate from int_orders_fx for orders
+-- whose snapshot-only lines are currently available. Different source grain
+-- catches fan-out/join bugs; the child-availability gate preserves the Phase 8
+-- hybrid lag contract. Both sides exclude cancelled and refunded orders.
 with mart_side as (
     select
         order_date,
@@ -14,8 +15,13 @@ truth_side as (
     select
         date(created_at) as order_date,
         sum((order_total - shipping_cost) / rate_to_eur) as revenue_eur
-    from {{ ref('int_orders_fx') }}
+    from {{ ref('int_orders_fx') }} as o
     where order_status not in ('cancelled', 'refunded')
+      and exists (
+          select 1
+          from {{ ref('fact_order_items') }} as i
+          where i.order_id = o.order_id
+      )
       and rate_to_eur is not null
     group by date(created_at)
 )

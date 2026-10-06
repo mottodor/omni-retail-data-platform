@@ -1,14 +1,19 @@
 {{ config(materialized='view') }}
 
 -- Grain: one row per live customer business key.
--- State order is PostgreSQL LSN, then the single-partition table-topic offset.
--- Event/row timestamps and ingestion time are deliberately not ordering keys.
+-- Initial r events are the pre-streaming baseline. Streamed state order is
+-- PostgreSQL LSN, then the single-partition table-topic offset. Event/row
+-- timestamps and ingestion time are deliberately not ordering keys.
 with ranked as (
     select
         *,
         row_number() over (
             partition by customer_id
-            order by source_lsn desc nulls last, kafka_offset desc, event_id desc
+            order by
+                case when operation = 'r' then 0 else 1 end desc,
+                source_lsn desc nulls last,
+                kafka_offset desc,
+                event_id desc
         ) as version_rank
     from {{ ref('stg_cdc_customers') }}
 )

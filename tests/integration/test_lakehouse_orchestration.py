@@ -117,7 +117,14 @@ def test_dataset_triggered_lakehouse_pipeline(
         f"select count(*) from iceberg.{namespace.analytics}.mart_daily_sales "
         f"where order_date = DATE '{DAY_1:%Y-%m-%d}'"
     )
-    assert day1_rows == 3
+    assert day1_rows == 2
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{namespace.analytics}.mart_customer_ltv "
+            "where customer_id = 9910001"
+        )
+        == 1
+    )
     assert namespace.bronze != "bronze"
     assert namespace.analytics != "analytics"
 

@@ -4,9 +4,9 @@ models:
   - name: dim_date
     description: >
       Calendar dimension. Purpose: standardized date attributes for drill-downs.
-      Grain: one row per calendar day in the observed order-activity window
-      (created_at/updated_at of orders). PK: date_key.
-      Upstream: int_orders (bounds only).
+      Grain: one row per calendar day in the live CDC order-activity window
+      (created_at/updated_at of fact_orders). PK: date_key.
+      Upstream: fact_orders (bounds only).
     columns:
       - name: date_key
         description: Integer surrogate key in yyyymmdd form.
@@ -28,8 +28,9 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('int_categories')
-              field: category_id
+              arguments:
+                to: ref('int_categories')
+                field: category_id
 
   - name: dim_campaign
     description: >
@@ -44,20 +45,23 @@ models:
       - name: channel
         tests:
           - accepted_values:
-              values: ["search", "display", "social", "email", "video"]
+              arguments:
+                values: ["search", "display", "social", "email", "video"]
       - name: campaign_status
         tests:
           - accepted_values:
-              values: ["active", "paused", "completed", "scheduled"]
+              arguments:
+                values: ["active", "paused", "completed", "scheduled"]
 
   - name: dim_customer
     description: >
-      Customer dimension, SCD Type 2 with daily version grain.
-      Grain: one row per customer version. PK: customer_key
-      ('<customer_id>_<valid_from>'). Semantics: valid_from = logical batch
-      date carrying the version; valid_to = day before the next version
-      (inclusive; 9999-12-31 while open); is_current marks the single open
-      version. Upstream: stg_customers (full Bronze history).
+      Delete-aware customer dimension rebuilt from immutable CDC history.
+      Grain: one row per committed non-delete customer version. PK:
+      customer_key ('<customer_id>_<event_id>'). Initial r events form the
+      pre-streaming baseline; streamed versions use inclusive valid_from_lsn
+      and exclusive valid_to_lsn boundaries. A delete closes the preceding
+      version and emits no row; a later create starts a new lifecycle. Source
+      timestamps are audit-only. Upstream: int_cdc_customer_versions.
     columns:
       - name: customer_key
         tests: [unique, not_null]
@@ -66,19 +70,33 @@ models:
       - name: customer_status
         tests:
           - accepted_values:
-              values: ["active", "inactive", "churned"]
+              arguments:
+                values: ["active", "inactive", "churned"]
       - name: segment
         tests:
           - accepted_values:
-              values: ["standard", "premium", "vip"]
+              arguments:
+                values: ["standard", "premium", "vip"]
+      - name: valid_from_lsn
+        description: Inclusive streamed boundary; NULL only for an initial r baseline.
+      - name: valid_to_lsn
+        description: Exclusive next customer transaction boundary; NULL only while open.
+      - name: is_snapshot_baseline
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
+      - name: event_id
+        tests: [unique, not_null]
 
   - name: fact_orders
     description: >
-      Order fact (current state). Grain: one row per order. PK: order_id.
-      Measures: shipping_cost, order_total (source currency). Degenerate
-      natural key: customer_id. FK: customer_key — the SCD2 version valid on
-      date(created_at) via point-in-time join with earliest-version
-      fallback. Upstream: int_orders, dim_customer.
+      Delete-aware current order fact. Grain: one row per live CDC order. PK:
+      order_id. Measures: shipping_cost, order_total (source currency).
+      customer_key is frozen at the current order lifecycle's r/c boundary:
+      an r order uses the customer baseline; a c order uses the half-open
+      customer LSN interval containing its creation transaction. Later order
+      updates do not re-key the fact and there is no fallback. Upstream:
+      int_cdc_orders_current, stg_cdc_orders, dim_customer.
     columns:
       - name: order_id
         tests: [unique, not_null]
@@ -86,18 +104,23 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('dim_customer')
-              field: customer_key
+              arguments:
+                to: ref('dim_customer')
+                field: customer_key
       - name: order_status
         tests:
           - accepted_values:
-              values: ["pending", "paid", "shipped", "delivered", "cancelled", "refunded"]
+              arguments:
+                values: ["pending", "paid", "shipped", "delivered", "cancelled", "refunded"]
 
   - name: fact_order_items
     description: >
-      Order-line fact. Grain: one row per order line. PK: order_item_id.
-      Measures: quantity, unit_price, line_total.
-      Upstream: int_order_items; FKs to fact_orders and dim_product.
+      Snapshot-backed order-line fact, parent-gated by live CDC orders.
+      Grain: one row per captured order line whose parent exists in
+      fact_orders. PK: order_item_id. Measures: quantity, unit_price,
+      line_total. New-order lines can lag until the next snapshot; stale
+      lines disappear immediately after a CDC parent delete. Upstream:
+      int_order_items, fact_orders; FK to dim_product.
     columns:
       - name: order_item_id
         tests: [unique, not_null]
@@ -105,21 +128,23 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('fact_orders')
-              field: order_id
+              arguments:
+                to: ref('fact_orders')
+                field: order_id
       - name: product_id
         tests:
           - not_null
           - relationships:
-              to: ref('dim_product')
-              field: product_id
+              arguments:
+                to: ref('dim_product')
+                field: product_id
 
   - name: fact_payments
     description: >
-      Payment fact. Grain: one row per payment. PK: payment_id.
-      Measures: payment_amount. Degenerate: transaction_id.
-      Reconciliation against fact_orders is a singular test.
-      Upstream: int_payments.
+      Delete-aware current payment fact. Grain: one row per live CDC payment.
+      PK: payment_id. Measures: payment_amount. Degenerate: transaction_id.
+      Reconciliation against fact_orders remains fail-loud at a stable
+      consumed boundary. Upstream: int_cdc_payments_current.
     columns:
       - name: payment_id
         tests: [unique, not_null]
@@ -127,18 +152,22 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('fact_orders')
-              field: order_id
+              arguments:
+                to: ref('fact_orders')
+                field: order_id
       - name: payment_status
         tests:
           - accepted_values:
-              values: ["pending", "authorized", "captured", "failed", "refunded", "cancelled"]
+              arguments:
+                values: ["pending", "authorized", "captured", "failed", "refunded", "cancelled"]
 
   - name: fact_shipments
     description: >
-      Shipment fact. Grain: one row per shipment. PK: shipment_id.
-      Degenerate: tracking_number. shipped_at <= delivered_at is
-      business-tested. Upstream: int_shipments.
+      Snapshot-backed shipment fact, parent-gated by live CDC orders. Grain:
+      one row per captured shipment whose parent exists in fact_orders. PK:
+      shipment_id. New-order shipments can lag until the next snapshot;
+      stale shipments disappear after a CDC parent delete. Degenerate:
+      tracking_number. Upstream: int_shipments, fact_orders.
     columns:
       - name: shipment_id
         tests: [unique, not_null]
@@ -146,9 +175,11 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('fact_orders')
-              field: order_id
+              arguments:
+                to: ref('fact_orders')
+                field: order_id
       - name: shipment_status
         tests:
           - accepted_values:
-              values: ["pending", "in_transit", "delivered", "cancelled"]
+              arguments:
+                values: ["pending", "in_transit", "delivered", "cancelled"]

@@ -1,7 +1,6 @@
 # Runbook — PostgreSQL CDC (Debezium + Kafka -> Iceberg Bronze)
 
-Scope: Phase 8 raw CDC for `customers`, `orders`, and `payments` (ADR 0006).
-This is a local single-node deployment: no HA, TLS, or exactly-once claim.
+Scope: Phase 8 CDC for `customers`, `orders`, and `payments`: immutable Bronze delivery (ADR 0006) and CDC-authoritative Gold cutover (ADR 0007). This is a local single-node deployment: no HA, TLS, or exactly-once claim.
 
 ## Start and verify
 
@@ -96,13 +95,36 @@ uv run python -m omni_retail.streaming.cdc run \
 Use a different `CDC_CONSUMER_GROUP_ID` for diagnostics unless intentionally
 advancing the production-like group.
 
-## Build and inspect typed current state
+## Build and publish CDC-backed Gold
 
-Build the parallel CDC Silver graph after Bronze contains events:
+Gold is not automatically triggered by CDC. First wait for a stable consumed
+boundary across all three data topics:
 
 ```bash
-make dbt-build ARGS="--select stg_cdc_customers stg_cdc_orders stg_cdc_payments int_cdc_customers_current int_cdc_orders_current int_cdc_payments_current"
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:29092 \
+  --group omni-iceberg-bronze-cdc-v1 --describe
 ```
+
+Record each topic's `CURRENT-OFFSET`, `LOG-END-OFFSET`, and `LAG`. Proceed only
+when every selected partition has lag 0 and two consecutive checks show the
+same end offsets (or source writes are intentionally paused). Because Kafka
+offers no cross-topic total order, a build during uneven order/payment lag can
+fail reconciliation; wait for lag to clear and rerun rather than weakening the
+test.
+
+Run a coordinated full graph rebuild, then republish the unchanged mart schemas:
+
+```bash
+make dbt-build
+make serving-publish
+```
+
+The build derives `dim_customer`, `fact_orders`, and `fact_payments` only from
+CDC. Snapshot Silver stays available for rollback and supplies uncaptured
+`order_items`/`shipments`; their Gold facts are filtered through the live CDC
+order set. The ClickHouse full-snapshot swap removes rows that vanished from
+Gold without a serving migration.
 
 Inspect the raw history and the selected live winner together:
 
@@ -118,11 +140,12 @@ FROM iceberg.silver.int_cdc_orders_current
 WHERE order_id = 123;
 ```
 
-The winner is the greatest non-null PostgreSQL LSN, then Kafka offset within
-the fixed single-partition table topic. A snapshot event with null LSN is
-ordered by offset until a streaming event exists. A latest delete correctly
-returns no current-state row. Do not diagnose state using `updated_at`, source
-or Kafka timestamp, transaction ID, or `ingested_at`; those are audit fields.
+An initial `r` event is always the pre-streaming baseline, even when Debezium
+supplies an LSN. The streamed winner is the greatest PostgreSQL LSN, then Kafka
+offset within the fixed single-partition table topic. A latest delete correctly
+returns no current-state row. A streamed `c/u/d` without LSN fails the dbt
+contract. Do not diagnose state using `updated_at`, source or Kafka timestamp,
+transaction ID, or `ingested_at`; those are audit fields.
 
 If dbt fails during typed projection:
 
@@ -135,9 +158,29 @@ If dbt fails during typed projection:
 5. rerun the selected dbt graph. Do not replace strict casts with `try_cast` or
    suppress a required-field test merely to make the build green.
 
-These views are parallel verification models. Existing Gold, ClickHouse, and
-Superset outputs still use snapshot-backed Silver until the separate downstream
-cutover defines SCD2 deletes and snapshot-only child cleanup.
+Inspect customer SCD2 and live Gold state after the build:
+
+```sql
+SELECT customer_id, customer_key, is_snapshot_baseline,
+       valid_from_lsn, valid_to_lsn, is_current
+FROM iceberg.gold.dim_customer
+ORDER BY customer_id, is_snapshot_baseline DESC, valid_from_lsn;
+
+SELECT order_id, customer_id, customer_key
+FROM iceberg.gold.fact_orders
+ORDER BY order_id;
+```
+
+Deletes close customer history without emitting an attribute-less dimension
+row and remove winning order/payment keys. A later customer create opens a new
+lifecycle. An order `r` uses the baseline customer key; an order `c` uses the
+half-open customer LSN interval containing its create LSN. Later order updates
+do not re-key the fact. Missing/ambiguous customer history fails the build;
+there is no fallback.
+
+A new CDC order can temporarily have no line/shipment rows until the next
+snapshot. This is expected. A deleted order must have no Gold line/shipment
+rows even if stale rows remain in snapshot Silver.
 
 ## Source schema changes
 
@@ -255,8 +298,14 @@ reset: analytical history and transport state have separate ownership.
 
 ## Rollback
 
-Stop the consumer and Connect, record final offsets, then drop the inactive
-slot/publication only if CDC is being disabled. Existing seven-table batch
-snapshot ingestion remains operational, and Gold still reads its snapshot-
-backed Silver path. The parallel `stg_cdc_*` / `int_cdc_*_current` views may be
-dropped without changing Gold, ClickHouse, or Superset.
+For a Gold-only rollback, do not delete CDC Bronze or stop capture. Revert
+`dim_customer`, `fact_orders`, and `fact_payments` to their snapshot-backed
+references, restore date-validity SCD2, run a full dbt rebuild, and republish
+ClickHouse. Snapshot ingestion/Silver remain operational specifically for this
+path. Record that rollback reintroduces the known correctness regression: hard
+deletes survive as their last snapshot rows.
+
+To disable CDC itself, first stop the consumer and Connect and record final
+offsets. Drop the inactive slot/publication only after accepting that recovery
+boundary. Do not remove the immutable Bronze ledger merely because Gold rolled
+back.

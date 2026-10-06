@@ -34,11 +34,16 @@ CDC_DBT_MODELS = (
     "int_cdc_customers_current",
     "int_cdc_orders_current",
     "int_cdc_payments_current",
+    "int_cdc_customer_versions",
+    "dim_customer",
+    "fact_orders",
+    "fact_payments",
 )
 
 
 class Namespace(Protocol):
     silver: str
+    gold: str
 
     def dbt_env(self) -> dict[str, str]: ...
 
@@ -96,7 +101,7 @@ def run_cdc_dbt(namespace: Namespace, *, target_path: Path) -> None:
         timeout=300,
         env=env,
     )
-    assert completed.returncode == 0, "typed/current-state CDC dbt graph must build"
+    assert completed.returncode == 0, "CDC Silver and delete-aware core graph must build"
 
 
 def connector_running() -> bool:
@@ -375,6 +380,19 @@ def test_postgres_cdc_create_update_delete_replay_and_restart(
                 f"where payment_id = {payment_id}"  # nosec B608 -- DB-owned integer
             )
             assert len(payment_state) == 1 and as_str(payment_state[0][0]) == "cancelled"
+            gold = lakehouse_namespace.gold
+            gold_order = executor.fetch(
+                f"select order_status, customer_key from iceberg.{gold}.fact_orders "
+                f"where order_id = {order_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert len(gold_order) == 1
+            assert as_str(gold_order[0][0]) == "cancelled"
+            assert as_str(gold_order[0][1]).startswith(f"{customer_ids[0]}_")
+            gold_payment = executor.fetch(
+                f"select payment_status from iceberg.{gold}.fact_payments "
+                f"where payment_id = {payment_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert len(gold_payment) == 1 and as_str(gold_payment[0][0]) == "cancelled"
 
             source.execute("delete from orders where order_id=%s", (order_id,))
             source.execute("delete from customers where customer_id=%s", (customer_ids[0],))
@@ -386,6 +404,8 @@ def test_postgres_cdc_create_update_delete_replay_and_restart(
                 "nine c/u/d Bronze events",
                 lambda: count_owned(executor, predicate) >= expected_events,
             )
+            run_cdc_dbt(lakehouse_namespace, target_path=tmp_path / "dbt-target-deleted")
+            gold = lakehouse_namespace.gold
             deleted_customer_count = executor.fetch(
                 f"select count(*) from iceberg.{silver}.int_cdc_customers_current "
                 f"where customer_id = {customer_ids[0]}"  # nosec B608 -- DB-owned integer
@@ -401,6 +421,19 @@ def test_postgres_cdc_create_update_delete_replay_and_restart(
                 f"where payment_id = {payment_id}"  # nosec B608 -- DB-owned integer
             )
             assert as_int(deleted_payment_count[0][0]) == 0
+            deleted_dimension_current = executor.fetch(
+                f"select count(*) from iceberg.{gold}.dim_customer "
+                f"where customer_id = {customer_ids[0]} and is_current"  # nosec B608
+            )
+            assert as_int(deleted_dimension_current[0][0]) == 0
+            deleted_fact_order = executor.fetch(
+                f"select count(*) from iceberg.{gold}.fact_orders where order_id = {order_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert as_int(deleted_fact_order[0][0]) == 0
+            deleted_fact_payment = executor.fetch(
+                f"select count(*) from iceberg.{gold}.fact_payments where payment_id = {payment_id}"  # nosec B608 -- DB-owned integer
+            )
+            assert as_int(deleted_fact_payment[0][0]) == 0
             rows = executor.fetch(  # nosec B608 -- predicate contains owned integer IDs only
                 f"select source_table, operation, source_lsn from {TABLE} "
                 f"where {predicate} order by kafka_topic, kafka_offset"

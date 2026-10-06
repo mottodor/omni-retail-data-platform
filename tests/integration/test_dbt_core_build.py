@@ -29,8 +29,10 @@ from omni_retail.lakehouse.bronze.specs import (
     all_sources,
     spec_by_source,
 )
+from omni_retail.streaming.cdc.model import event_identity
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CUSTOMER_TOPIC = "omni.oltp.public.customers"
 
 
 class Namespace(Protocol):
@@ -64,11 +66,11 @@ def seeded_world(
     yield lakehouse_namespace
 
 
-def test_full_dbt_build_with_kimball_semantics(seeded_world: Namespace, tmp_path: Path) -> None:
+def run_dbt_build(namespace: Namespace, *, target_path: Path) -> None:
     env = {
         **os.environ,
         "TRINO_HOST": os.environ.get("TRINO_HOST", "127.0.0.1"),
-        **seeded_world.dbt_env(),
+        **namespace.dbt_env(),
     }
     completed = subprocess.run(
         [
@@ -81,7 +83,13 @@ def test_full_dbt_build_with_kimball_semantics(seeded_world: Namespace, tmp_path
             "--profiles-dir",
             "dbt",
             "--target-path",
-            str(tmp_path / "dbt-target"),
+            str(target_path),
+            # Serialize DDL in this two-build determinism scenario. Polaris
+            # catalog metadata is eventually visible on the local stack, and
+            # concurrent create/test tasks make that infrastructure race mask
+            # the CDC assertions this test owns.
+            "--threads",
+            "1",
         ],
         cwd=REPO_ROOT,
         check=False,
@@ -90,11 +98,64 @@ def test_full_dbt_build_with_kimball_semantics(seeded_world: Namespace, tmp_path
     )
     assert completed.returncode == 0, "dbt build (models + tests) must succeed"
 
+
+def query_rows(sql: str) -> list[tuple[object, ...]]:
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        return executor.fetch(sql)
+
+
+def cdc_output_snapshot(namespace: Namespace) -> dict[str, list[tuple[object, ...]]]:
+    """Capture every CDC-cutover Gold/mart row for repeat-build comparison."""
+    gold = namespace.gold
+    analytics = namespace.analytics
+    queries = {
+        "dim_customer": (
+            "select customer_key, customer_id, email, first_name, last_name, region, city, "
+            "customer_status, segment, registered_at, created_at, updated_at, "
+            "valid_from_lsn, valid_to_lsn, is_snapshot_baseline, is_current, "
+            "opened_at_source_timestamp, closed_at_source_timestamp, event_id, "
+            "source_tx_id, kafka_offset "
+            f"from iceberg.{gold}.dim_customer order by customer_id, "
+            "is_snapshot_baseline desc, valid_from_lsn, customer_key"
+        ),
+        "fact_orders": f"select * from iceberg.{gold}.fact_orders order by order_id",
+        "fact_order_items": (
+            f"select * from iceberg.{gold}.fact_order_items order by order_item_id"
+        ),
+        "fact_payments": f"select * from iceberg.{gold}.fact_payments order by payment_id",
+        "fact_shipments": f"select * from iceberg.{gold}.fact_shipments order by shipment_id",
+        "mart_daily_sales": (
+            f"select * from iceberg.{analytics}.mart_daily_sales "
+            "order by order_date, category_name, region"
+        ),
+        "mart_customer_ltv": (
+            f"select * from iceberg.{analytics}.mart_customer_ltv order by customer_id"
+        ),
+    }
+    return {name: query_rows(sql) for name, sql in queries.items()}
+
+
+def test_full_dbt_build_with_cdc_backed_gold_semantics(
+    seeded_world: Namespace, tmp_path: Path
+) -> None:
+    run_dbt_build(seeded_world, target_path=tmp_path / "dbt-target-first")
+
     gold = seeded_world.gold
     silver = seeded_world.silver
+    analytics = seeded_world.analytics
+
+    # Snapshot baseline + stream update use half-open LSN validity. A populated
+    # LSN on the r event remains a baseline and cannot outrank the update.
     assert (
         trino_scalar(f"select count(*) from iceberg.{gold}.dim_customer where customer_id = 990001")
         == 2
+    )
+    assert (
+        trino_scalar(
+            f"select valid_to_lsn from iceberg.{gold}.dim_customer "
+            "where customer_id = 990001 and is_snapshot_baseline"
+        )
+        == 205
     )
     assert (
         trino_scalar(
@@ -103,30 +164,125 @@ def test_full_dbt_build_with_kimball_semantics(seeded_world: Namespace, tmp_path
         )
         == "it-region-2"
     )
+
+    # Same-LSN customer events collapse to the final topic offset. A later
+    # customer change becomes current, but the already-created order keeps the
+    # version selected at its lifecycle start.
     assert (
         trino_scalar(
-            f"select valid_to from iceberg.{gold}.dim_customer "
-            "where customer_id = 990001 and not is_current"
-        )
-        == DAY_1
-    )
-    assert (
-        trino_scalar(f"select count(*) from iceberg.{gold}.dim_customer where customer_id = 990002")
-        == 1
-    )
-    assert (
-        trino_scalar(f"select customer_key from iceberg.{gold}.fact_orders where order_id = 990001")
-        == "990001_2026-09-20"
-    )
-    assert (
-        trino_scalar(
-            f"select count(*) from iceberg.{gold}.fact_order_items "
-            "where order_id in (990001, 990002)"
+            f"select count(*) from iceberg.{gold}.dim_customer where customer_id = 9910001"
         )
         == 3
     )
-    assert trino_scalar(f"select count(*) from iceberg.{gold}.fact_payments") == 2
+    assert (
+        trino_scalar(
+            f"select segment from iceberg.{gold}.dim_customer "
+            "where customer_id = 9910001 and valid_from_lsn = 200"
+        )
+        == "vip"
+    )
+    assert (
+        trino_scalar(
+            f"select region from iceberg.{gold}.dim_customer "
+            "where customer_id = 9910001 and is_current"
+        )
+        == "cdc-later-version"
+    )
+
+    # Delete closes history without an attribute-less dimension row; recreate
+    # starts a new lifecycle and restores exactly one current version.
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{gold}.dim_customer "
+            "where customer_id = 9910002 and is_current"
+        )
+        == 0
+    )
+    assert (
+        trino_scalar(
+            f"select valid_to_lsn from iceberg.{gold}.dim_customer where customer_id = 9910002"
+        )
+        == 201
+    )
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{gold}.dim_customer where customer_id = 9910003"
+        )
+        == 2
+    )
+    assert (
+        trino_scalar(
+            f"select region from iceberg.{gold}.dim_customer "
+            "where customer_id = 9910003 and is_current"
+        )
+        == "cdc-recreated"
+    )
+
+    baseline_key = f"990001_{event_identity(CUSTOMER_TOPIC, 0, 8)}"
+    lifecycle_key = f"9910001_{event_identity(CUSTOMER_TOPIC, 0, 3)}"
+    assert (
+        trino_scalar(f"select customer_key from iceberg.{gold}.fact_orders where order_id = 990001")
+        == baseline_key
+    )
+    assert (
+        trino_scalar(
+            f"select customer_key from iceberg.{gold}.fact_orders where order_id = 9920001"
+        )
+        == lifecycle_key
+    )
+    assert (
+        trino_scalar(
+            f"select order_status from iceberg.{gold}.fact_orders where order_id = 9920001"
+        )
+        == "paid"
+    )
+
+    # The deleted snapshot order is gone. Its still-present snapshot line and
+    # shipment are parent-gated, while the live CDC-only order is allowed to
+    # exist before its child snapshot arrives.
+    assert (
+        trino_scalar(f"select count(*) from iceberg.{gold}.fact_orders where order_id = 990002")
+        == 0
+    )
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{gold}.fact_order_items where order_id = 990002"
+        )
+        == 0
+    )
+    assert (
+        trino_scalar(f"select count(*) from iceberg.{gold}.fact_shipments where order_id = 990002")
+        == 0
+    )
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{gold}.fact_order_items where order_id = 9920001"
+        )
+        == 0
+    )
+    assert trino_scalar(f"select count(*) from iceberg.{gold}.fact_order_items") == 2
     assert trino_scalar(f"select count(*) from iceberg.{gold}.fact_shipments") == 1
+    assert trino_scalar(f"select count(*) from iceberg.{gold}.fact_payments") == 2
+
+    # Marts follow the live order set: stale lines/customer activity disappear,
+    # while the CDC-only order contributes to LTV despite child snapshot lag.
+    assert trino_scalar(f"select count(*) from iceberg.{analytics}.mart_daily_sales") == 2
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{analytics}.mart_customer_ltv where customer_id = 990002"
+        )
+        == 0
+    )
+    assert (
+        trino_scalar(
+            f"select count(*) from iceberg.{analytics}.mart_customer_ltv "
+            "where customer_id = 9910001"
+        )
+        == 1
+    )
+
+    assert trino_scalar(f"select min(full_date) from iceberg.{gold}.dim_date") == DAY_1
+    assert trino_scalar(f"select max(full_date) from iceberg.{gold}.dim_date") == DAY_1
     assert trino_scalar(f"select count(*) from iceberg.{gold}.dim_campaign") == 1
     assert (
         trino_scalar(
@@ -147,67 +303,11 @@ def test_full_dbt_build_with_kimball_semantics(seeded_world: Namespace, tmp_path
         )
         == "delivered"
     )
-    assert trino_scalar(f"select min(full_date) from iceberg.{gold}.dim_date") == DAY_1
-    assert trino_scalar(f"select max(full_date) from iceberg.{gold}.dim_date") == DAY_2
-
-    # CDC current state is independent from the snapshot-backed Gold models.
-    # The highest source LSN wins even when row/event time moves backwards;
-    # same-LSN changes use the table-topic offset as the tie-break.
-    assert (
-        trino_scalar(
-            f"select segment from iceberg.{silver}.int_cdc_customers_current "
-            "where customer_id = 9910001"
-        )
-        == "vip"
-    )
-    assert (
-        trino_scalar(
-            f"select kafka_offset from iceberg.{silver}.int_cdc_customers_current "
-            "where customer_id = 9910001"
-        )
-        == 3
-    )
-    assert (
-        trino_scalar(
-            f"select region from iceberg.{silver}.int_cdc_customers_current "
-            "where customer_id = 9910003"
-        )
-        == "cdc-recreated"
-    )
-    assert (
-        trino_scalar(
-            f"select count(*) from iceberg.{silver}.int_cdc_customers_current "
-            "where customer_id = 9910002"
-        )
-        == 0
-    )
-    assert (
-        trino_scalar(
-            f"select status from iceberg.{silver}.int_cdc_orders_current where order_id = 9920001"
-        )
-        == "paid"
-    )
-    assert (
-        trino_scalar(
-            f"select count(*) from iceberg.{silver}.int_cdc_orders_current where order_id = 9920002"
-        )
-        == 0
-    )
-    assert (
-        trino_scalar(
-            f"select status from iceberg.{silver}.int_cdc_payments_current "
-            "where payment_id = 9930001"
-        )
-        == "captured"
-    )
-    assert (
-        trino_scalar(
-            f"select count(*) from iceberg.{silver}.int_cdc_payments_current "
-            "where payment_id = 9930002"
-        )
-        == 0
-    )
     assert (
         trino_scalar(f"select count(*) from iceberg.{seeded_world.bronze}.postgres_cdc_events")
-        == 16
+        == 26
     )
+
+    first_snapshot = cdc_output_snapshot(seeded_world)
+    run_dbt_build(seeded_world, target_path=tmp_path / "dbt-target-second")
+    assert cdc_output_snapshot(seeded_world) == first_snapshot

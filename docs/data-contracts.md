@@ -1,8 +1,8 @@
 # Data Contracts — DRAFT
 
 - **Status:** draft (ownership and SLA numbers will be finalized in Phase 10 — Data Quality & contracts)
-- **Scope:** Phase 3 external batch sources plus the Phase 8 PostgreSQL raw CDC ledger and its typed/current-state Silver projections
-- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas`, API envelope checks, fail-stop Debezium envelope/route validation in `omni_retail.streaming.cdc`, and dbt typed/current-state tests; file violations quarantine data, malformed CDC records block offset advancement, and incompatible typed CDC values fail the dbt build
+- **Scope:** Phase 3 external batch sources plus the Phase 8 PostgreSQL raw CDC ledger, typed Silver projections, and CDC-backed customer/order/payment Gold models
+- **Enforcement today:** schema definitions in `omni_retail.ingestion.files.schemas`, API envelope checks, fail-stop Debezium envelope/route validation in `omni_retail.streaming.cdc`, and dbt typed/current/Gold tests; file violations quarantine data, malformed CDC records block offset advancement, and incompatible typed or Gold CDC state fails the dbt build
 
 Additional internal modeled datasets will receive contracts in later phases.
 
@@ -189,21 +189,63 @@ invalid types fail casts rather than becoming silent NULLs. Delete events
 retain the business key and event metadata only because default PostgreSQL
 replica identity does not promise complete old non-key values.
 
-Current state ranks every operation per business key by
-`source_lsn DESC NULLS LAST`, then the single-partition table-topic
-`kafka_offset DESC`, with `event_id` as a deterministic final tie-break. The
-winner is filtered only after ranking: a winning `d` removes the key; an older
-delete cannot hide a later recreate. `source_tx_id`, source/Kafka timestamps,
-row `updated_at`, and ingestion time are audit fields, never ordering keys.
-This requires the ADR 0006 one-partition-per-table contract; there is no
-cross-topic order.
+Current state ranks an initial `r` as the pre-streaming baseline even when it
+carries an LSN. Streamed events then rank by `source_lsn DESC`, followed by the
+single-partition table-topic `kafka_offset DESC`, with `event_id` as a
+deterministic final tie-break. The winner is filtered only after ranking: a
+winning `d` removes the key; an older delete cannot hide a later recreate.
+`source_tx_id`, source/Kafka timestamps, row `updated_at`, and ingestion time
+are audit fields, never ordering keys. A streamed `c/u/d` with null LSN is
+incompatible and fails the dbt build. This requires the ADR 0006
+one-partition-per-table contract; there is no cross-topic Kafka order.
 
 Additive unknown non-key fields remain compatible and preserved in Bronze but
 are ignored by typed views until their projection is reviewed. Missing
 required projected fields or incompatible types are downstream-breaking and
-fail dbt tests/build. These models are parallel to the existing snapshot-backed
-Silver/Gold path: downstream cutover, customer SCD2 deletion semantics, and
-snapshot-only child handling are separate Phase 8 work.
+fail dbt tests/build. Snapshot-backed Silver models remain available for
+rollback and uncaptured child attributes, but they are not unioned into the
+captured Gold entities.
+
+## CDC-backed Gold contract
+
+| Dataset | Grain / key | Ownership and delete semantics |
+|---|---|---|
+| `gold.dim_customer` | one committed non-delete version; `customer_key = <customer_id>_<event_id>` | full customer CDC history; delete closes the prior version and emits no row; recreate begins a new lifecycle |
+| `gold.fact_orders` | one live order; `order_id` | `int_cdc_orders_current`; winning delete removes the row |
+| `gold.fact_payments` | one live payment; `payment_id` | `int_cdc_payments_current`; winning delete removes the row |
+| `gold.fact_order_items` | one captured snapshot line with a live parent | snapshot attributes, inner-joined to `fact_orders` |
+| `gold.fact_shipments` | one captured snapshot shipment with a live parent | snapshot attributes, inner-joined to `fact_orders` |
+
+Customer SCD2 validity is system/source sequence, not business-effective time:
+
+- `valid_from_lsn` is inclusive and null only for the initial `r` baseline;
+- `valid_to_lsn` is the exclusive next customer transaction boundary and null
+  only for an open live version;
+- same-LSN customer events collapse to the final customer-topic offset;
+- source timestamps are audit-only and may regress;
+- a live customer has one current version, while a deleted customer has zero.
+
+An order's `customer_key` is frozen at the current order lifecycle start. An
+`r` order uses the customer baseline. A `c` order uses the unique customer
+interval containing the create LSN, including a customer version beginning at
+the same LSN. Later order updates do not re-key it. There is no earliest/current
+fallback: an unresolved or ambiguous version fails uniqueness, not-null,
+relationship, and key-set tests.
+
+The child contract is deliberately hybrid. Stale snapshot lines and shipments
+disappear immediately with a deleted CDC parent, but children for a new live
+order can be absent until the next snapshot. Consumers must not interpret
+missing children during that window as proof that the source order has none.
+
+Orders/payments reconciliation remains fail-loud. A full Gold build and
+ClickHouse publication are valid only after the selected CDC topics reach a
+stable consumed boundary. Automatic stable-boundary scheduling is not yet part
+of this contract.
+
+Compatibility: replacing the former date-validity columns on `dim_customer`
+with LSN validity is the coordinated breaking change ratified by ADR 0007.
+Mart schemas remain unchanged, and ClickHouse continues to mirror those marts
+through a full-snapshot swap.
 
 ## Change process
 

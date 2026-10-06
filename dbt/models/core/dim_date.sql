@@ -1,15 +1,14 @@
 {{ config(materialized='table') }}
 
--- Grain: one row per calendar day covering the observed order-activity
--- window (created_at UNION updated_at). PK: date_key (yyyymmdd integer).
--- Upstream: int_orders (bounds only). Empty upstream yields an empty
--- dimension (null sequence bounds).
+-- Grain: one row per calendar day covering the live CDC order-activity
+-- window (created_at UNION updated_at). Empty upstream yields an empty
+-- dimension because sequence(NULL, NULL, ...) produces no retained dates.
 with activity as (
     select date(created_at) as activity_date
-    from {{ ref('int_orders') }}
+    from {{ ref('fact_orders') }}
     union all
     select date(updated_at) as activity_date
-    from {{ ref('int_orders') }}
+    from {{ ref('fact_orders') }}
 ),
 bounds as (
     select

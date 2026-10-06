@@ -144,6 +144,48 @@ def test_publish_every_mart_and_reconcile_against_gold(
     assert assert_reconciled(spec, trino_executor, publisher_client) == gold_count
 
 
+def test_full_snapshot_republish_removes_rows_absent_from_gold(
+    publisher_client: ClickHouseConnectClient,
+    trino_executor: DbapiTrinoExecutor,
+) -> None:
+    spec = MART_CUSTOMER_LTV
+    gold_count = gold_row_count(spec)
+    publish(trino_executor, publisher_client, spec)
+    source_row = list(
+        publisher_client.query(
+            f"select {', '.join(spec.column_names)} from {spec.serving_table} limit 1"
+        )[0]
+    )
+    stale_customer_id = -9_000_000_000_000_000_001
+    source_row[0] = stale_customer_id
+    source_row[1] = "cdc-cutover-stale-row"
+    publisher_client.insert(spec.serving_table, spec.column_names, [tuple(source_row)])
+    try:
+        assert (
+            publisher_client.query(
+                f"select count() from {spec.serving_table} where customer_id = {stale_customer_id}"
+            )[0][0]
+            == 1
+        )
+
+        result = publish(trino_executor, publisher_client, spec)
+
+        assert result.row_count == gold_count
+        assert (
+            publisher_client.query(
+                f"select count() from {spec.serving_table} where customer_id = {stale_customer_id}"
+            )[0][0]
+            == 0
+        )
+        assert assert_reconciled(spec, trino_executor, publisher_client) == gold_count
+    finally:
+        stale_count = publisher_client.query(
+            f"select count() from {spec.serving_table} where customer_id = {stale_customer_id}"
+        )[0][0]
+        if stale_count:
+            publish(trino_executor, publisher_client, spec)
+
+
 def test_republish_is_idempotent(
     publisher_client: ClickHouseConnectClient,
     trino_executor: DbapiTrinoExecutor,

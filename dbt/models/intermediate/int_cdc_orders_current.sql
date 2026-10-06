@@ -1,12 +1,17 @@
 {{ config(materialized='view') }}
 
--- Grain: one row per live order business key. Rank deletes before filtering.
+-- Grain: one row per live order business key. Initial r events are the
+-- pre-streaming baseline; rank streamed deletes before filtering.
 with ranked as (
     select
         *,
         row_number() over (
             partition by order_id
-            order by source_lsn desc nulls last, kafka_offset desc, event_id desc
+            order by
+                case when operation = 'r' then 0 else 1 end desc,
+                source_lsn desc nulls last,
+                kafka_offset desc,
+                event_id desc
         ) as version_rank
     from {{ ref('stg_cdc_orders') }}
 )

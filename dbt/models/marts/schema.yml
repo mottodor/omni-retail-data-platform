@@ -12,10 +12,12 @@ models:
       margin_eur. Financial measures exclude cancelled and refunded orders
       (realized-revenue policy); orders_count includes all orders. Shipping
       is an order-grain measure and stays in fact_orders/int_orders_fx.
-      Upstream: int_orders_fx, fact_order_items, dim_product, dim_customer
-      (point-in-time region), dim_date. Known simplification (mock source):
-      product prices are currency-naive; line amounts are normalized with
-      the order currency's FX rate.
+      Upstream: int_orders_fx, parent-gated fact_order_items, dim_product,
+      dim_customer (lifecycle-start region), dim_date. Snapshot-only lines for
+      a new live CDC order can lag until the next snapshot; lines for a deleted
+      parent are suppressed immediately. Known simplification (mock source):
+      product prices are currency-naive; line amounts are normalized with the
+      order currency's FX rate.
     columns:
       - name: date_key
         description: yyyymmdd integer key; joins dim_date.
@@ -42,9 +44,10 @@ models:
       with at least one order. PK: customer_id. Measures: orders_count (all
       orders), gmv_eur (realized order totals incl. shipping, EUR),
       avg_order_value_eur. Attributes region/segment are the customer's
-      CURRENT dim_customer version — LTV reports today's segmentation, not
-      point-in-time (documented choice). Upstream: int_orders_fx,
-      dim_customer (current versions).
+      CURRENT live CDC dim_customer version — LTV reports today's
+      segmentation, not point-in-time (documented choice). Deleted orders and
+      customers do not survive. Upstream: int_orders_fx, dim_customer (current
+      versions).
     columns:
       - name: customer_id
         tests: [unique, not_null]

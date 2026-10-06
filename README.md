@@ -1,6 +1,6 @@
 # OmniRetail Data Platform
 
-Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), derives typed/delete-aware CDC current state alongside the batch dbt Silver/Gold Kimball path, orchestrates with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, CDC-to-Gold cutover, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
+Production-like data engineering portfolio project: an e-commerce data platform on a local Docker Compose stack. It ingests PostgreSQL OLTP snapshots, supplier files, REST APIs, and restart-safe PostgreSQL CDC through Debezium + Kafka into an Iceberg lakehouse (MinIO + Polaris + Trino), derives typed/delete-aware CDC state and CDC-backed Kimball Gold models, orchestrates batch work with Airflow, publishes Gold marts to ClickHouse, and serves BI dashboards in Apache Superset. Spark, automatic stable-boundary CDC refresh, observability, and lineage remain later slices — see [ROADMAP.md](ROADMAP.md).
 
 ## Business problem
 
@@ -46,7 +46,7 @@ DEVOPS: GitHub + GitHub Actions + Docker Compose
 LATER: Airflow 3 migration, dbt v2 migration, GitLab CI, Kubernetes
 ```
 
-Implemented today: PostgreSQL OLTP snapshots and restart-safe raw CDC plus typed/delete-aware current state for customers/orders/payments, supplier file ingestion, mock REST API ingestion, MinIO raw archive, Polaris + Iceberg Bronze/Silver/Gold + analytics marts (Trino + dbt), Airflow orchestration with dataset-triggered lakehouse loads, ClickHouse serving publication, Superset BI (four dashboards as code, ClickHouse + Trino paths), CI. Not yet built: CDC-to-Gold/serving cutover, Spark, OpenLineage/Marquez, Prometheus/Grafana.
+Implemented today: PostgreSQL OLTP snapshots and restart-safe raw CDC; typed/delete-aware state for customers/orders/payments; CDC-backed customer SCD2 and order/payment Gold facts with parent-gated snapshot children; supplier file and mock REST ingestion; MinIO archive; Polaris + Iceberg Bronze/Silver/Gold and marts (Trino + dbt); Airflow batch orchestration; ClickHouse serving publication; Superset BI (four dashboards as code, ClickHouse + Trino paths); and CI. Not yet built: automatic CDC → dbt → serving scheduling, Spark, OpenLineage/Marquez, or Prometheus/Grafana.
 
 Iceberg is the analytical source of truth; the ClickHouse serving layer is derived from Iceberg Gold and always rebuildable from it.
 
@@ -300,9 +300,10 @@ shared registry (`source_kind="postgres"`), and a durable watermark
 after a successful upload, so interruptions re-extract and overwrite the
 same window. Known limitation of this batch path: hard deletes are invisible to snapshots,
 and historical backfill of past states is impossible (a snapshot holds the
-current state). Phase 8 CDC captures those deletes and exposes parallel typed
-current-state Silver views, but the established Gold path still reads the
-snapshot-shaped models until the downstream cutover.
+current state). Phase 8 CDC captures those deletes and is authoritative for
+customer/order/payment Gold state. Snapshots remain the rollback input and
+continue to supply uncaptured `order_items` and `shipments`, which are filtered
+through the live CDC order set.
 
 ## Lakehouse: Bronze → Silver → Gold → marts
 
@@ -331,17 +332,23 @@ the raw archive — loading them into Bronze is a tracked follow-up
 
 ### Silver and Gold
 
-dbt builds the analytical model over Bronze: the established
-`silver.stg_*`/`silver.int_*` snapshot path plus parallel
-`stg_cdc_{customers,orders,payments}` typed events and
-`int_cdc_*_current` delete-aware state. CDC winners are selected by source LSN
-and per-table Kafka offset, never event/ingestion time. The Kimball `gold`
-layer remains snapshot-backed — `dim_date`, `dim_product`, `dim_campaign`,
-SCD2 `dim_customer`, and the `fact_orders` / `fact_order_items` /
-`fact_payments` / `fact_shipments` facts — until a separate cutover defines
-SCD2 delete and snapshot-only child semantics. Every core/CDC model carries a
-YAML contract and dbt tests. Run against the live core stack with
-`make dbt-build`; the model reference lives in `docs/data-model.md`.
+dbt builds the analytical model over Bronze. Typed
+`stg_cdc_{customers,orders,payments}` events feed delete-aware current state;
+initial `r` records are always the pre-streaming baseline, while streamed
+changes are ordered by PostgreSQL LSN and per-table Kafka offset, never by
+event or ingestion time. `int_cdc_customer_versions` collapses same-LSN
+changes and produces half-open LSN SCD2 intervals. CDC is authoritative for
+`dim_customer`, `fact_orders`, and `fact_payments`; hard deletes therefore
+remove current Gold rows. An order freezes its `customer_key` at its current
+lifecycle's `r`/`c` boundary. Snapshot-backed `fact_order_items` and
+`fact_shipments` join the live order set, suppressing stale cascade-deleted
+children while allowing a new order to exist until its next child snapshot.
+`dim_date` follows live orders. Snapshot customer/order/payment Silver models
+remain available only for rollback. Every core/CDC model carries a YAML
+contract and dbt tests. Run a full rebuild at a stable consumed Kafka boundary
+with `make dbt-build`; then republish ClickHouse with `make serving-publish`.
+Automatic CDC-triggered scheduling is not implemented. The model reference
+lives in `docs/data-model.md`.
 
 On top of Gold, four marts provide dashboard-ready aggregates with all
 financial measures normalized to EUR by `int_orders_fx` (the order
@@ -429,8 +436,9 @@ view of the Airflow UI.
 
 - Unit tests (`make test`) stay hermetic; no network, no containers.
 - dbt tests: built-in constraints plus singular business tests, including
-  orders ↔ payments reconciliation and CDC raw-route, transport-identity,
-  required typed-field, ordering, recreate, and delete semantics.
+  fail-loud orders ↔ payments reconciliation, streamed-LSN requirements,
+  customer half-open interval/current-state checks, exact CDC-vs-Gold key-set
+  parity, parent/child integrity, and CDC raw-route/transport identity.
 - `make integration` runs the acceptance scenarios against the live core
   stack (MinIO + mock-api + Trino), gated by `OMNI_INTEGRATION=1`.
   The suite is safe on a long-lived stack: deterministic object coordinates
