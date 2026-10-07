@@ -9,8 +9,9 @@ schemas, so a long-lived developer stack is restored after success or failure.
 
 import hashlib
 import os
+import time
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,9 +28,11 @@ from omni_retail.lakehouse.bronze.loader import (
     TrinoConfig,
     validate_schema_name,
 )
+from omni_retail.lakehouse.trino import is_transient_catalog_error
 
 INTEGRATION_ENV = "OMNI_INTEGRATION"
 INTEGRATION_DIR = Path(__file__).parent
+SCHEMA_DROP_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,59 @@ def _execute_trino(sql: str) -> None:
         connection.close()
 
 
+class SchemaDropError(RuntimeError):
+    """A disposable schema could not be dropped within its retry budget."""
+
+    def __init__(self, schema: str, attempts: int, error: Exception) -> None:
+        self.schema = schema
+        self.attempts = attempts
+        self.error = error
+        message = getattr(error, "message", str(error))
+        super().__init__(
+            f"{schema}: attempts={attempts} error_type={type(error).__name__} "
+            f"error_message={message}"
+        )
+
+
+def drop_schema_with_retry(
+    schema: str,
+    *,
+    execute: Callable[[str], None] = _execute_trino,
+    sleep: Callable[[float], None] = time.sleep,
+    attempts: int = SCHEMA_DROP_ATTEMPTS,
+) -> None:
+    """Drop one owned schema, retrying only recognized transient catalog failures."""
+    validate_schema_name(schema)
+    if attempts < 1:
+        raise ValueError("schema drop attempts must be at least 1")
+    sql = f"drop schema if exists iceberg.{schema} cascade"
+    for attempt in range(1, attempts + 1):
+        try:
+            execute(sql)
+            return
+        except Exception as error:  # best-effort teardown wraps failures with retry context
+            if attempt < attempts and is_transient_catalog_error(error):
+                sleep(float(2 ** (attempt - 1)))
+                continue
+            raise SchemaDropError(schema, attempt, error) from error
+    raise AssertionError("unreachable")
+
+
+def cleanup_schemas(
+    schemas: Sequence[str],
+    *,
+    drop_schema: Callable[[str], None] = drop_schema_with_retry,
+) -> list[SchemaDropError]:
+    """Try every owned schema in reverse order and return all terminal failures."""
+    errors: list[SchemaDropError] = []
+    for schema in reversed(schemas):
+        try:
+            drop_schema(schema)
+        except SchemaDropError as error:
+            errors.append(error)
+    return errors
+
+
 @pytest.fixture()
 def lakehouse_namespace(request: pytest.FixtureRequest) -> LakehouseNamespace:
     """Create four UUID-prefixed schemas and drop only those schemas at teardown."""
@@ -145,14 +201,12 @@ def lakehouse_namespace(request: pytest.FixtureRequest) -> LakehouseNamespace:
         validate_schema_name(schema)
 
     def cleanup() -> None:
-        errors: list[str] = []
-        for schema in reversed(namespace.all_schemas()):
-            try:
-                _execute_trino(f"drop schema if exists iceberg.{schema} cascade")
-            except Exception as error:  # try every disposable schema before failing teardown
-                errors.append(f"{schema}: {error}")
+        errors = cleanup_schemas(namespace.all_schemas())
         if errors:
-            pytest.fail("failed to drop disposable lakehouse schemas: " + "; ".join(errors))
+            pytest.fail(
+                "failed to drop disposable lakehouse schemas: "
+                + "; ".join(str(error) for error in errors)
+            )
 
     request.addfinalizer(cleanup)
     for schema in namespace.all_schemas():

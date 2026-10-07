@@ -330,11 +330,30 @@ make airflow-test     # DAG pytest + import-error check in the Airflow image
 
 docker compose config
 make smoke-core       # requires live core
-make integration      # requires the relevant live profiles
+make integration      # core required; absent optional profiles are skipped
 ```
 
+`make integration` is opt-in and never starts or resets services. A healthy
+core profile is mandatory. Streaming and BI checks run only when their host
+endpoints are reachable; otherwise they report actionable skips. To execute
+rather than skip every BI data check, prepare the normal Gold and serving state:
+
+```bash
+make up
+make bi-up
+make dbt-build
+make serving-rebuild
+make integration
+```
+
+Once an optional service is reachable, unhealthy responses, bad credentials,
+incomplete bootstrap, query failures, permission regressions, and reconciliation
+differences fail the suite rather than being converted into skips.
+
 The integration suite uses disposable lakehouse schemas and exact-key rollback
-journals rather than resetting shared schemas. Covered boundaries include:
+journals rather than resetting shared schemas. Catalog-aware teardown retries
+only recognized transient Trino/Polaris visibility failures with a finite
+budget. Covered boundaries include:
 
 - files and APIs through real MinIO;
 - PostgreSQL snapshot lifecycle and watermarks;

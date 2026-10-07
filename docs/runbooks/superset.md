@@ -117,6 +117,27 @@ and in memory.
   encrypted connection passwords in the metadata DB. Rotate only together
   with a metadata-volume rebuild (connections are re-created from `.env`).
 
+## Integration validation
+
+The opt-in integration suite does not provision services or business data. With
+only the core profile running, Superset and serving checks are skipped with the
+required startup command. To execute all BI checks against the normal schemas:
+
+```bash
+make up
+make bi-up
+make dbt-build       # requires the delivered Bronze inputs to be prepared
+make serving-rebuild
+make integration
+```
+
+An unreachable Superset or ClickHouse endpoint is treated as an absent optional
+profile and skipped. Once Superset is reachable, a failed health response,
+admin login, connection/bootstrap assertion, asset import assertion, chart
+query, or SQL Lab query is a failure. Missing or empty normal Gold/ClickHouse
+marts skip only checks that need that data and point to `make dbt-build` and
+`make serving-rebuild`; they do not hide other BI bootstrap checks.
+
 ## Common failures
 
 | Symptom | Cause / fix |

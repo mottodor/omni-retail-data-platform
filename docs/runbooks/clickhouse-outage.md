@@ -72,15 +72,24 @@ make serving-rebuild
 
 ## Validate recovery
 
-Run the serving integration checks when the core and BI profiles are healthy:
+Run the serving integration checks when the core and BI profiles are healthy
+and the normal Gold snapshot is populated:
 
 ```bash
+make dbt-build       # when Gold is missing or stale
+make serving-rebuild
 make integration
 ```
 
-The checks compare row counts and ordered row values between Trino Gold and
-ClickHouse for every mart and assert that `superset_reader` INSERTs are
-rejected, so the read-only boundary is re-verified as part of recovery.
+If ClickHouse is unreachable, its optional integration module is skipped with
+`make bi-up` as the recovery action. Missing or empty normal Gold/serving marts
+also produce an actionable prerequisite skip. Once ClickHouse and Gold are
+present, unexpected Trino/catalog errors, publication failures, permissions
+regressions, and reconciliation differences fail loudly.
+
+The executed checks compare row counts and ordered row values between Trino
+Gold and ClickHouse for every mart and assert that `superset_reader` INSERTs
+are rejected, so the read-only boundary is re-verified as part of recovery.
 Credentials stay in `.env`; never copy them into tickets or logs.
 
 Finally, verify that the `transform_lakehouse` DAG can run its

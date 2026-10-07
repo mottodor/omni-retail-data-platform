@@ -16,12 +16,14 @@ Asserts the Phase 6 acceptance criteria at the publication level
   drop every serving table -> ``rebuild --all`` -> identical copies;
 - ``superset_reader`` can SELECT but cannot INSERT.
 
-The Gold world is whatever the earlier integration files leave behind
-(alphabetical order runs ``test_dbt_core_build`` and
-``test_lakehouse_orchestration`` first; a standalone run needs one prior
-``make dbt-build``). The module skips — with an actionable reason — when
-ClickHouse or the Gold marts are not available.
+The tests publish from the normal ``iceberg.analytics`` marts. Other
+integration modules use disposable UUID schemas and do not prepare this state,
+so run ``make dbt-build`` first when the normal marts are absent. The module
+skips — with an actionable reason — when ClickHouse or the required marts are
+not available.
 """
+
+# pyright: reportMissingImports=false
 
 from collections.abc import Generator
 from contextlib import closing
@@ -29,7 +31,7 @@ from datetime import UTC, datetime
 
 import pytest
 from clickhouse_connect.driver.exceptions import Error as ClickHouseError
-from trino.exceptions import Error as TrinoError
+from clickhouse_connect.driver.exceptions import OperationalError as ClickHouseOperationalError
 
 from integration.lakehouse_seed import trino_scalar
 from omni_retail.lakehouse.bronze.loader import DbapiTrinoExecutor, TrinoConfig
@@ -44,6 +46,8 @@ from omni_retail.serving.clickhouse.specs import (
     MartSpec,
 )
 
+from .prerequisites import require_trino_rows
+
 
 def checksum_sql(spec: MartSpec) -> str:
     """Row count + deterministic content hash over every mart column."""
@@ -52,16 +56,12 @@ def checksum_sql(spec: MartSpec) -> str:
 
 
 def gold_row_count(spec: MartSpec) -> int:
-    """Guard: the Gold mart must exist and be non-empty (module docstring)."""
-    try:
-        count = trino_scalar(f"select count(*) from iceberg.analytics.{spec.name}")
-    except TrinoError:
-        pytest.skip(
-            "Gold marts missing — run `make dbt-build` (or the full make integration) first"
-        )
-    assert isinstance(count, int)
-    assert count > 0, f"Gold {spec.name} is empty; seed Gold before serving tests"
-    return count
+    """Guard: the normal Gold mart must exist and be non-empty."""
+    return require_trino_rows(
+        lambda: trino_scalar(f"select count(*) from iceberg.analytics.{spec.name}"),
+        dataset=f"Iceberg analytics.{spec.name}",
+        setup_command="make dbt-build",
+    )
 
 
 def _normalize_value(value: object) -> object:
@@ -115,11 +115,18 @@ def assert_reconciled(
 
 @pytest.fixture(scope="module")
 def publisher_client() -> Generator[ClickHouseConnectClient, None, None]:
+    client: ClickHouseConnectClient | None = None
     try:
         client = ClickHouseConnectClient(ClickHouseConfig.from_env())
         client.query("select 1")
-    except ClickHouseError as error:
-        pytest.skip(f"ClickHouse not reachable ({error}); start the bi profile: make bi-up")
+    except ClickHouseOperationalError as error:
+        if client is not None:
+            client.close()
+        pytest.skip(
+            f"ClickHouse is not reachable ({type(error).__name__}); "
+            "start the BI profile: `make bi-up`"
+        )
+    assert client is not None
     yield client
     client.close()
 
@@ -245,4 +252,5 @@ def test_serving_tables_survived_reader_probe(
     trino_executor: DbapiTrinoExecutor,
 ) -> None:
     # Post-probe sanity: the reader's denied INSERT left the mart intact.
+    gold_row_count(MART_DAILY_SALES)
     assert assert_reconciled(MART_DAILY_SALES, trino_executor, publisher_client) > 0

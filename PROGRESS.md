@@ -45,6 +45,7 @@ phase; maintenance priorities are the tracked technical-debt items below.
 | TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
 | TD-005 | The dbt v1 project has 13 generic-test definitions using syntax that must move under `arguments` for dbt v2. | accepted capstone limitation | Keep the pinned dbt 1.10 baseline. Syntax cleanup may be maintenance; a dbt major-version migration requires an ADR superseding ADR 0009. |
 | TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | open — eligible maintenance | Compaction/retention may be added only as bounded maintenance that preserves raw event semantics; no scheduled phase. |
+| TD-007 | The opt-in integration suite did not consistently gate absent optional-profile/data prerequisites, and eventual Polaris visibility could fail disposable-schema teardown after assertions passed. | resolved | Optional services/data now use narrow actionable skips with reachable failures preserved; disposable schemas use finite catalog-aware teardown retries and aggregated diagnostics. |
 
 ## Scope exclusions
 
