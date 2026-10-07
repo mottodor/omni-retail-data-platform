@@ -4,6 +4,7 @@
 
 import argparse
 import signal
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -14,7 +15,13 @@ from confluent_kafka import Consumer
 from omni_retail.ingestion.common.logging import configure_logging
 from omni_retail.lakehouse.trino import DbapiTrinoExecutor, TrinoConfig
 
-from .config import CdcConfig
+from .boundary import (
+    CdcBoundaryProbeError,
+    ConfluentKafkaBoundaryReader,
+    HttpConnectStatusReader,
+    evaluate_streaming_health,
+)
+from .config import CdcConfig, CdcConfigError
 from .consumer import CdcBatchWriter, CdcRunner, as_kafka_consumer
 
 
@@ -28,6 +35,10 @@ def _parser() -> argparse.ArgumentParser:
     health = commands.add_parser("healthcheck", help="check the consumer readiness heartbeat")
     health.add_argument("--path", default="/tmp/cdc-consumer.ready")
     health.add_argument("--max-age-seconds", type=float, default=60.0)
+    commands.add_parser(
+        "status",
+        help="report connector, task, consumer-group, offset, and lag health",
+    )
     return parser
 
 
@@ -39,6 +50,54 @@ def readiness_is_fresh(path: Path, *, max_age_seconds: float) -> bool:
     except FileNotFoundError:
         return False
     return 0 <= age <= max_age_seconds
+
+
+def _status() -> int:
+    config = CdcConfig.from_env()
+    connect_reader = HttpConnectStatusReader(config.connect_url)
+    try:
+        connect = connect_reader.status(timeout_seconds=config.boundary_request_timeout_seconds)
+        with ConfluentKafkaBoundaryReader(
+            config.bootstrap_servers, config.group_id
+        ) as kafka_reader:
+            kafka = kafka_reader.sample(
+                topics=config.topics,
+                group_id=config.group_id,
+                timeout_seconds=config.boundary_request_timeout_seconds,
+            )
+    except CdcBoundaryProbeError as exc:
+        print(f"streaming health: UNHEALTHY: {exc}", file=sys.stderr)
+        return 1
+
+    health = evaluate_streaming_health(
+        connect,
+        kafka,
+        topics=config.topics,
+        group_id=config.group_id,
+    )
+    print(f"connector state={connect.connector_state}")
+    if connect.task_states:
+        for index, state in enumerate(connect.task_states):
+            print(f"connector task={index} state={state}")
+    else:
+        print("connector tasks=none")
+    print(
+        f"consumer_group id={kafka.group_id} state={kafka.group_state} members={kafka.member_count}"
+    )
+    for item in sorted(kafka.partitions, key=lambda value: (value.topic, value.partition)):
+        print(
+            f"topic={item.topic} partition={item.partition} "
+            f"committed={item.committed_offset} high={item.high_watermark} lag={item.lag}"
+        )
+    if health.is_healthy:
+        total_lag = sum(item.lag for item in kafka.partitions)
+        suffix = f" (catching up: total_lag={total_lag})" if total_lag else ""
+        print(f"streaming health: HEALTHY{suffix}")
+        return 0
+    for problem in health.problems:
+        print(f"problem: {problem}", file=sys.stderr)
+    print("streaming health: UNHEALTHY", file=sys.stderr)
+    return 1
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -90,6 +149,16 @@ def _run(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     configure_logging()
     args = _parser().parse_args(argv)
-    if args.command == "healthcheck":
-        return 0 if readiness_is_fresh(Path(args.path), max_age_seconds=args.max_age_seconds) else 1
-    return _run(args)
+    try:
+        if args.command == "healthcheck":
+            return (
+                0
+                if readiness_is_fresh(Path(args.path), max_age_seconds=args.max_age_seconds)
+                else 1
+            )
+        if args.command == "status":
+            return _status()
+        return _run(args)
+    except CdcConfigError as exc:
+        print(f"streaming health: UNHEALTHY: {exc}", file=sys.stderr)
+        return 1

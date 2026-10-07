@@ -30,7 +30,7 @@ operation. The rebuild also caps user query memory at 1 GiB and total query
 memory at 1.5 GiB, leaving heap for Iceberg/REST-catalog allocations; each
 INSERT remains below the configured 2,000,000-character query-text limit. The
 larger bounded batches reduce Iceberg commits and REST-catalog metadata growth
-within the workstation's 2 GiB Trino heap.
+within the workstation's 4 GiB Trino heap.
 
 The loader retries a transient catalog failure per chunk. If that finite retry
 is exhausted, the wrapper restarts Polaris, waits for `/q/health` (120 seconds

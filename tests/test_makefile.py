@@ -1,4 +1,4 @@
-"""Contract guards for host-side Makefile proxy handling."""
+"""Contract guards for host-side Makefile environment handling."""
 
 import os
 import subprocess
@@ -8,9 +8,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = REPO_ROOT / "Makefile"
+HOST_RUNNER = REPO_ROOT / "infrastructure/scripts/run_host_command.sh"
 LOCALHOSTS = "127.0.0.1,localhost"
-LOWER_BYPASS = f'no_proxy="{LOCALHOSTS}${{no_proxy:+,${{no_proxy}}}}"'
-UPPER_BYPASS = f'NO_PROXY="{LOCALHOSTS}${{NO_PROXY:+,${{NO_PROXY}}}}"'
+RUNNER_COMMAND = "bash infrastructure/scripts/run_host_command.sh"
 
 HOST_SIDE_SERVICE_TARGETS = (
     "generate-oltp",
@@ -23,6 +23,7 @@ HOST_SIDE_SERVICE_TARGETS = (
     "dbt-build",
     "dbt-test",
     "integration",
+    "streaming-status",
     "serving-publish",
     "serving-rebuild",
     "serving-benchmark",
@@ -40,24 +41,43 @@ def _render_target(target: str) -> str:
     return result.stdout
 
 
-def test_localhost_proxy_bypass_has_one_makefile_definition() -> None:
-    text = MAKEFILE.read_text(encoding="utf-8")
-    assert text.count(LOCALHOSTS) == 1, (
-        "localhost exclusions must stay in the shared Makefile definition, not recipes"
-    )
+def test_local_service_environment_has_one_shared_runner() -> None:
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    runner = HOST_RUNNER.read_text(encoding="utf-8")
+
+    assert makefile.count("HOST_RUN :=") == 1
+    assert runner.count(LOCALHOSTS) == 2
+    assert LOCALHOSTS not in makefile
 
 
 @pytest.mark.parametrize("target", HOST_SIDE_SERVICE_TARGETS)
-def test_host_side_service_targets_render_shared_proxy_bypass(target: str) -> None:
+def test_host_side_service_targets_render_shared_environment_runner(target: str) -> None:
     recipe = _render_target(target)
-    assert LOWER_BYPASS in recipe, f"{target} does not set lowercase no_proxy"
-    assert UPPER_BYPASS in recipe, f"{target} does not set uppercase NO_PROXY"
+    assert RUNNER_COMMAND in recipe, f"{target} does not use the shared host runner"
 
 
 def test_offline_target_does_not_receive_local_service_environment() -> None:
     recipe = _render_target("lint")
-    assert "no_proxy=" not in recipe
-    assert "NO_PROXY=" not in recipe
+    assert RUNNER_COMMAND not in recipe
+
+
+def test_streaming_status_uses_typed_health_cli_and_propagates_its_exit_code() -> None:
+    recipe = _render_target("streaming-status")
+
+    assert "python -m omni_retail.streaming.cdc status" in recipe
+    assert "/connectors/omni-postgres-cdc/config" not in recipe
+    assert "kafka-consumer-groups.sh" not in recipe
+
+
+def test_reset_explicitly_couples_core_and_streaming_without_bi_or_airflow() -> None:
+    recipe = _render_target("reset")
+
+    assert "--profile core --profile streaming" in recipe
+    assert "down -v" in recipe
+    assert "Kafka/Connect transport state" in recipe
+    assert "BI and Airflow metadata volumes are preserved" in recipe
+    assert "--profile bi" not in recipe
+    assert "--profile orchestration" not in recipe
 
 
 @pytest.mark.parametrize(
@@ -72,24 +92,34 @@ def test_offline_target_does_not_receive_local_service_environment() -> None:
         ),
     ],
 )
-def test_localhost_proxy_bypass_preserves_inherited_exclusions(
+def test_host_runner_preserves_proxy_exclusions_and_explicit_project(
     lower: str,
     upper: str,
     expected_lower: str,
     expected_upper: str,
 ) -> None:
-    probe = (
-        "proxy-probe:\n"
-        '\t@$(LOCALHOST_PROXY_BYPASS) sh -c \'printf "%s\\n%s\\n" '
-        '"$$no_proxy" "$$NO_PROXY"\''
-    )
-    env = {**os.environ, "no_proxy": lower, "NO_PROXY": upper}
+    env = {
+        **os.environ,
+        "COMPOSE_PROJECT_NAME": "isolated-validation",
+        "no_proxy": lower,
+        "NO_PROXY": upper,
+    }
     result = subprocess.run(
-        ["make", "--no-print-directory", "--eval", probe, "proxy-probe"],
+        [
+            "bash",
+            str(HOST_RUNNER),
+            "bash",
+            "-c",
+            'printf "%s\\n%s\\n%s\\n" "$no_proxy" "$NO_PROXY" "$COMPOSE_PROJECT_NAME"',
+        ],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
         text=True,
         env=env,
     )
-    assert result.stdout.splitlines() == [expected_lower, expected_upper]
+    assert result.stdout.splitlines() == [
+        expected_lower,
+        expected_upper,
+        "isolated-validation",
+    ]

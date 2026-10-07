@@ -289,9 +289,11 @@ def test_stateful_services_use_named_volumes() -> None:
     )
 
 
-def test_trino_jvm_heap_is_the_committed_workstation_baseline() -> None:
+def test_trino_jvm_heap_is_the_measured_clean_replay_baseline() -> None:
     assert TRINO_JVM_FILE.is_file(), "trino/etc/jvm.config is missing"
-    assert "-Xmx2g" in TRINO_JVM_FILE.read_text(encoding="utf-8")
+    assert "-Xmx4g" in TRINO_JVM_FILE.read_text(encoding="utf-8")
+    trino = _load_compose()["services"]["trino"]
+    assert trino["mem_limit"] == "6g"
 
 
 def test_trino_rebuild_memory_and_query_text_limits_fit_the_jvm() -> None:

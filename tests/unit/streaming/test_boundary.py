@@ -22,6 +22,7 @@ from omni_retail.streaming.cdc.boundary import (
     HttpConnectStatusReader,
     KafkaBoundarySample,
     PartitionSample,
+    evaluate_streaming_health,
     wait_for_stable_boundary,
 )
 from omni_retail.streaming.cdc.config import CdcConfig
@@ -220,6 +221,71 @@ def test_unhealthy_connector_times_out_without_querying_kafka() -> None:
 
     assert connect.calls == 3
     assert kafka.calls == 0
+
+
+def test_streaming_health_accepts_active_consumer_with_non_zero_lag() -> None:
+    health = evaluate_streaming_health(
+        RUNNING,
+        sample(committed_offsets=(7, 18, 30)),
+        topics=TOPICS,
+        group_id=GROUP_ID,
+    )
+
+    assert health.is_healthy is True
+    assert health.problems == ()
+    assert [item.lag for item in health.kafka.partitions] == [3, 2, 0]
+
+
+@pytest.mark.parametrize(
+    ("connect", "observed", "expected_problem"),
+    [
+        (
+            ConnectStatus(connector_state="RUNNING", task_states=("FAILED",)),
+            sample(),
+            "connector task 0 is not RUNNING",
+        ),
+        (RUNNING, sample(member_count=0), "no active member"),
+        (
+            RUNNING,
+            sample(partitions=sample().partitions[:-1]),
+            "topology mismatch",
+        ),
+        (
+            RUNNING,
+            sample(
+                partitions=(
+                    *sample().partitions,
+                    PartitionSample(TOPICS[0], 1, 0, 0),
+                )
+            ),
+            "topology mismatch",
+        ),
+        (
+            RUNNING,
+            sample(
+                partitions=(
+                    PartitionSample(TOPICS[0], 0, -1001, 10),
+                    *sample().partitions[1:],
+                )
+            ),
+            "invalid committed offset",
+        ),
+    ],
+)
+def test_streaming_health_rejects_unhealthy_service_or_offset_state(
+    connect: ConnectStatus,
+    observed: KafkaBoundarySample,
+    expected_problem: str,
+) -> None:
+    health = evaluate_streaming_health(
+        connect,
+        observed,
+        topics=TOPICS,
+        group_id=GROUP_ID,
+    )
+
+    assert health.is_healthy is False
+    assert any(expected_problem in problem for problem in health.problems)
 
 
 @pytest.mark.parametrize(

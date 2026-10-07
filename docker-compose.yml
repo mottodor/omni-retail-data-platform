@@ -244,6 +244,9 @@ services:
       timeout: 10s
       retries: 12
       start_period: 10s
+    # A measured 210k-event CDC replay needs more JVM headroom than the former
+    # 2 GiB heap; keep both heap and container memory finite for the workstation.
+    mem_limit: 6g
     restart: unless-stopped
 
   mock-api:

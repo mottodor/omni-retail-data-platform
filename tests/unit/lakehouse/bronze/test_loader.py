@@ -68,6 +68,16 @@ def test_trino_connection_errors_are_recoverable_for_rebuild() -> None:
             {
                 "type": "EXTERNAL",
                 "name": "ICEBERG_CATALOG_ERROR",
+                "message": "Failed to load view 'postgres_cdc_events'",
+            },
+            "test-query",
+        )
+    )
+    assert is_transient_catalog_error(
+        TrinoExternalError(
+            {
+                "type": "EXTERNAL",
+                "name": "ICEBERG_CATALOG_ERROR",
                 "message": "Failed to check namespace 'it_fixture_bronze'",
             },
             "test-query",

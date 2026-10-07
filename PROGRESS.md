@@ -17,9 +17,9 @@ Contract:
 ## Current focus
 
 Phase 8 is complete and the repository is maintenance-only under ADR 0009.
-TD-007, TD-008, and TD-009 integration reliability repairs are complete.
-There is no active maintenance plan; remaining priorities are the tracked
-items below.
+The full-environment startup contract, fail-loud CDC recovery diagnostics, and
+TD-007/TD-009 integration reliability repairs are complete. There is no active
+maintenance plan; remaining priorities are the tracked items below.
 
 ## Phase status
 
@@ -44,7 +44,7 @@ items below.
 | TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | open — eligible maintenance | Safe retention/expiration may be added as bounded maintenance with rollback protection; no scheduled phase. |
 | TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
 | TD-005 | The dbt v1 project has 13 generic-test definitions using syntax that must move under `arguments` for dbt v2. | accepted capstone limitation | Keep the pinned dbt 1.10 baseline. Syntax cleanup may be maintenance; a dbt major-version migration requires an ADR superseding ADR 0009. |
-| TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | open — eligible maintenance | Compaction/retention may be added only as bounded maintenance that preserves raw event semantics; no scheduled phase. |
+| TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | open — eligible maintenance | The [clean-replay benchmark](docs/benchmarks/cdc-clean-replay.md) bounds the delivered workload; compaction/retention may be added only as maintenance that preserves raw event semantics. |
 | TD-007 | The opt-in integration suite did not consistently gate absent optional-profile/data prerequisites, and eventual Polaris visibility could fail disposable-schema teardown after assertions passed. | resolved | Optional services/data now use narrow actionable skips with reachable failures preserved; disposable schemas use finite catalog-aware teardown retries and aggregated diagnostics. |
 | TD-008 | Recognized transient Polaris namespace checks could fail idempotent Bronze setup, and the live snapshot lifecycle fixture assumed ownership of the shared customers watermark. | resolved | Bronze setup retries only recognized failures for individual idempotent DDL statements; the snapshot lifecycle uses a session-local PostgreSQL table and never mutates shared customers. |
 | TD-009 | Consecutive isolated dbt builds could intermittently fail with Polaris transaction/authorization errors; backward host-clock corrections could independently corrupt dbt dependency processing. | resolved | The pinned Trino 483 image backports upstream PR 30816, dbt runs with a process-local monotonic wall clock, and isolated artifacts retain primary failures. Ten consecutive two-build regressions passed without retry. |

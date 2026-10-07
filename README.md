@@ -217,15 +217,33 @@ swap=8GB
 
 ### Python environment and core smoke test
 
+#### One-time workstation setup
+
 ```bash
 cp .env.example .env      # fill local values; never commit .env
 make setup                # uv sync + pre-commit install
+```
+
+#### First-time data bootstrap
+
+Use this sequence only for a new set of local volumes:
+
+```bash
 make up                   # core profile, health-gated
+make generate-oltp        # strict deterministic initial load
 make smoke-core           # Trino -> Polaris -> Iceberg -> MinIO
 ```
 
-`make down` stops services while preserving named volumes. `make reset` is
-explicitly destructive and removes core volumes.
+`generate-oltp` intentionally fails when any OLTP table is already populated;
+that is a data-loss guard, not a failed routine restart. Its destructive
+`--truncate-oltp-data` option is not a startup tool: truncating PostgreSQL must
+be coordinated with the explicit CDC transport/Bronze recovery procedure in the
+[Kafka/CDC runbook](docs/runbooks/kafka-cdc.md).
+
+`make down` stops core services while preserving named volumes. `make reset` is
+explicitly destructive and couples the PostgreSQL/core reset with Kafka/Connect
+transport deletion so stale source offsets cannot survive a new source volume.
+It preserves BI and Airflow metadata volumes but deletes MinIO/Iceberg data.
 
 > Known limitation: clean-host bootstrap currently depends on restoring a
 > reproducible supply for pinned MinIO images. See TD-001 in
@@ -244,16 +262,23 @@ to run every service continuously.
 | BI | `make bi-up` | ClickHouse, Superset, metadata/init services |
 | Orchestration | `make airflow-up` | Airflow scheduler/webserver and metadata DB |
 
-Typical service order for a full local environment:
+#### Routine full-environment startup
+
+With populated volumes, restart the complete environment without rerunning the
+strict initial loader:
 
 ```bash
 make up
-make generate-oltp
 make streaming-up
-make streaming-status
 make bi-up
 make airflow-up
+make streaming-status
 ```
+
+An already populated OLTP source is the expected successful state for this
+routine path. `make streaming-status` exits non-zero unless the connector, every
+task, and the active CDC consumer are healthy; non-zero lag is displayed as
+catch-up progress and is not by itself a service-health failure.
 
 Before the first analytical refresh on a new CDC deployment, complete the
 initial-snapshot gate in the
@@ -263,7 +288,7 @@ publication commands concurrently with `transform_lakehouse`.
 ### Representative commands
 
 ```bash
-# Source data
+# Source data (generate-oltp is first-time-only and rejects populated tables)
 make generate-oltp
 make mutate-oltp EVENTS=300
 make seed-supplier-files ROWS=500 SEED=11

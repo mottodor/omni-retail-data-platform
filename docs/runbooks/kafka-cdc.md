@@ -5,7 +5,27 @@ Scope: Phase 8 CDC for `customers`, `orders`, and `payments`: immutable Bronze d
 ## Start and verify
 
 Add unique values for `DEBEZIUM_POSTGRES_USER` and
-`DEBEZIUM_POSTGRES_PASSWORD` to `.env`. Start profiles in this order:
+`DEBEZIUM_POSTGRES_PASSWORD` to `.env`.
+
+### First-time data and CDC bootstrap
+
+Use the strict OLTP loader only with new local volumes:
+
+```bash
+make up
+make generate-oltp
+make streaming-up
+make streaming-status
+```
+
+`generate-oltp` intentionally rejects any already populated OLTP table. Do not
+convert that guard into a no-op and do not add `--truncate-oltp-data` to routine
+startup. Truncating the source while retaining Connect offsets creates an
+unsupported PostgreSQL/Connect boundary; coordinate any intentional source
+replacement with the destructive recovery procedure below and decide
+separately whether CDC Bronze history is retained or explicitly cleared.
+
+### Routine restart with preserved volumes
 
 ```bash
 make up
@@ -15,11 +35,14 @@ make airflow-up
 make streaming-status
 ```
 
-`streaming-up` health-gates PostgreSQL, Trino, Kafka, Connect, and the consumer;
-then idempotently reconciles the role/publication, topics, and connector. It
-never relies on a fixed startup sleep. Airflow intentionally has no hard
-cross-profile dependency and does not control Docker; a missing streaming,
-core, or BI service fails the owning task loudly.
+An already populated OLTP source is success for this routine path; do not rerun
+`generate-oltp`. `streaming-up` health-gates PostgreSQL, Trino, Kafka, Connect,
+and the consumer, then idempotently reconciles the role/publication, topics, and
+connector. It never relies on a fixed startup sleep. A stable connector failure
+caused by stale Connect offsets or unavailable PostgreSQL WAL fails early,
+points back to this runbook, and never performs an automatic reset. Airflow
+intentionally has no hard cross-profile dependency and does not control Docker;
+a missing streaming, core, or BI service fails the owning task loudly.
 
 Expected connector status shape:
 
@@ -71,11 +94,31 @@ Data topics have one partition, delete retention of 7 days or 5 GiB per
 partition. Connect internal topics are compacted with no time expiry.
 PostgreSQL caps retained slot WAL at 2 GiB.
 
+The measured clean-replay envelope keeps the consumer batch at most 500
+events and gives Trino a 4 GiB JVM inside a finite 6 GiB container limit. Do not
+increase the batch or heap as an ad-hoc recovery action: the benchmark records
+why larger DB-API-expanded MERGE batches were rejected and which signals must be
+remeasured: [CDC clean-replay benchmark](../benchmarks/cdc-clean-replay.md).
+
 ## Inspect connector, offsets, and lag
+
+Use the typed status command first:
+
+```bash
+make streaming-status
+```
+
+It prints connector state, every task state, consumer-group state/member count,
+and each expected partition's committed offset, exclusive high watermark, and
+lag. It exits non-zero for an unreachable service, failed connector/task,
+missing active consumer, incompatible topic topology, or invalid offset. A
+healthy consumer may report non-zero lag while catching up; the Airflow boundary
+retains the stricter stable lag-zero requirement.
+
+For bounded low-level inspection when needed:
 
 ```bash
 curl -fsS http://127.0.0.1:8083/connectors/omni-postgres-cdc/status | python -m json.tool
-curl -fsS http://127.0.0.1:8083/connectors/omni-postgres-cdc/config | python -m json.tool
 
 docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
   --bootstrap-server kafka:29092 \
@@ -86,8 +129,9 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
   --topic omni.oltp.public.orders
 ```
 
-Do not paste connector config into tickets or logs: the REST response includes
-the PostgreSQL replication password.
+Do not fetch, paste, or log the connector config endpoint: its response includes
+the PostgreSQL replication password. Host-side status probes explicitly bypass
+ambient HTTP proxies for loopback addresses.
 
 ## Delivery and replay semantics
 
@@ -332,6 +376,14 @@ Wait for healthchecks and connector/task `RUNNING`; apply a controlled source
 mutation and verify a new Bronze row. Existing event IDs must remain unique.
 
 ## Destructive reset
+
+A normal `make reset` is now an explicitly coupled **core + streaming** reset:
+it deletes PostgreSQL, MinIO/Iceberg, Polaris metadata, and Kafka/Connect
+transport state together, while preserving BI and Airflow metadata volumes.
+This prevents a new PostgreSQL volume from being paired with old Connect source
+offsets. It is not a routine restart command.
+
+To reset only CDC transport while preserving the existing OLTP and lakehouse:
 
 ```bash
 make streaming-reset

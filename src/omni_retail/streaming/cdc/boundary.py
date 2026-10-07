@@ -82,6 +82,19 @@ class KafkaBoundarySample:
 
 
 @dataclass(frozen=True)
+class StreamingHealth:
+    """One non-secret point-in-time health result for the streaming profile."""
+
+    connect: ConnectStatus
+    kafka: KafkaBoundarySample
+    problems: tuple[str, ...]
+
+    @property
+    def is_healthy(self) -> bool:
+        return not self.problems
+
+
+@dataclass(frozen=True)
 class BoundaryPosition:
     """A partition and its exclusive upper offset for a frozen dbt read."""
 
@@ -290,21 +303,34 @@ def _expected_coordinates(topics: Sequence[str]) -> set[tuple[str, int]]:
     return {(topic, PARTITION_ID) for topic in topics}
 
 
-def _sample_not_ready_reason(
+def evaluate_streaming_health(
+    connect: ConnectStatus,
     sample: KafkaBoundarySample,
     *,
     topics: Sequence[str],
     group_id: str,
-) -> str | None:
+) -> StreamingHealth:
+    """Evaluate service health without requiring the stricter lag-zero boundary."""
+    problems: list[str] = []
+    if connect.connector_state != "RUNNING":
+        problems.append(f"connector is not RUNNING: {connect.connector_state}")
+    if not connect.task_states:
+        problems.append("connector has no tasks")
+    problems.extend(
+        f"connector task {index} is not RUNNING: {state}"
+        for index, state in enumerate(connect.task_states)
+        if state != "RUNNING"
+    )
+
     if sample.group_id != group_id:
-        return f"consumer group mismatch: expected={group_id} actual={sample.group_id}"
+        problems.append(f"consumer group mismatch: expected={group_id} actual={sample.group_id}")
     if sample.member_count <= 0:
-        return f"consumer group has no active member: state={sample.group_state}"
+        problems.append(f"consumer group has no active member: state={sample.group_state}")
 
     expected = _expected_coordinates(topics)
     actual = {(item.topic, item.partition) for item in sample.partitions}
     if actual != expected or len(sample.partitions) != len(expected):
-        return (
+        problems.append(
             "topic partition topology mismatch: "
             f"expected={sorted(expected)} actual={sorted(actual)} "
             f"sample_count={len(sample.partitions)}"
@@ -313,15 +339,36 @@ def _sample_not_ready_reason(
     for item in sample.partitions:
         coordinate = f"{item.topic}[{item.partition}]"
         if item.committed_offset < 0:
-            return f"invalid committed offset for {coordinate}: {item.committed_offset}"
+            problems.append(f"invalid committed offset for {coordinate}: {item.committed_offset}")
         if item.high_watermark < 0:
-            return f"invalid high watermark for {coordinate}: {item.high_watermark}"
+            problems.append(f"invalid high watermark for {coordinate}: {item.high_watermark}")
         if item.committed_offset > item.high_watermark:
-            return (
+            problems.append(
                 f"committed offset exceeds high watermark for {coordinate}: "
                 f"committed={item.committed_offset} high={item.high_watermark}"
             )
+
+    return StreamingHealth(connect=connect, kafka=sample, problems=tuple(problems))
+
+
+def _sample_not_ready_reason(
+    sample: KafkaBoundarySample,
+    *,
+    topics: Sequence[str],
+    group_id: str,
+) -> str | None:
+    health = evaluate_streaming_health(
+        ConnectStatus(connector_state="RUNNING", task_states=("RUNNING",)),
+        sample,
+        topics=topics,
+        group_id=group_id,
+    )
+    if health.problems:
+        return health.problems[0]
+
+    for item in sample.partitions:
         if item.lag != 0:
+            coordinate = f"{item.topic}[{item.partition}]"
             return (
                 f"consumer lag is non-zero for {coordinate}: "
                 f"committed={item.committed_offset} high={item.high_watermark} "
