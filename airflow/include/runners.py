@@ -54,10 +54,11 @@ logger = logging.getLogger(__name__)
 
 #: dbt project location inside the Airflow image (compose mounts it read-only).
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
-#: ``uv pip --target`` installs dbt's modules but not console scripts in the
-#: custom Airflow image. Invoke the locked CLI entry point through the active
-#: interpreter while retaining an argument-list-only subprocess boundary.
-DBT_CLI_ENTRYPOINT = "from dbt.cli.main import cli; cli(prog_name='dbt')"
+#: ``uv pip --target`` installs Python modules but not console scripts in the
+#: custom Airflow image. Invoke the project's clock-stable dbt entry point
+#: through the active interpreter while retaining an argument-list-only
+#: subprocess boundary.
+DBT_CLI_ENTRYPOINT = "from omni_retail.lakehouse.dbt_cli import main; main()"
 
 
 def summarize_manifest(manifest: BatchManifest) -> dict[str, object]:

@@ -69,13 +69,13 @@ bronze-rebuild: ## DESTRUCTIVE: clear only the configured Bronze schema, then re
 	$(LOCALHOST_PROXY_BYPASS) bash infrastructure/scripts/bronze_rebuild.sh
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
-	$(UV) run dbt parse --project-dir dbt --profiles-dir dbt
+	$(UV) run python -m omni_retail.lakehouse.dbt_cli parse --project-dir dbt --profiles-dir dbt
 
 dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select staging"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt build --project-dir dbt --profiles-dir dbt $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.lakehouse.dbt_cli build --project-dir dbt --profiles-dir dbt $(ARGS)'
 
 dbt-test: ## Run dbt tests. ARGS="--select staging"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
+	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.lakehouse.dbt_cli test --project-dir dbt --profiles-dir dbt $(ARGS)'
 
 integration: ## Run integration tests against the live stacks (requires `make up`; optional profiles for their tests)
 	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'

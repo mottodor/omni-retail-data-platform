@@ -21,6 +21,8 @@ COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 TRINO_CATALOG_FILE = REPO_ROOT / "trino" / "etc" / "catalog" / "iceberg.properties"
 TRINO_JVM_FILE = REPO_ROOT / "trino" / "etc" / "jvm.config"
 TRINO_CONFIG_FILE = REPO_ROOT / "trino" / "etc" / "config.properties"
+TRINO_DOCKERFILE = REPO_ROOT / "infrastructure" / "trino" / "Dockerfile"
+TRINO_OAUTH_PATCH_DIR = REPO_ROOT / "infrastructure" / "trino" / "patches" / "30816"
 ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
 MINIO_INIT_FILE = REPO_ROOT / "infrastructure" / "scripts" / "minio_init.sh"
 MOCK_API_DIR = REPO_ROOT / "infrastructure" / "mock_api"
@@ -307,6 +309,25 @@ def test_trino_catalog_targets_polaris_rest_api() -> None:
     assert "iceberg.catalog.type=rest" in props
     assert re.search(r"iceberg\.rest-catalog\.uri=\S+polaris:8181/api/catalog", props)
     assert "iceberg.rest-catalog.warehouse=lakehouse" in props
+    assert not re.search(r"^iceberg\.rest-catalog\.session=USER$", props, re.MULTILINE)
+
+
+def test_trino_image_backports_rest_oauth_session_fix() -> None:
+    trino = _load_compose()["services"]["trino"]
+    assert trino["image"] == "omni-retail/trino:483-pr30816"
+    assert trino["build"] == {"context": "./infrastructure/trino"}
+
+    dockerfile = TRINO_DOCKERFILE.read_text(encoding="utf-8")
+    assert (
+        "trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534"
+        in dockerfile
+    )
+    assert "io.trino_trino-iceberg-483.jar" in dockerfile
+    patch_sources = {path.name for path in TRINO_OAUTH_PATCH_DIR.rglob("*.java") if path.is_file()}
+    assert patch_sources == {
+        "OAuth2SecurityProperties.java",
+        "SharedSessionOAuth2Manager.java",
+    }
 
 
 @pytest.mark.parametrize(

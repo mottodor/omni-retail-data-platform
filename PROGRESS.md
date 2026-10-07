@@ -17,8 +17,9 @@ Contract:
 ## Current focus
 
 Phase 8 is complete and the repository is maintenance-only under ADR 0009.
-TD-007 and TD-008 integration reliability repairs are complete. There is no
-active maintenance plan; remaining priorities are the tracked items below.
+TD-007, TD-008, and TD-009 integration reliability repairs are complete.
+There is no active maintenance plan; remaining priorities are the tracked
+items below.
 
 ## Phase status
 
@@ -46,7 +47,7 @@ active maintenance plan; remaining priorities are the tracked items below.
 | TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | open — eligible maintenance | Compaction/retention may be added only as bounded maintenance that preserves raw event semantics; no scheduled phase. |
 | TD-007 | The opt-in integration suite did not consistently gate absent optional-profile/data prerequisites, and eventual Polaris visibility could fail disposable-schema teardown after assertions passed. | resolved | Optional services/data now use narrow actionable skips with reachable failures preserved; disposable schemas use finite catalog-aware teardown retries and aggregated diagnostics. |
 | TD-008 | Recognized transient Polaris namespace checks could fail idempotent Bronze setup, and the live snapshot lifecycle fixture assumed ownership of the shared customers watermark. | resolved | Bronze setup retries only recognized failures for individual idempotent DDL statements; the snapshot lifecycle uses a session-local PostgreSQL table and never mutates shared customers. |
-| TD-009 | Consecutive isolated dbt builds can intermittently fail after a successful first build with Polaris transaction/metadata errors, including `Failed to create transaction` and cascading dependency-inference errors. | open — eligible maintenance | Reproduce and isolate the Polaris/dbt boundary before adding any bounded retry; never classify dbt model, test, SQL, or permanent authorization failures as transient. |
+| TD-009 | Consecutive isolated dbt builds could intermittently fail with Polaris transaction/authorization errors; backward host-clock corrections could independently corrupt dbt dependency processing. | resolved | The pinned Trino 483 image backports upstream PR 30816, dbt runs with a process-local monotonic wall clock, and isolated artifacts retain primary failures. Ten consecutive two-build regressions passed without retry. |
 
 ## Scope exclusions
 

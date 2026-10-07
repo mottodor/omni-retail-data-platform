@@ -22,14 +22,15 @@ The command drops only `iceberg.${ICEBERG_BRONZE_SCHEMA:-bronze}`, then uses
 Bronze `run-new` to rebuild it from archive. It does not clear any source or
 serving state. Logs identify source, logical date, chunk and retry context.
 
-A Trino 483 + Polaris REST OAuth2 limitation is tracked upstream as
-`trinodb/trino#30816`; it was merged after 483 and no released image contains
-the fix at the time this runbook was written. The rebuild caps user query
-memory at 1 GiB and total query memory at 1.5 GiB, leaving heap for
-Iceberg/REST-catalog allocations; each INSERT remains below the configured
-2,000,000-character query-text limit. The larger bounded batches reduce
-Iceberg commits and REST-catalog metadata growth within the workstation's
-2 GiB Trino heap.
+Trino 483 is affected by the REST OAuth2 session defect fixed upstream in
+`trinodb/trino#30816`. The repository's pinned local Trino image backports that
+exact merged change: `session=NONE` keeps service-principal semantics while
+reusing the catalog OAuth2 session instead of fetching a token for every
+operation. The rebuild also caps user query memory at 1 GiB and total query
+memory at 1.5 GiB, leaving heap for Iceberg/REST-catalog allocations; each
+INSERT remains below the configured 2,000,000-character query-text limit. The
+larger bounded batches reduce Iceberg commits and REST-catalog metadata growth
+within the workstation's 2 GiB Trino heap.
 
 The loader retries a transient catalog failure per chunk. If that finite retry
 is exhausted, the wrapper restarts Polaris, waits for `/q/health` (120 seconds
@@ -72,9 +73,9 @@ If the wrapper exits after either bounded restart budget, preserve its logs and
 inspect `docker compose --profile core logs --tail=200 trino polaris`. Resolve
 the infrastructure failure, verify `make smoke-core`, then rerun
 `make bronze-rebuild`; it is safe to start again because the command clears
-only the configured Bronze schema. Do not work around the issue with static
-tokens, `session=USER`, or Polaris token-TTL changes: those are not the root
-cause and are outside the pinned-stack mitigation.
+only the configured Bronze schema. Do not bypass the pinned backport with
+static tokens, `session=USER`, or Polaris token-TTL changes: those alter the
+authentication contract instead of repairing the known `session=NONE` defect.
 
-Evaluate a Trino image upgrade only in a separate compatibility task after a
-release containing PR 30816 is available.
+Replace the local backport with an unmodified Trino image only in a separate
+compatibility task after a release containing PR 30816 is available.

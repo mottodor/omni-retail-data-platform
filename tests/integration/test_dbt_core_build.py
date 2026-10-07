@@ -2,14 +2,13 @@
 
 # pyright: reportMissingImports=false, reportMissingTypeStubs=false
 
-import os
-import subprocess
 from collections.abc import Generator
 from pathlib import Path
 from typing import Protocol
 
 import pytest
 
+from integration.dbt_diagnostics import run_dbt_build
 from integration.lakehouse_seed import (
     DAY_1,
     DAY_2,
@@ -31,7 +30,6 @@ from omni_retail.lakehouse.bronze.specs import (
 )
 from omni_retail.streaming.cdc.model import event_identity
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 CUSTOMER_TOPIC = "omni.oltp.public.customers"
 
 
@@ -42,6 +40,8 @@ class Namespace(Protocol):
     analytics: str
 
     def dbt_env(self) -> dict[str, str]: ...
+
+    def all_schemas(self) -> tuple[str, ...]: ...
 
 
 @pytest.fixture()
@@ -64,39 +64,6 @@ def seeded_world(
                 )
         seed_cdc_events(executor, schema=lakehouse_namespace.bronze)
     yield lakehouse_namespace
-
-
-def run_dbt_build(namespace: Namespace, *, target_path: Path) -> None:
-    env = {
-        **os.environ,
-        "TRINO_HOST": os.environ.get("TRINO_HOST", "127.0.0.1"),
-        **namespace.dbt_env(),
-    }
-    completed = subprocess.run(
-        [
-            "uv",
-            "run",
-            "dbt",
-            "build",
-            "--project-dir",
-            "dbt",
-            "--profiles-dir",
-            "dbt",
-            "--target-path",
-            str(target_path),
-            # Serialize DDL in this two-build determinism scenario. Polaris
-            # catalog metadata is eventually visible on the local stack, and
-            # concurrent create/test tasks make that infrastructure race mask
-            # the CDC assertions this test owns.
-            "--threads",
-            "1",
-        ],
-        cwd=REPO_ROOT,
-        check=False,
-        timeout=900,
-        env=env,
-    )
-    assert completed.returncode == 0, "dbt build (models + tests) must succeed"
 
 
 def query_rows(sql: str) -> list[tuple[object, ...]]:
@@ -138,7 +105,12 @@ def cdc_output_snapshot(namespace: Namespace) -> dict[str, list[tuple[object, ..
 def test_full_dbt_build_with_cdc_backed_gold_semantics(
     seeded_world: Namespace, tmp_path: Path
 ) -> None:
-    run_dbt_build(seeded_world, target_path=tmp_path / "dbt-target-first")
+    run_dbt_build(
+        schema_env=seeded_world.dbt_env(),
+        schema_names=seeded_world.all_schemas(),
+        run_dir=tmp_path / "dbt-first",
+        label="first",
+    )
 
     gold = seeded_world.gold
     silver = seeded_world.silver
@@ -309,5 +281,10 @@ def test_full_dbt_build_with_cdc_backed_gold_semantics(
     )
 
     first_snapshot = cdc_output_snapshot(seeded_world)
-    run_dbt_build(seeded_world, target_path=tmp_path / "dbt-target-second")
+    run_dbt_build(
+        schema_env=seeded_world.dbt_env(),
+        schema_names=seeded_world.all_schemas(),
+        run_dir=tmp_path / "dbt-second",
+        label="second",
+    )
     assert cdc_output_snapshot(seeded_world) == first_snapshot
