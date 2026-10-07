@@ -101,7 +101,7 @@ def test_list_object_keys_is_sorted_and_paginates() -> None:
         stubber.add_response(
             "list_objects_v2",
             {
-                "Contents": [{"Key": "incoming/b.csv"}],
+                "Contents": [{"Size": 0}, {"Key": "incoming/b.csv"}],
                 "IsTruncated": True,
                 "NextContinuationToken": "token-1",
             },
