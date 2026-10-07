@@ -17,9 +17,8 @@ Contract:
 ## Current focus
 
 Phase 8 is complete and the repository is maintenance-only under ADR 0009.
-Portfolio documentation, dashboard evidence, roadmap scope, and normative agent
-rules are aligned with the final Phase 0–8 boundary. There is no active feature
-phase; maintenance priorities are the tracked technical-debt items below.
+TD-007 and TD-008 integration reliability repairs are complete. There is no
+active maintenance plan; remaining priorities are the tracked items below.
 
 ## Phase status
 
@@ -46,6 +45,8 @@ phase; maintenance priorities are the tracked technical-debt items below.
 | TD-005 | The dbt v1 project has 13 generic-test definitions using syntax that must move under `arguments` for dbt v2. | accepted capstone limitation | Keep the pinned dbt 1.10 baseline. Syntax cleanup may be maintenance; a dbt major-version migration requires an ADR superseding ADR 0009. |
 | TD-006 | Insert-only CDC microbatches accumulate Iceberg data files and snapshots; sustained streams need compaction and retention. | open — eligible maintenance | Compaction/retention may be added only as bounded maintenance that preserves raw event semantics; no scheduled phase. |
 | TD-007 | The opt-in integration suite did not consistently gate absent optional-profile/data prerequisites, and eventual Polaris visibility could fail disposable-schema teardown after assertions passed. | resolved | Optional services/data now use narrow actionable skips with reachable failures preserved; disposable schemas use finite catalog-aware teardown retries and aggregated diagnostics. |
+| TD-008 | Recognized transient Polaris namespace checks could fail idempotent Bronze setup, and the live snapshot lifecycle fixture assumed ownership of the shared customers watermark. | resolved | Bronze setup retries only recognized failures for individual idempotent DDL statements; the snapshot lifecycle uses a session-local PostgreSQL table and never mutates shared customers. |
+| TD-009 | Consecutive isolated dbt builds can intermittently fail after a successful first build with Polaris transaction/metadata errors, including `Failed to create transaction` and cascading dependency-inference errors. | open — eligible maintenance | Reproduce and isolate the Polaris/dbt boundary before adding any bounded retry; never classify dbt model, test, SQL, or permanent authorization failures as transient. |
 
 ## Scope exclusions
 

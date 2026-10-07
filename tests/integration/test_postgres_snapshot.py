@@ -51,6 +51,24 @@ def isolated_snapshot_storage(journal: ObjectMutationJournal) -> ScopedObjectSto
     return storage
 
 
+def create_isolated_customers_table(conn: psycopg.Connection) -> None:
+    """Shadow public.customers with a session-local table for snapshot SQL."""
+    conn.execute(
+        "create temporary table customers "
+        "(like public.customers including all) on commit preserve rows"
+    )
+    conn.execute("set search_path to pg_temp, public")
+    conn.commit()
+
+
+def public_marker_count(conn: psycopg.Connection, marker: str) -> int:
+    row = conn.execute(
+        "select count(*) from public.customers where email = %s",
+        (marker,),
+    ).fetchone()
+    return 0 if row is None else int(cast(int, row[0]))
+
+
 def controlled_customer(marker: str, updated_at: datetime) -> tuple[object, ...]:
     return (
         marker,
@@ -106,6 +124,8 @@ def test_snapshot_lifecycle_full_empty_increment(
     marker = f"it-pg-snap-{uuid.uuid4().hex[:8]}@example.com"
     ts_base = datetime(2026, 9, 13, 9, 0, tzinfo=UTC)
     with psycopg.connect(PostgresSourceConfig.from_env().conninfo()) as conn:
+        create_isolated_customers_table(conn)
+        assert public_marker_count(conn, marker) == 0
         customer_id = insert_controlled_customer(conn, marker, ts_base)
         try:
             total = count_rows(conn)
@@ -178,5 +198,6 @@ def test_snapshot_lifecycle_full_empty_increment(
             assert full_refresh.row_count == total
             assert read_parquet_rows(storage, key_day_2) == total
         finally:
-            conn.execute("delete from customers where email = %s", (marker,))
+            conn.rollback()
+            assert public_marker_count(conn, marker) == 0
             conn.commit()

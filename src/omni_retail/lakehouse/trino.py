@@ -14,6 +14,7 @@ _TRANSIENT_CATALOG_MARKERS: tuple[str, ...] = (
     # Trino 483 can hide Polaris's empty-body OAuth2 401 as an Iceberg
     # catalog load error; it is safe to resume after a Polaris restart.
     "Failed to load table:",
+    "Failed to check namespace '",
 )
 _TRANSIENT_TRINO_ERRORS = (
     trino.exceptions.TrinoConnectionError,

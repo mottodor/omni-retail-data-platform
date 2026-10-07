@@ -102,13 +102,73 @@ def add_row_position_sql(spec: BronzeTableSpec, catalog: str, schema: str = SCHE
     )
 
 
-def ensure_table(executor: TrinoExecutor, spec: BronzeTableSpec, catalog: str, schema: str) -> None:
-    # pi-lens-ignore: python-sql-injection
-    executor.execute(create_schema_sql(catalog, schema))
-    # pi-lens-ignore: python-sql-injection
-    executor.execute(create_table_sql(spec, catalog, schema))
-    # pi-lens-ignore: python-sql-injection
-    executor.execute(add_row_position_sql(spec, catalog, schema))
+def _execute_idempotent_ddl_with_retry(
+    executor: TrinoExecutor,
+    sql: str,
+    *,
+    attempts: int,
+    sleep: Callable[[float], None],
+    log: logging.LoggerAdapter[logging.Logger],
+) -> None:
+    """Retry one replay-safe DDL statement on recognized catalog failures."""
+    if attempts < 1:
+        raise ValueError("DDL attempts must be at least 1")
+    for attempt in range(1, attempts + 1):
+        try:
+            # pi-lens-ignore: python-sql-injection
+            executor.execute(sql)
+            return
+        except trino.exceptions.Error as error:
+            if not is_transient_catalog_error(error):
+                raise
+            if attempt == attempts:
+                log.error(
+                    "transient catalog error; idempotent DDL retry exhausted: "
+                    "attempts=%d error_type=%s error_message=%s",
+                    attempts,
+                    type(error).__name__,
+                    getattr(error, "message", ""),
+                )
+                raise
+            backoff_seconds = float(2**attempt)
+            log.warning(
+                "transient catalog error; retrying idempotent DDL: "
+                "attempt=%d/%d backoff_seconds=%.0f error_type=%s error_message=%s",
+                attempt,
+                attempts,
+                backoff_seconds,
+                type(error).__name__,
+                getattr(error, "message", ""),
+            )
+            sleep(backoff_seconds)
+    raise AssertionError("unreachable")
+
+
+def ensure_table(
+    executor: TrinoExecutor,
+    spec: BronzeTableSpec,
+    catalog: str,
+    schema: str,
+    *,
+    attempts: int = 3,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Create or evolve one Bronze table with bounded idempotent-DDL retries."""
+    log = context_logger(__name__, source=spec.source_name, schema=schema, table=spec.name)
+    statements = (
+        create_schema_sql(catalog, schema),
+        create_table_sql(spec, catalog, schema),
+        add_row_position_sql(spec, catalog, schema),
+    )
+    for sql in statements:
+        # pi-lens-ignore: python-sql-injection
+        _execute_idempotent_ddl_with_retry(
+            executor,
+            sql,
+            attempts=attempts,
+            sleep=sleep,
+            log=log,
+        )
 
 
 def delete_partition_sql(
@@ -233,6 +293,8 @@ def load(
     clock: Clock | None = None,
     catalog: str = "iceberg",
     schema: str = SCHEMA_BRONZE,
+    ddl_attempts: int = 3,
+    ddl_sleep: Callable[[float], None] = time.sleep,
 ) -> LoadResult:
     """Explicit-date load: preserve the established full partition replacement contract."""
     schema = validate_schema_name(schema)
@@ -242,7 +304,14 @@ def load(
             "bronze batch empty: source=%s logical_date=%s", spec.source_key, logical_date
         )
         return LoadResult(spec.source_key, spec.batch_id(logical_date), logical_date, 0, "empty")
-    ensure_table(executor, spec, catalog, schema)
+    ensure_table(
+        executor,
+        spec,
+        catalog,
+        schema,
+        attempts=ddl_attempts,
+        sleep=ddl_sleep,
+    )
     executor.execute(delete_partition_sql(spec, catalog, logical_date, schema))
     chunks = insert_chunks(spec, prepared.rows, catalog=catalog, schema=schema)
     for chunk in chunks:
@@ -270,7 +339,9 @@ def _execute_with_retry(
 ) -> None:
     for attempt in range(1, attempts + 1):
         try:
+            # pi-lens-ignore: python-sql-injection
             executor.execute(delete_sql)
+            # pi-lens-ignore: python-sql-injection
             executor.execute(insert_sql)
             return
         except trino.exceptions.Error as error:
@@ -314,6 +385,9 @@ def load_with_retry(
                 clock=clock,
                 catalog=catalog,
                 schema=schema,
+                # The outer explicit-date retry owns this operation's budget.
+                ddl_attempts=1,
+                ddl_sleep=sleep,
             )
         except trino.exceptions.Error as error:
             if attempt == attempts or not is_transient_catalog_error(error):
@@ -402,7 +476,14 @@ def load_new(
         prepared = _prepare_batch(storage, spec, logical_date, effective_clock)
         if prepared is None:
             continue
-        ensure_table(executor, spec, catalog, schema)
+        ensure_table(
+            executor,
+            spec,
+            catalog,
+            schema,
+            attempts=attempts,
+            sleep=sleep,
+        )
         chunks = insert_chunks(spec, prepared.rows, catalog=catalog, schema=schema)
         changed = False
         for index, chunk in enumerate(chunks, start=1):

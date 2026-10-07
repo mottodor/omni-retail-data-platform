@@ -9,7 +9,12 @@ from decimal import Decimal
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from trino.exceptions import TrinoConnectionError, TrinoExternalError, TrinoQueryError
+from trino.exceptions import (
+    TrinoConnectionError,
+    TrinoExternalError,
+    TrinoQueryError,
+    TrinoUserError,
+)
 
 from fakes.storage import FakeStorage
 from fakes.trino import FakeTrinoExecutor
@@ -30,6 +35,7 @@ from omni_retail.lakehouse.bronze.loader import (
     create_table_sql,
     delete_partition_sql,
     discover_archive_dates,
+    ensure_table,
     is_transient_catalog_error,
     is_transient_trino_error,
     load,
@@ -53,6 +59,16 @@ def test_trino_connection_errors_are_recoverable_for_rebuild() -> None:
                 "type": "EXTERNAL",
                 "name": "ICEBERG_CATALOG_ERROR",
                 "message": "Failed to load table: fx_rates in bronze namespace",
+            },
+            "test-query",
+        )
+    )
+    assert is_transient_catalog_error(
+        TrinoExternalError(
+            {
+                "type": "EXTERNAL",
+                "name": "ICEBERG_CATALOG_ERROR",
+                "message": "Failed to check namespace 'it_fixture_bronze'",
             },
             "test-query",
         )
@@ -106,6 +122,136 @@ def test_create_table_sql_declares_all_columns_and_partitioning() -> None:
     assert '"updated_at" timestamp(6) with time zone' in sql
     assert '"_batch_date" date' in sql
     assert sql.endswith("with (partitioning = ARRAY['_batch_date'])")
+
+
+class FlakyDdlExecutor(FakeTrinoExecutor):
+    """Fail one DDL prefix a configured number of times with the same error."""
+
+    def __init__(self, prefix: str, failures: int, error: Exception) -> None:
+        super().__init__()
+        self.prefix = prefix
+        self.failures = failures
+        self.error = error
+
+    def execute(self, sql: str) -> None:
+        self.statements.append(sql)
+        if sql.startswith(self.prefix) and self.failures > 0:
+            self.failures -= 1
+            raise self.error
+
+
+def namespace_catalog_error() -> TrinoExternalError:
+    return TrinoExternalError(
+        {
+            "type": "EXTERNAL",
+            "name": "ICEBERG_CATALOG_ERROR",
+            "message": "Failed to check namespace 'it_fixture_bronze'",
+        },
+        "test-query",
+    )
+
+
+def test_ensure_table_succeeds_without_retry_sleep() -> None:
+    executor = FakeTrinoExecutor()
+    sleeps: list[float] = []
+
+    ensure_table(
+        executor,
+        TABLES["orders"],
+        "iceberg",
+        "it_fixture_bronze",
+        sleep=sleeps.append,
+    )
+
+    assert len(executor.statements) == 3
+    assert executor.statements[0] == "create schema if not exists iceberg.it_fixture_bronze"
+    assert executor.statements[1].startswith(
+        "create table if not exists iceberg.it_fixture_bronze.orders"
+    )
+    assert executor.statements[2].startswith(
+        "alter table iceberg.it_fixture_bronze.orders add column if not exists"
+    )
+    assert sleeps == []
+
+
+def test_ensure_table_retries_only_failed_idempotent_ddl() -> None:
+    error = namespace_catalog_error()
+    executor = FlakyDdlExecutor("create table", failures=1, error=error)
+    sleeps: list[float] = []
+
+    ensure_table(
+        executor,
+        TABLES["orders"],
+        "iceberg",
+        "it_fixture_bronze",
+        sleep=sleeps.append,
+    )
+
+    assert len(executor.statements_matching("create schema")) == 1
+    assert len(executor.statements_matching("create table")) == 2
+    assert len(executor.statements_matching("alter table")) == 1
+    assert sleeps == [2.0]
+
+
+def test_ensure_table_exhausts_transient_retry_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error = namespace_catalog_error()
+    executor = FlakyDdlExecutor("create schema", failures=99, error=error)
+    sleeps: list[float] = []
+
+    with pytest.raises(TrinoExternalError) as raised:
+        ensure_table(
+            executor,
+            TABLES["orders"],
+            "iceberg",
+            "it_fixture_bronze",
+            sleep=sleeps.append,
+        )
+
+    assert raised.value is error
+    assert len(executor.statements_matching("create schema")) == 3
+    assert executor.statements_matching("create table") == []
+    assert sleeps == [2.0, 4.0]
+    assert "schema=it_fixture_bronze" in caplog.text
+    assert "table=orders" in caplog.text
+    assert "attempts=3" in caplog.text
+    assert "error_type=TrinoExternalError" in caplog.text
+    assert "Failed to check namespace 'it_fixture_bronze'" in caplog.text
+
+
+def test_ensure_table_does_not_retry_non_transient_error() -> None:
+    error = TrinoUserError(
+        {"type": "USER_ERROR", "name": "SYNTAX_ERROR", "message": "bad DDL"},
+        "test-query",
+    )
+    executor = FlakyDdlExecutor("create schema", failures=1, error=error)
+    sleeps: list[float] = []
+
+    with pytest.raises(TrinoUserError) as raised:
+        ensure_table(
+            executor,
+            TABLES["orders"],
+            "iceberg",
+            "it_fixture_bronze",
+            sleep=sleeps.append,
+        )
+
+    assert raised.value is error
+    assert len(executor.statements_matching("create schema")) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_ensure_table_rejects_empty_retry_budget(attempts: int) -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        ensure_table(
+            FakeTrinoExecutor(),
+            TABLES["orders"],
+            "iceberg",
+            "it_fixture_bronze",
+            attempts=attempts,
+        )
 
 
 def test_delete_partition_sql_targets_logical_date() -> None:
