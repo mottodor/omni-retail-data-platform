@@ -57,9 +57,8 @@ PostgreSQL OLTP
   ├── batch snapshots ── MinIO archive ── Bronze loader ──┐
   └── WAL ── Debezium ── Kafka ── CDC consumer ──────────┤
                                                           ├──> Iceberg Bronze
-Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──┘
-
-Supplier files ── Airflow/Python ── MinIO archive   [raw/archive only]
+Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──────┤
+Supplier files ── Airflow/Python ── MinIO archive ── Bronze loader ──────┘
 
 Iceberg Bronze
       │
@@ -111,8 +110,9 @@ business state and can be rebuilt from Gold.
 ## End-to-end capstone flow
 
 1. The deterministic generator creates an OLTP baseline in PostgreSQL.
-2. Batch extractors preserve raw API and PostgreSQL snapshot payloads in the
-   MinIO archive and load supported sources into Iceberg Bronze.
+2. Batch extractors preserve raw API, PostgreSQL snapshot, and supplier-file
+   payloads in the MinIO archive and load manifest-backed sources into Iceberg
+   Bronze.
 3. Debezium captures customer, order, and payment mutations from PostgreSQL WAL
    and writes them to table-specific Kafka topics.
 4. The CDC consumer writes raw events to Iceberg and commits Kafka offsets only
@@ -132,12 +132,15 @@ business state and can be rebuilt from Gold.
 ### Batch paths
 
 - Raw API pages and accepted files are preserved unchanged in MinIO.
-- Logical dates, not wall-clock time, define object paths and batch identity.
-- File checksums and manifests provide duplicate detection and audit metadata.
+- Logical dates, not wall-clock time, define object paths and Bronze
+  partitions; file batch identity is content-addressed by checksum.
+- File checksums and canonical completed manifests provide duplicate detection,
+  load authorization, and audit metadata.
 - PostgreSQL snapshots use keyset pagination and advance durable watermarks only
   after a successful upload.
-- Bronze loads verify manifest counts before DML and replace deterministic
-  source/date coordinates.
+- Bronze loads verify manifest ownership, checksums, accepted/rejected counts,
+  and deterministic source-object coordinates before DML. File loads scan
+  completed manifests so late files for older logical dates remain eligible.
 - Invalid files and rows are quarantined with machine-readable reasons.
 
 ### CDC path
@@ -380,9 +383,9 @@ journals rather than resetting shared schemas. Catalog-aware teardown retries
 only recognized transient Trino/Polaris visibility failures with a finite
 budget. Covered boundaries include:
 
-- files and APIs through real MinIO;
+- all four supplier-file formats and APIs through real MinIO;
 - PostgreSQL snapshot lifecycle and watermarks;
-- Bronze loading and idempotent reruns;
+- manifest-backed Bronze loading, partial-commit recovery, and idempotent reruns;
 - dbt core build and business reconciliation;
 - Debezium/Kafka CDC recovery and duplicate handling;
 - Gold-to-ClickHouse publication and rebuildability;
@@ -439,7 +442,6 @@ label. Material limitations include:
 
 - pinned MinIO image availability prevents an unconditional clean-host bootstrap
   claim;
-- supplier file sources stop in MinIO archive and do not enter Iceberg Bronze;
 - long-running Bronze and CDC workloads need bounded snapshot/file maintenance;
 - dbt model contracts are documented and tested but are not fully enforced by
   the current adapter;

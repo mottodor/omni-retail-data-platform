@@ -35,8 +35,20 @@ All file sources share the same delivery mechanics:
 | Raw archive | `s3://archive/<source>/<yyyy>/<mm>/<dd>/<filename>` (unchanged payload) |
 | Quarantine | `s3://rejected/<source>/<yyyy>/<mm>/<dd>/…` (+ `.rejection.json`, `.badrows.<ext>`) |
 | Batch identity | `batch_id = <source>-<sha256[:16]>` (content-addressed) |
-| Duplicate policy | same content ⇒ status `duplicate`, skipped |
+| Duplicate policy | same content ⇒ task outcome `duplicate`, skipped; canonical completed manifest retained |
+| Filename collision | different content at an existing source/date/filename is quarantined; immutable archive object is never overwritten |
 | Metadata | `archive/_manifests/<source>/<batch_id>.json` (checksum, row counts, schema version, reasons) |
+| Bronze authorization | exactly one canonical `status=completed` manifest owns the archived object; checksum, size, schema version, path, and counts must match before DML |
+| Bronze lineage | `_batch_id`, `_batch_date`, `_source_object`, zero-based `_source_object_row_position`, `_ingested_at` |
+
+Bronze loads only accepted records. For a completed file manifest the expected
+Bronze count is `row_count - rejected_row_count`; quarantined rows retain their
+original positions as gaps in `_source_object_row_position`. Whole-file
+rejections, objects still in landing/processing, orphan archive objects, and
+missing/inconsistent manifests never authorize rows. File `run-new` scans the
+completed-manifest registry rather than relying only on `max(_batch_date)`, so a
+late file for an older logical date remains loadable and retries converge by
+source-object coordinate.
 
 ### supplier-prices (CSV)
 
@@ -49,6 +61,7 @@ All file sources share the same delivery mechanics:
 | valid_from | date | yes | price validity start |
 
 - **Grain:** one row per (supplier_id, sku, valid_from).
+- **Bronze table:** `iceberg.bronze.supplier_prices`.
 - **Compatibility policy:** additive columns are backwards-incompatible for this pipeline (unexpected column ⇒ whole file rejected) and require a new `schema_version` plus validator update; column removal/rename is a breaking change.
 - **Freshness (draft):** daily by 06:00 UTC for the current day.
 
@@ -63,6 +76,7 @@ All file sources share the same delivery mechanics:
 | category | string | yes | one of the agreed category list |
 
 - **Grain:** one object per (partner_id, sku).
+- **Bronze table:** `iceberg.bronze.partner_products`.
 - Root of the document must be a JSON array of objects.
 - **Compatibility policy:** same as supplier-prices (additive fields are rejected until the contract is versioned).
 - **Freshness (draft):** daily by 06:00 UTC.
@@ -78,6 +92,7 @@ All file sources share the same delivery mechanics:
 | order_date | date | yes | order placement date |
 
 - **Grain:** one row per order_id.
+- **Bronze table:** `iceberg.bronze.historical_orders`.
 - Physical layout: typed Parquet columns (int64, decimal(12,2), date32), snappy.
 - **Compatibility policy:** same column rules as CSV sources; partition/row-group layout may change freely.
 - **Freshness (draft):** weekly full extract, Monday by 06:00 UTC.
@@ -92,6 +107,7 @@ All file sources share the same delivery mechanics:
 | updated_at | date | yes | stock snapshot date |
 
 - **Grain:** one row per (supplier_id, sku) per snapshot.
+- **Bronze table:** `iceberg.bronze.supplier_stock`.
 - Physical layout: first worksheet, header row first; cell types per column (date cells as Excel dates).
 - **Compatibility policy:** same column rules as CSV sources; sheet renaming is allowed, extra sheets are ignored.
 - **Freshness (draft):** daily by 06:00 UTC.

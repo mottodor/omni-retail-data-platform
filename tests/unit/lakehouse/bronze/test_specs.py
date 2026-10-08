@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from omni_retail.ingestion.files.schemas import KNOWN_SOURCES as FILE_SOURCES
 from omni_retail.ingestion.postgres_snapshot.tables import TABLES as SNAPSHOT_TABLES
 from omni_retail.lakehouse.bronze.specs import (
     SERVICE_COLUMNS,
@@ -15,7 +16,7 @@ from omni_retail.lakehouse.bronze.specs import (
 LOGICAL_DATE = date(2026, 9, 18)
 
 
-def test_all_ten_tables_registered() -> None:
+def test_all_fourteen_tables_registered() -> None:
     assert set(TABLES) == {
         "orders",
         "order_items",
@@ -27,6 +28,10 @@ def test_all_ten_tables_registered() -> None:
         "fx_rates",
         "campaigns",
         "deliveries",
+        "supplier_prices",
+        "partner_products",
+        "historical_orders",
+        "supplier_stock",
     }
 
 
@@ -58,6 +63,7 @@ def test_root_prefixes_address_every_date_of_a_source() -> None:
     assert TABLES["orders"].root_prefix == "postgres/orders/"
     assert TABLES["order_items"].root_prefix == "postgres/order_items/"
     assert TABLES["fx_rates"].root_prefix == "api/fx-rates/"
+    assert TABLES["supplier_prices"].root_prefix == "supplier-prices/"
 
 
 def test_logical_date_from_key_parses_both_layouts() -> None:
@@ -77,6 +83,10 @@ def test_logical_date_from_key_ignores_foreign_and_malformed_keys() -> None:
     assert spec.logical_date_from_key("postgres/orders/2026/13/45/data.parquet") is None
     assert spec.logical_date_from_key("postgres/shipments/2026/09/18/data.parquet") is None
     assert TABLES["fx_rates"].logical_date_from_key("api/fx-rates/20261345/page_0001.json") is None
+    assert (
+        TABLES["supplier_prices"].logical_date_from_key("supplier-prices/2026/09/18/prices.csv")
+        == LOGICAL_DATE
+    )
 
 
 def test_service_columns_are_last_and_partition_on_batch_date() -> None:
@@ -103,7 +113,29 @@ def test_spec_by_source_resolves_cli_keys() -> None:
     assert spec_by_source("fx-rates").name == "fx_rates"
     assert spec_by_source("marketing-campaigns").name == "campaigns"
     assert spec_by_source("deliveries").name == "deliveries"
-    assert len(all_sources()) == 10
+    assert spec_by_source("supplier-prices").name == "supplier_prices"
+    assert spec_by_source("partner-products").name == "partner_products"
+    assert spec_by_source("historical-orders").name == "historical_orders"
+    assert spec_by_source("supplier-stock").name == "supplier_stock"
+    assert len(all_sources()) == 14
+
+
+def test_file_specs_match_authoritative_source_contracts() -> None:
+    trino_types = {
+        "string": "varchar",
+        "integer": "bigint",
+        "decimal": "decimal(12,2)",
+        "date": "date",
+        "boolean": "boolean",
+    }
+    for source_name, source in FILE_SOURCES.items():
+        bronze = spec_by_source(source_name)
+        assert bronze.kind == "file"
+        assert bronze.file_format == source.format
+        assert bronze.schema_version == source.schema_version
+        assert [(column.name, column.trino_type) for column in bronze.columns] == [
+            (field.name, trino_types[field.type]) for field in source.fields
+        ]
 
 
 def test_spec_by_source_rejects_unknown() -> None:

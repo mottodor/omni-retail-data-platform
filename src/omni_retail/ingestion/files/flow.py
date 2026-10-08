@@ -30,7 +30,7 @@ from omni_retail.ingestion.common.paths import (
     rejected_key,
     rejection_key,
 )
-from omni_retail.ingestion.common.storage import ObjectStorage
+from omni_retail.ingestion.common.storage import ObjectNotFoundError, ObjectStorage
 from omni_retail.ingestion.files.schemas import FileSourceSchema
 from omni_retail.ingestion.files.validation import (
     serialize_bad_rows_csv,
@@ -142,12 +142,42 @@ def _process_one(
 
     marker_key = dedup_key(schema.name, checksum)
     if storage.object_exists(BUCKET_ARCHIVE, marker_key):
-        marker = json.loads(storage.get_object(BUCKET_ARCHIVE, marker_key))
+        try:
+            marker = json.loads(storage.get_object(BUCKET_ARCHIVE, marker_key))
+            canonical = BatchManifest.from_json(
+                storage.get_object(BUCKET_ARCHIVE, manifest_key(schema.name, batch_id)).decode()
+            )
+            marker_object_key = marker["object_key"]
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            ObjectNotFoundError,
+        ) as error:
+            raise FileFlowError(
+                f"invalid duplicate evidence for batch {batch_id}: {error}"
+            ) from error
+        if (
+            marker.get("batch_id") != batch_id
+            or marker.get("checksum") != checksum
+            or canonical.status != "completed"
+            or canonical.source != schema.name
+            or canonical.source_kind != "file"
+            or canonical.batch_id != batch_id
+            or canonical.checksum != checksum
+            or canonical.object_key != marker_object_key
+            or not storage.object_exists(BUCKET_ARCHIVE, marker_object_key)
+        ):
+            raise FileFlowError(
+                f"inconsistent duplicate evidence for batch {batch_id}; "
+                "canonical completed manifest and archived object are required"
+            )
         manifest = _build_manifest(
             schema=schema,
             batch_id=batch_id,
             status="duplicate",
-            object_key=marker["object_key"],
+            object_key=canonical.object_key,
             checksum=checksum,
             size_bytes=len(payload),
             ingested_at=clock(),
@@ -156,11 +186,8 @@ def _process_one(
             rejected_row_count=0,
             rejection_reasons=(),
         )
-        storage.put_object(
-            BUCKET_ARCHIVE, manifest_key(schema.name, batch_id), manifest.to_json().encode()
-        )
         _cleanup_landing(storage, schema, filename)
-        log.info("duplicate file skipped: original=%s", marker["object_key"])
+        log.info("duplicate file skipped: original=%s", canonical.object_key)
         return BatchOutcome(filename=filename, manifest=manifest)
 
     if not from_processing:
@@ -203,6 +230,23 @@ def _process_one(
         )
 
     archived_key = archive_key(schema.name, filename, run_date)
+    if storage.object_exists(BUCKET_ARCHIVE, archived_key):
+        archived_checksum = compute_checksum(storage.get_object(BUCKET_ARCHIVE, archived_key))
+        if archived_checksum != checksum:
+            return _reject_file(
+                storage,
+                schema,
+                filename,
+                run_date,
+                clock,
+                log,
+                payload=payload,
+                checksum=checksum,
+                rejection_reasons=(
+                    "archive path collision: existing immutable object has a different "
+                    f"checksum at {archived_key}",
+                ),
+            )
     storage.put_object(BUCKET_ARCHIVE, archived_key, payload)
     if result.bad_rows:
         storage.put_object(
@@ -210,19 +254,6 @@ def _process_one(
             badrows_key(schema.name, filename, run_date),
             serialize_bad_rows_csv(schema, result.bad_rows),
         )
-
-    storage.put_object(
-        BUCKET_ARCHIVE,
-        marker_key,
-        json.dumps(
-            {
-                "batch_id": batch_id,
-                "checksum": checksum,
-                "object_key": archived_key,
-            },
-            sort_keys=True,
-        ).encode(),
-    )
 
     manifest = _build_manifest(
         schema=schema,
@@ -239,6 +270,18 @@ def _process_one(
     )
     storage.put_object(
         BUCKET_ARCHIVE, manifest_key(schema.name, batch_id), manifest.to_json().encode()
+    )
+    storage.put_object(
+        BUCKET_ARCHIVE,
+        marker_key,
+        json.dumps(
+            {
+                "batch_id": batch_id,
+                "checksum": checksum,
+                "object_key": archived_key,
+            },
+            sort_keys=True,
+        ).encode(),
     )
     _cleanup_landing(storage, schema, filename)
     log.info(

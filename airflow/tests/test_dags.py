@@ -113,6 +113,10 @@ def test_load_bronze_is_triggered_by_raw_datasets(dag_bag: DagBag) -> None:
             "raw://fx-rates",
             "raw://marketing-campaigns",
             "raw://deliveries",
+            "raw://supplier-prices",
+            "raw://partner-products",
+            "raw://historical-orders",
+            "raw://supplier-stock",
         )
     }
 
@@ -295,11 +299,16 @@ def test_postgres_snapshot_tasks_emit_raw_dataset(dag_bag: DagBag) -> None:
         assert task.outlets == [Dataset("raw://postgres-snapshot")], task.task_id
 
 
-def test_supplier_files_emit_no_dataset_yet(dag_bag: DagBag) -> None:
-    """File sources are not loaded into Bronze yet (deferred follow-up)."""
+def test_supplier_file_tasks_emit_source_specific_raw_datasets(dag_bag: DagBag) -> None:
     dag = dag_bag.dags["ingest_supplier_files"]
-    for task in dag.tasks:
-        assert not task.outlets, task.task_id
+    for source in (
+        "supplier-prices",
+        "partner-products",
+        "historical-orders",
+        "supplier-stock",
+    ):
+        task = dag.get_task(f"ingest_{source.replace('-', '_')}")
+        assert task.outlets == [Dataset(f"raw://{source}")]
 
 
 def test_load_bronze_task_emits_bronze_dataset(dag_bag: DagBag) -> None:

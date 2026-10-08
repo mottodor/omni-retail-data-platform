@@ -17,16 +17,44 @@ import pytest
 from trino.exceptions import TrinoQueryError
 
 from integration.lakehouse_seed import trino_scalar
-from integration.namespace_ownership import ObjectMutationJournal, manifest_scoped_storage
+from integration.namespace_ownership import (
+    ObjectMutationJournal,
+    ObjectRef,
+    ScopedObjectStorage,
+    manifest_scoped_storage,
+)
+from omni_retail.generators.vendor_files.generator import (
+    generate_payload,
+    make_filename,
+    upload_payload,
+)
+from omni_retail.ingestion.common.checksum import compute_checksum
 from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
+    BUCKET_LANDING,
+    BUCKET_REJECTED,
     api_batch_prefix,
     api_page_key,
+    archive_key,
+    badrows_key,
+    dedup_key,
+    incoming_key,
     manifest_key,
     postgres_snapshot_key,
+    processing_key,
+    rejected_key,
+    rejection_key,
 )
 from omni_retail.ingestion.common.storage import ObjectStorage
+from omni_retail.ingestion.files.flow import process_incoming
+from omni_retail.ingestion.files.schemas import (
+    HISTORICAL_ORDERS,
+    PARTNER_PRODUCTS,
+    SUPPLIER_PRICES,
+    SUPPLIER_STOCK,
+    FileSourceSchema,
+)
 from omni_retail.ingestion.postgres_snapshot.tables import (
     table_by_name,
 )
@@ -143,6 +171,152 @@ def seed_fx(storage: ObjectMutationJournal) -> BatchManifest:
         manifest.to_json().encode(),
     )
     return manifest
+
+
+FILE_SCHEMAS = (
+    SUPPLIER_PRICES,
+    PARTNER_PRODUCTS,
+    HISTORICAL_ORDERS,
+    SUPPLIER_STOCK,
+)
+
+
+def seed_file_batches(
+    journal: ObjectMutationJournal,
+    schemas: tuple[FileSourceSchema, ...] = FILE_SCHEMAS,
+    *,
+    rows: int = 7,
+    seed: int = 4242,
+) -> tuple[ScopedObjectStorage, tuple[BatchManifest, ...]]:
+    refs: set[ObjectRef] = set()
+    payloads: list[tuple[FileSourceSchema, str, bytes]] = []
+    for schema in schemas:
+        payload = generate_payload(schema, seed=seed, rows=rows, run_date=LOGICAL_DATE)
+        filename = make_filename(schema, seed=seed, rows=rows, run_date=LOGICAL_DATE)
+        checksum = compute_checksum(payload)
+        batch_id = f"{schema.name}-{checksum[:16]}"
+        refs.update(
+            {
+                (BUCKET_LANDING, incoming_key(schema.name, filename)),
+                (BUCKET_LANDING, processing_key(schema.name, filename)),
+                (BUCKET_ARCHIVE, archive_key(schema.name, filename, LOGICAL_DATE)),
+                (BUCKET_ARCHIVE, manifest_key(schema.name, batch_id)),
+                (BUCKET_ARCHIVE, dedup_key(schema.name, checksum)),
+                (BUCKET_REJECTED, rejected_key(schema.name, filename, LOGICAL_DATE)),
+                (BUCKET_REJECTED, rejection_key(schema.name, filename, LOGICAL_DATE)),
+                (BUCKET_REJECTED, badrows_key(schema.name, filename, LOGICAL_DATE)),
+            }
+        )
+        payloads.append((schema, filename, payload))
+
+    journal.lease_keys(refs)
+    flow_storage = ScopedObjectStorage(journal, keys=refs)
+    for bucket, key in refs:
+        flow_storage.delete_object(bucket, key)
+
+    manifests: list[BatchManifest] = []
+    for schema, _filename, payload in payloads:
+        upload_payload(
+            flow_storage,
+            schema,
+            payload,
+            seed=seed,
+            rows=rows,
+            run_date=LOGICAL_DATE,
+        )
+        outcomes = process_incoming(flow_storage, schema, LOGICAL_DATE)
+        assert len(outcomes) == 1
+        manifests.append(outcomes[0].manifest)
+    return manifest_scoped_storage(journal, manifests), tuple(manifests)
+
+
+def test_all_file_formats_load_to_bronze_idempotently(
+    object_journal: ObjectMutationJournal,
+    lakehouse_namespace: Namespace,
+) -> None:
+    storage, manifests = seed_file_batches(object_journal)
+
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        first = {
+            schema.name: load_new(
+                storage,
+                executor,
+                spec_by_source(schema.name),
+                schema=lakehouse_namespace.bronze,
+            )
+            for schema in FILE_SCHEMAS
+        }
+        second = {
+            schema.name: load_new(
+                storage,
+                executor,
+                spec_by_source(schema.name),
+                schema=lakehouse_namespace.bronze,
+            )
+            for schema in FILE_SCHEMAS
+        }
+
+    by_source = {manifest.source: manifest for manifest in manifests}
+    for source_schema in FILE_SCHEMAS:
+        manifest = by_source[source_schema.name]
+        accepted = manifest.row_count - manifest.rejected_row_count
+        assert len(first[source_schema.name]) == 1
+        assert first[source_schema.name][0].row_count == accepted
+        assert second[source_schema.name] == []
+        spec = spec_by_source(source_schema.name)
+        table = f"iceberg.{lakehouse_namespace.bronze}.{spec.name}"
+        where = f"where _batch_date = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
+        assert trino_scalar(f"select count(*) from {table} {where}") == accepted
+        assert (
+            trino_scalar(
+                f"select count(distinct row(_source_object, _source_object_row_position)) "
+                f"from {table} {where}"
+            )
+            == accepted
+        )
+        assert trino_scalar(f"select count(distinct _batch_id) from {table} {where}") == 1
+
+
+def test_rejected_file_manifest_is_not_loaded(
+    object_journal: ObjectMutationJournal,
+    lakehouse_namespace: Namespace,
+) -> None:
+    filename = "broken.csv"
+    payload = b"supplier_id,sku\nacme,SKU-1\n"
+    checksum = compute_checksum(payload)
+    batch_id = f"supplier-prices-{checksum[:16]}"
+    refs: set[ObjectRef] = {
+        (BUCKET_LANDING, incoming_key("supplier-prices", filename)),
+        (BUCKET_LANDING, processing_key("supplier-prices", filename)),
+        (BUCKET_ARCHIVE, manifest_key("supplier-prices", batch_id)),
+        (BUCKET_REJECTED, rejected_key("supplier-prices", filename, LOGICAL_DATE)),
+        (BUCKET_REJECTED, rejection_key("supplier-prices", filename, LOGICAL_DATE)),
+    }
+    object_journal.lease_keys(refs)
+    flow_storage = ScopedObjectStorage(object_journal, keys=refs)
+    for bucket, key in refs:
+        flow_storage.delete_object(bucket, key)
+    flow_storage.put_object(
+        BUCKET_LANDING,
+        incoming_key("supplier-prices", filename),
+        payload,
+    )
+    outcome = process_incoming(flow_storage, SUPPLIER_PRICES, LOGICAL_DATE)[0]
+    assert outcome.manifest.status == "rejected"
+    loader_storage = ScopedObjectStorage(
+        object_journal,
+        keys={(BUCKET_ARCHIVE, manifest_key("supplier-prices", batch_id))},
+    )
+
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        results = load_new(
+            loader_storage,
+            executor,
+            spec_by_source("supplier-prices"),
+            schema=lakehouse_namespace.bronze,
+        )
+
+    assert results == []
 
 
 def test_postgres_bronze_load_is_idempotent(
@@ -312,6 +486,60 @@ def test_bronze_load_new_resumes_ambiguous_later_chunk(
         )
         == 10_001
     )
+
+
+def test_file_bronze_load_resumes_ambiguous_multi_object_commit(
+    object_journal: ObjectMutationJournal,
+    lakehouse_namespace: Namespace,
+) -> None:
+    _, first_manifests = seed_file_batches(
+        object_journal,
+        schemas=(SUPPLIER_PRICES,),
+        rows=10_000,
+        seed=7001,
+    )
+    _, second_manifests = seed_file_batches(
+        object_journal,
+        schemas=(SUPPLIER_PRICES,),
+        rows=1,
+        seed=7002,
+    )
+    manifests = (*first_manifests, *second_manifests)
+    storage = manifest_scoped_storage(object_journal, manifests)
+
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as delegate:
+        failing = PostCommitTransientFailure(delegate, fail_after_insert=2)
+        with pytest.raises(TrinoQueryError, match="injected post-commit"):
+            load_new(
+                storage,
+                failing,
+                spec_by_source("supplier-prices"),
+                schema=lakehouse_namespace.bronze,
+                attempts=1,
+            )
+
+    with DbapiTrinoExecutor(TrinoConfig.from_env()) as executor:
+        assert (
+            load_new(
+                storage,
+                executor,
+                spec_by_source("supplier-prices"),
+                schema=lakehouse_namespace.bronze,
+            )
+            == []
+        )
+
+    table = f"iceberg.{lakehouse_namespace.bronze}.supplier_prices"
+    where = f"where _batch_date = DATE '{LOGICAL_DATE:%Y-%m-%d}'"
+    assert trino_scalar(f"select count(*) from {table} {where}") == 10_001
+    assert (
+        trino_scalar(
+            f"select count(distinct row(_source_object, _source_object_row_position)) "
+            f"from {table} {where}"
+        )
+        == 10_001
+    )
+    assert trino_scalar(f"select count(distinct _source_object) from {table} {where}") == 2
 
 
 def test_bronze_load_new_loads_only_manifest_owned_dates(

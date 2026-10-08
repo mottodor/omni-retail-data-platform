@@ -1,13 +1,15 @@
-"""Raw-object readers: PG snapshot Parquet and API JSON pages (Phase 5 spec §4).
+"""Strict raw-object readers for snapshots, API pages, and supplier files.
 
-Readers are strict on purpose: a raw object that does not match the Bronze
-contract (column names for Parquet, envelope shape and field types for JSON)
-raises :class:`BronzeReadError` before any partition is modified.
+A raw object that does not match its Bronze/source contract raises
+:class:`BronzeReadError` before any partition is modified. Supplier readers
+reuse the ingestion validator so CSV, JSON, Parquet, and XLSX acceptance
+semantics cannot drift between archive and Bronze.
 """
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pyarrow as pa
@@ -15,9 +17,28 @@ import pyarrow.parquet as pq
 
 from omni_retail.ingestion.common.paths import BUCKET_ARCHIVE
 from omni_retail.ingestion.common.storage import ObjectStorage
+from omni_retail.ingestion.files.schemas import schema_by_name
+from omni_retail.ingestion.files.validation import validate_payload
 from omni_retail.lakehouse.bronze.specs import BronzeColumnSpec, BronzeTableSpec
 
 Row = dict[str, object]
+
+
+@dataclass(frozen=True)
+class PositionedRow:
+    """One typed raw record with its stable zero-based object coordinate."""
+
+    row_position: int
+    values: Row
+
+
+@dataclass(frozen=True)
+class FileReadResult:
+    """Typed accepted rows plus source validation counts for one file object."""
+
+    rows: tuple[PositionedRow, ...]
+    row_count: int
+    rejected_row_count: int
 
 
 class BronzeReadError(Exception):
@@ -37,7 +58,46 @@ def read_rows(spec: BronzeTableSpec, object_key: str, body: bytes) -> list[Row]:
     """Dispatch to the raw-format reader declared by the spec kind."""
     if spec.kind == "postgres":
         return read_parquet_rows(spec, object_key, body)
-    return read_json_rows(spec, object_key, body)
+    if spec.kind == "api":
+        return read_json_rows(spec, object_key, body)
+    return [row.values for row in read_file_rows(spec, object_key, body).rows]
+
+
+def read_file_rows(spec: BronzeTableSpec, object_key: str, body: bytes) -> FileReadResult:
+    """Validate one archived vendor file and type only its accepted source rows."""
+    try:
+        schema = schema_by_name(spec.source_name)
+    except ValueError as error:
+        raise BronzeReadError(f"{object_key}: {error}") from error
+    if spec.kind != "file" or spec.file_format != schema.format:
+        raise BronzeReadError(
+            f"{object_key}: file spec mismatch for {spec.source_name} "
+            f"(kind={spec.kind}, format={spec.file_format}, contract={schema.format})"
+        )
+    expected = [field.name for field in schema.fields]
+    actual = [column.name for column in spec.columns]
+    if actual != expected:
+        raise BronzeReadError(
+            f"{object_key}: Bronze columns drifted from file contract "
+            f"(expected={expected}, actual={actual})"
+        )
+
+    result = validate_payload(schema, body)
+    if not result.file_valid:
+        raise BronzeReadError(
+            f"{object_key}: archived file no longer satisfies schema {schema.schema_version}: "
+            + "; ".join(result.file_errors)
+        )
+
+    rows: list[PositionedRow] = []
+    for accepted in result.accepted_rows:
+        values: Row = {}
+        for column in spec.columns:
+            values[column.name] = _coerce_file(
+                object_key, accepted.row_position, column, accepted.values[column.name]
+            )
+        rows.append(PositionedRow(accepted.row_position, values))
+    return FileReadResult(tuple(rows), result.row_count, result.rejected_row_count)
 
 
 def read_parquet_rows(spec: BronzeTableSpec, object_key: str, body: bytes) -> list[Row]:
@@ -129,6 +189,43 @@ def _validate_native(object_key: str, column: BronzeColumnSpec, value: object) -
             f"{object_key}: {column.name} expects {family}, got {type(value).__name__}"
         )
     return value
+
+
+def _coerce_file(
+    object_key: str,
+    row_position: int,
+    column: BronzeColumnSpec,
+    value: str,
+) -> object:
+    """Convert one validator-canonical string into its Bronze Python type."""
+    family = _type_family(column.trino_type)
+    try:
+        if family == "varchar":
+            return value
+        if family == "bigint":
+            return int(value)
+        if family == "decimal":
+            return Decimal(value)
+        if family == "date":
+            return date.fromisoformat(value)
+        if family == "boolean":
+            lowered = value.lower()
+            if lowered not in {"true", "false"}:
+                raise ValueError("expected true or false")
+            return lowered == "true"
+        if family == "timestamp":
+            parsed = datetime.fromisoformat(value)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        if family == "double":
+            return float(value)
+    except (ValueError, ArithmeticError, InvalidOperation) as error:
+        raise BronzeReadError(
+            f"{object_key}: row {row_position} column {column.name!r} "
+            f"cannot be coerced to {family}: {error}"
+        ) from error
+    raise BronzeReadError(
+        f"{object_key}: row {row_position} column {column.name!r} uses unsupported family {family}"
+    )
 
 
 def _coerce_json(object_key: str, column: BronzeColumnSpec, value: object) -> object:

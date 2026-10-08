@@ -22,9 +22,12 @@ from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
     api_page_key,
+    incoming_key,
     manifest_key,
     postgres_snapshot_key,
 )
+from omni_retail.ingestion.files.flow import process_incoming
+from omni_retail.ingestion.files.schemas import SUPPLIER_PRICES
 from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
 from omni_retail.lakehouse.bronze.loader import (
     DbapiTrinoExecutor,
@@ -373,6 +376,139 @@ def seed_fx_batch(storage: FakeStorage, logical_date: date = LOGICAL_DATE) -> No
     )
 
 
+def seed_supplier_prices_batch(
+    storage: FakeStorage,
+    *,
+    logical_date: date = LOGICAL_DATE,
+    filename: str = "prices.csv",
+    rows: tuple[bytes, ...] = (b"acme,SKU-1,9.99,EUR,2026-09-01\n",),
+) -> BatchManifest:
+    payload = b"supplier_id,sku,price,currency,valid_from\n" + b"".join(rows)
+    storage.put_object(
+        "landing",
+        incoming_key("supplier-prices", filename),
+        payload,
+    )
+    outcomes = process_incoming(
+        storage,
+        SUPPLIER_PRICES,
+        logical_date,
+        clock=fixed_clock,
+    )
+    assert len(outcomes) == 1
+    return outcomes[0].manifest
+
+
+def test_load_file_batch_uses_manifest_identity_and_raw_positions() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    manifest = seed_supplier_prices_batch(
+        storage,
+        rows=(
+            b"acme,SKU-1,9.99,EUR,2026-09-01\n",
+            b"acme,SKU-2,broken,EUR,2026-09-01\n",
+            b"acme,SKU-3,25.00,EUR,2026-09-02\n",
+        ),
+    )
+
+    result = load(
+        storage,
+        executor,
+        TABLES["supplier_prices"],
+        logical_date=LOGICAL_DATE,
+        clock=fixed_clock,
+    )
+
+    assert result.row_count == 2
+    assert result.batch_ids == (manifest.batch_id,)
+    insert = executor.statements_matching("insert into")[0]
+    assert f"'{manifest.batch_id}'" in insert
+    assert f"'{manifest.object_key}'" in insert
+    assert ", 0, TIMESTAMP" in insert
+    assert ", 2, TIMESTAMP" in insert
+    assert ", 1, TIMESTAMP" not in insert
+
+
+def test_load_file_date_combines_multiple_completed_manifests() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    first = seed_supplier_prices_batch(storage, filename="a.csv")
+    second = seed_supplier_prices_batch(
+        storage,
+        filename="b.csv",
+        rows=(b"globex,SKU-2,15.50,USD,2026-09-02\n",),
+    )
+
+    result = load(
+        storage,
+        executor,
+        TABLES["supplier_prices"],
+        logical_date=LOGICAL_DATE,
+        clock=fixed_clock,
+    )
+
+    assert result.row_count == 2
+    assert result.batch_ids == (first.batch_id, second.batch_id)
+    insert = executor.statements_matching("insert into")[0]
+    assert first.object_key in insert
+    assert second.object_key in insert
+
+
+def test_load_file_rejects_orphan_archive_object_before_dml() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    storage.put_object(
+        BUCKET_ARCHIVE,
+        "supplier-prices/2026/09/18/orphan.csv",
+        b"supplier_id,sku,price,currency,valid_from\n",
+    )
+
+    with pytest.raises(LoadError, match="archive/manifest mismatch"):
+        load(
+            storage,
+            executor,
+            TABLES["supplier_prices"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+        )
+    assert executor.statements == []
+
+
+def test_load_file_rejects_checksum_mismatch_before_dml() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    manifest = seed_supplier_prices_batch(storage)
+    body = storage.get_object(BUCKET_ARCHIVE, manifest.object_key)
+    storage.put_object(BUCKET_ARCHIVE, manifest.object_key, body.replace(b"9.99", b"8.99"))
+
+    with pytest.raises(LoadError, match="integrity mismatch"):
+        load(
+            storage,
+            executor,
+            TABLES["supplier_prices"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+        )
+    assert executor.statements == []
+
+
+def test_load_file_rejects_missing_manifest_owned_object_before_dml() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    manifest = seed_supplier_prices_batch(storage)
+    storage.delete_object(BUCKET_ARCHIVE, manifest.object_key)
+
+    with pytest.raises(LoadError, match="archive/manifest mismatch"):
+        load(
+            storage,
+            executor,
+            TABLES["supplier_prices"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+        )
+    assert executor.statements == []
+
+
 def test_load_postgres_batch_deletes_then_inserts() -> None:
     storage = FakeStorage()
     executor = FakeTrinoExecutor()
@@ -668,6 +804,36 @@ def test_discover_archive_dates_returns_sorted_unique_dates() -> None:
         date(2026, 9, 18),
     )
     assert discover_archive_dates(storage, TABLES["fx_rates"]) == (date(2026, 9, 17),)
+
+
+def test_file_load_new_includes_late_date_older_than_table_watermark() -> None:
+    storage = FakeStorage()
+    seed_supplier_prices_batch(
+        storage,
+        logical_date=date(2026, 9, 16),
+        filename="old.csv",
+    )
+    seed_supplier_prices_batch(
+        storage,
+        logical_date=date(2026, 9, 18),
+        filename="new.csv",
+        rows=(b"globex,SKU-2,15.50,USD,2026-09-02\n",),
+    )
+    executor = watermarked_executor(date(2026, 9, 18))
+    executor.fetch_handler = bronze_counts_by_date({date(2026, 9, 16): 1, date(2026, 9, 18): 1})
+
+    results = load_new(
+        storage,
+        executor,
+        TABLES["supplier_prices"],
+        clock=fixed_clock,
+    )
+
+    assert [result.logical_date for result in results] == [
+        date(2026, 9, 16),
+        date(2026, 9, 18),
+    ]
+    assert executor.statements_matching("select max(") == []
 
 
 def test_load_new_missing_table_loads_all_dates_ascending() -> None:

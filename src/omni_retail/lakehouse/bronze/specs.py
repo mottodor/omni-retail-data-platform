@@ -1,10 +1,10 @@
 """Declarative specs of the Iceberg Bronze tables (Phase 5 design spec §4).
 
 Bronze stays close to the source representation: business columns mirror the
-source types (Trino types for OLTP snapshots; inferred Trino types for the
-flattened API envelopes), plus four service columns on every table:
+source types (Trino types for OLTP snapshots, flattened API envelopes, and
+validated supplier files), plus five service columns on every table:
 
-- ``_batch_id``      deterministic logical batch identity (``<source>-<yyyymmdd>``);
+- ``_batch_id``      producer batch identity (date-addressed or file checksum);
 - ``_batch_date``    logical date; the table's Iceberg partition column;
 - ``_source_object`` archive object key the row was loaded from;
 - ``_ingested_at``   wall-clock load time.
@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
-SourceKind = Literal["postgres", "api"]
+SourceKind = Literal["postgres", "api", "file"]
+FileFormat = Literal["csv", "json", "parquet", "xlsx"]
 
 SCHEMA_BRONZE = "bronze"
 
@@ -48,6 +49,7 @@ class BronzeTableSpec:
     source_name: str
     columns: tuple[BronzeColumnSpec, ...]
     envelope_field: str | None = None  # api only: list field inside the page envelope
+    file_format: FileFormat | None = None
     schema_version: str = "1.0"
 
     @property
@@ -63,10 +65,18 @@ class BronzeTableSpec:
     @property
     def data_object_suffix(self) -> str:
         """Raw object file suffix for this kind (parquet for PG, json for API)."""
-        return "parquet" if self.kind == "postgres" else "json"
+        if self.kind == "postgres":
+            return "parquet"
+        if self.kind == "api":
+            return "json"
+        if self.file_format is None:
+            raise ValueError(f"{self.name}: file spec must declare file_format")
+        return self.file_format
 
     def batch_id(self, logical_date: date) -> str:
-        """Deterministic logical batch id: ``<source_name>-<yyyymmdd>``."""
+        """Deterministic date-addressed ID used by PostgreSQL/API producers."""
+        if self.kind == "file":
+            raise ValueError(f"{self.name}: file batch IDs come from completed manifests")
         return f"{self.source_name}-{logical_date:%Y%m%d}"
 
     @property
@@ -74,7 +84,9 @@ class BronzeTableSpec:
         """Archive-bucket prefix holding every raw object of the source (all dates)."""
         if self.kind == "postgres":
             return f"postgres/{self.name}/"
-        return f"api/{self.source_name}/"
+        if self.kind == "api":
+            return f"api/{self.source_name}/"
+        return f"{self.source_name}/"
 
     def logical_date_from_key(self, key: str) -> date | None:
         """Parse the logical date of a raw data-object key under :attr:`root_prefix`.
@@ -85,7 +97,7 @@ class BronzeTableSpec:
         """
         prefix = self.root_prefix
         relative = key[len(prefix) :] if key.startswith(prefix) else key
-        if self.kind == "postgres":
+        if self.kind in ("postgres", "file"):
             match = re.fullmatch(r"(\d{4})/(\d{2})/(\d{2})/.+", relative)
             if match is None:
                 return None
@@ -105,7 +117,9 @@ class BronzeTableSpec:
         """Archive-bucket prefix holding the raw objects of one logical date."""
         if self.kind == "postgres":
             return f"postgres/{self.name}/{logical_date:%Y/%m/%d}/"
-        return f"api/{self.source_name}/{logical_date:%Y%m%d}/"
+        if self.kind == "api":
+            return f"api/{self.source_name}/{logical_date:%Y%m%d}/"
+        return f"{self.source_name}/{logical_date:%Y/%m/%d}/"
 
     def validate(self) -> None:
         names = [column.name for column in self.columns]
@@ -117,8 +131,12 @@ class BronzeTableSpec:
             raise ValueError(f"{self.name}: service column names are reserved")
         if self.kind == "api" and not self.envelope_field:
             raise ValueError(f"{self.name}: api specs must declare envelope_field")
-        if self.kind == "postgres" and self.envelope_field:
-            raise ValueError(f"{self.name}: postgres specs must not declare envelope_field")
+        if self.kind != "api" and self.envelope_field:
+            raise ValueError(f"{self.name}: only api specs may declare envelope_field")
+        if self.kind == "file" and self.file_format is None:
+            raise ValueError(f"{self.name}: file specs must declare file_format")
+        if self.kind != "file" and self.file_format is not None:
+            raise ValueError(f"{self.name}: only file specs may declare file_format")
 
 
 def _bigint(name: str, *, nullable: bool = False) -> BronzeColumnSpec:
@@ -315,6 +333,61 @@ DELIVERIES = BronzeTableSpec(
     ),
 )
 
+SUPPLIER_PRICES = BronzeTableSpec(
+    name="supplier_prices",
+    kind="file",
+    source_name="supplier-prices",
+    file_format="csv",
+    columns=(
+        _varchar("supplier_id"),
+        _varchar("sku"),
+        _decimal("price"),
+        _varchar("currency"),
+        _date("valid_from"),
+    ),
+)
+
+PARTNER_PRODUCTS = BronzeTableSpec(
+    name="partner_products",
+    kind="file",
+    source_name="partner-products",
+    file_format="json",
+    columns=(
+        _varchar("partner_id"),
+        _varchar("sku"),
+        _varchar("title"),
+        _varchar("brand"),
+        _varchar("category"),
+    ),
+)
+
+HISTORICAL_ORDERS = BronzeTableSpec(
+    name="historical_orders",
+    kind="file",
+    source_name="historical-orders",
+    file_format="parquet",
+    columns=(
+        _bigint("order_id"),
+        _bigint("customer_id"),
+        _varchar("status"),
+        _decimal("order_total"),
+        _date("order_date"),
+    ),
+)
+
+SUPPLIER_STOCK = BronzeTableSpec(
+    name="supplier_stock",
+    kind="file",
+    source_name="supplier-stock",
+    file_format="xlsx",
+    columns=(
+        _varchar("supplier_id"),
+        _varchar("sku"),
+        _bigint("quantity"),
+        _date("updated_at"),
+    ),
+)
+
 TABLES: dict[str, BronzeTableSpec] = {
     spec.name: spec
     for spec in (
@@ -328,6 +401,10 @@ TABLES: dict[str, BronzeTableSpec] = {
         FX_RATES,
         CAMPAIGNS,
         DELIVERIES,
+        SUPPLIER_PRICES,
+        PARTNER_PRODUCTS,
+        HISTORICAL_ORDERS,
+        SUPPLIER_STOCK,
     )
 }
 

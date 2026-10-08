@@ -19,8 +19,11 @@ make bronze-rebuild
 ```
 
 The command drops only `iceberg.${ICEBERG_BRONZE_SCHEMA:-bronze}`, then uses
-Bronze `run-new` to rebuild it from archive. It does not clear any source or
-serving state. Logs identify source, logical date, chunk and retry context.
+Bronze `run-new` to rebuild all fourteen batch tables from archive. It does not
+clear any source or serving state. PostgreSQL/API tables resume by date;
+supplier-file tables scan canonical completed manifests so late files on older
+dates are included. Logs identify source, logical date, object batches, chunk,
+and retry context.
 
 Trino 483 is affected by the REST OAuth2 session defect fixed upstream in
 `trinodb/trino#30816`. The repository's pinned local Trino image backports that
@@ -65,7 +68,11 @@ FROM iceberg.bronze.orders
 WHERE _batch_date = DATE '2026-09-18';
 ```
 
-The two values must equal the archived manifest's `row_count`.
+For PostgreSQL/API tables, the two values must equal the archived manifest's
+`row_count`. For supplier-file tables, they must equal the sum of
+`row_count - rejected_row_count` across completed manifests for that source and
+date. Also group by `_batch_id, _source_object` to verify that every file row is
+owned by its content-addressed manifest; rejected manifests authorize no rows.
 
 ## Manual recovery
 

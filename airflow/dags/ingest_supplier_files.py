@@ -10,8 +10,10 @@ turns quarantined data into a task failure instead of a logged warning
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 
-from airflow.decorators import dag, task
+from airflow.decorators import dag as airflow_dag
+from airflow.decorators import task
 from airflow.models.param import Param
+from include.datasets import raw_dataset
 from include.policy import INGESTION_TASK_DEFAULT_ARGS
 from include.runners import run_file_ingestion
 
@@ -23,13 +25,13 @@ FILE_SOURCES: tuple[str, ...] = (
 )
 
 
-@dag(
+@airflow_dag(
     dag_id="ingest_supplier_files",
     schedule="@daily",
     start_date=datetime(2026, 9, 1, tzinfo=UTC),
     catchup=False,
     max_active_runs=1,
-    default_args=INGESTION_TASK_DEFAULT_ARGS,
+    default_args=dict(INGESTION_TASK_DEFAULT_ARGS),
     params={
         "fail_on_rejected": Param(
             default=False,
@@ -53,7 +55,10 @@ FILE_SOURCES: tuple[str, ...] = (
 def build_supplier_files_dag() -> None:
     for source in FILE_SOURCES:
 
-        @task(task_id=f"ingest_{source.replace('-', '_')}")
+        @task(
+            task_id=f"ingest_{source.replace('-', '_')}",
+            outlets=[raw_dataset(source)],
+        )
         def ingest(
             ds: str | None = None,
             params: Mapping[str, object] | None = None,

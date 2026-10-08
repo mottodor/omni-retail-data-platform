@@ -137,9 +137,11 @@ def run_bronze_load(
     storage: ObjectStorage | None = None,
     schema: str | None = None,
 ) -> dict[str, object]:
-    """Watermark-driven Bronze load of every registered source (Phase 5 §3).
+    """Restart-safe Bronze load of every registered batch source.
 
-    DAG calls remain argument-free. Explicit storage/schema boundaries exist so
+    PostgreSQL/API sources resume from date watermarks; file sources scan
+    completed manifests so late older batches remain eligible. DAG calls remain
+    argument-free. Explicit storage/schema boundaries exist so
     integration tests can retain the real runner path without seeing shared raw
     dates or writing production schemas.
     """

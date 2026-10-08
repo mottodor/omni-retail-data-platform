@@ -34,7 +34,8 @@ from omni_retail.ingestion.common.storage import BotoObjectStorage
 from omni_retail.lakehouse.bronze.loader import DbapiTrinoExecutor, TrinoConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REGISTERED_SOURCES = 10
+REGISTERED_SOURCES = 14
+SEEDED_SOURCES = 10
 HEALTHY_DBT_STATUSES = {"success", "pass"}
 EXPECTED_SEEDED_PARTITIONS = {
     "orders": {DAY_1: 2, DAY_2: 1},
@@ -107,7 +108,7 @@ def test_dataset_triggered_lakehouse_pipeline(
     )
 
     assert load_summary["sources"] == REGISTERED_SOURCES
-    assert load_summary["loaded_sources"] == REGISTERED_SOURCES
+    assert load_summary["loaded_sources"] == SEEDED_SOURCES
     assert load_summary["dates"] == 15
     assert cast(int, load_summary["rows"]) > 0
     by_source = cast(dict[str, dict[str, object]], load_summary["by_source"])
