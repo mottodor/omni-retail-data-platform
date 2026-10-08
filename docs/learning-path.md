@@ -101,9 +101,10 @@ Expected evidence:
 That guard prevents an accidental destructive reseed. `make reset` is explicitly
 destructive and is not part of a routine restart.
 
-Clean-host startup currently has the MinIO image-supply limitation recorded as
-TD-001 in [PROGRESS.md](../PROGRESS.md). Read it before treating this path as a
-clean-clone reproducibility claim.
+On a clean host, `make up` builds the MinIO server and client from pinned,
+checksum-verified source commits. The first build needs upstream source and
+module access; versions and diagnostics are documented in the
+[MinIO image guide](../infrastructure/minio/README.md).
 
 ## Full demo
 
