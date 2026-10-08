@@ -3,7 +3,7 @@ UV := uv
 
 HOST_RUN := bash infrastructure/scripts/run_host_command.sh
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test minio-build up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -23,8 +23,12 @@ test: ## Run unit tests
 unit: test ## Alias for unit tests
 
 COMPOSE := docker compose --profile core
+MINIO_IMAGE_SERVICES := minio minio-init
 
-up: ## Start core infrastructure and wait until healthy
+minio-build: ## Build pinned MinIO server/client images from verified source
+	docker compose build $(MINIO_IMAGE_SERVICES)
+
+up: minio-build ## Build images, start core infrastructure, and wait until healthy
 	$(COMPOSE) up -d --wait
 
 down: ## Stop services (named volumes are preserved)
