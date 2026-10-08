@@ -41,6 +41,10 @@ from omni_retail.lakehouse.bronze.loader import (
     validate_schema_name,
 )
 from omni_retail.lakehouse.bronze.specs import TABLES
+from omni_retail.lakehouse.snapshot_maintenance import (
+    SnapshotExpirationPolicy,
+    expire_table_snapshots,
+)
 from omni_retail.serving.clickhouse.cli import main as serving_cli_main
 from omni_retail.serving.clickhouse.specs import MARTS
 from omni_retail.streaming.cdc.boundary import (
@@ -178,6 +182,29 @@ def run_bronze_load(
         "rows": total_rows,
         "by_source": by_source,
     }
+
+
+def run_snapshot_maintenance(
+    table_name: str,
+    *,
+    schema: str | None = None,
+) -> dict[str, object]:
+    """Expire one allowlisted batch Bronze table using the validated policy."""
+    configure_logging()
+    if table_name not in TABLES:
+        raise ValueError(f"unknown batch Bronze table: {table_name!r}")
+    effective_schema = bronze_schema_from_env() if schema is None else validate_schema_name(schema)
+    policy = SnapshotExpirationPolicy.from_env()
+    config = TrinoConfig.from_env()
+    with contextlib.closing(DbapiTrinoExecutor(config)) as executor:
+        result = expire_table_snapshots(
+            executor,
+            table_name,
+            policy,
+            catalog=config.catalog,
+            schema=effective_schema,
+        )
+    return result.as_dict()
 
 
 DBT_SCHEMA_DEFAULTS: dict[str, str] = {

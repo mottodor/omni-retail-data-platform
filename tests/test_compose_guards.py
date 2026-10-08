@@ -78,6 +78,8 @@ EXPECTED_TRINO_ENV_KEYS = {
     "TRINO_PORT",
     "TRINO_CATALOG",
     "TRINO_USER",
+    "ICEBERG_SNAPSHOT_RETENTION_DAYS",
+    "ICEBERG_SNAPSHOT_RETAIN_LAST",
     "ICEBERG_BRONZE_SCHEMA",
     "DBT_BRONZE_SCHEMA",
     "DBT_SILVER_SCHEMA",
@@ -316,6 +318,7 @@ def test_trino_catalog_targets_polaris_rest_api() -> None:
     assert "iceberg.catalog.type=rest" in props
     assert re.search(r"iceberg\.rest-catalog\.uri=\S+polaris:8181/api/catalog", props)
     assert "iceberg.rest-catalog.warehouse=lakehouse" in props
+    assert "iceberg.expire-snapshots.min-retention=7d" in props
     assert not re.search(r"^iceberg\.rest-catalog\.session=USER$", props, re.MULTILINE)
 
 
@@ -589,6 +592,16 @@ def test_airflow_ingestion_env_uses_docker_network_addresses() -> None:
     assert env["POSTGRES_HOST"] == "postgres"
 
 
+def test_airflow_snapshot_maintenance_policy_and_pool_are_explicit() -> None:
+    services = _load_compose()["services"]
+    for name in ("airflow-init", "airflow-webserver", "airflow-scheduler"):
+        env = services[name]["environment"]
+        assert env["ICEBERG_SNAPSHOT_RETENTION_DAYS"] == "${ICEBERG_SNAPSHOT_RETENTION_DAYS:-30}"
+        assert env["ICEBERG_SNAPSHOT_RETAIN_LAST"] == "${ICEBERG_SNAPSHOT_RETAIN_LAST:-10}"
+    command = str(services["airflow-init"]["command"])
+    assert "airflow pools set iceberg_bronze 1" in command
+
+
 def test_airflow_cdc_boundary_env_uses_network_addresses_without_profile_dependencies() -> None:
     services = _load_compose()["services"]
     for name in ("airflow-init", "airflow-webserver", "airflow-scheduler"):
@@ -645,6 +658,7 @@ def test_dag_directory_contains_only_expected_dags() -> None:
         "ingest_postgres_snapshot.py",
         "ingest_supplier_files.py",
         "load_bronze.py",
+        "maintain_iceberg_snapshots.py",
         "transform_lakehouse.py",
     ]
     assert dag_files == expected, f"unexpected DAG files: {dag_files}"

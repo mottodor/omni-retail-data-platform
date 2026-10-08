@@ -20,6 +20,8 @@ HOST_SIDE_SERVICE_TARGETS = (
     "ingest-api",
     "bronze-load",
     "bronze-rebuild",
+    "iceberg-snapshot-plan",
+    "iceberg-snapshot-expire",
     "dbt-build",
     "dbt-test",
     "integration",
@@ -69,6 +71,16 @@ def test_up_builds_repository_owned_minio_images_before_start() -> None:
     assert build in recipe
     assert start in recipe
     assert recipe.index(build) < recipe.index(start)
+
+
+def test_snapshot_maintenance_targets_separate_preview_from_explicit_apply() -> None:
+    plan = _render_target("iceberg-snapshot-plan")
+    expire = _render_target("iceberg-snapshot-expire")
+
+    assert "lakehouse.maintenance plan" in plan
+    assert "--confirm" not in plan
+    assert "lakehouse.maintenance expire --confirm" in expire
+    assert "snapshot expiration is irreversible" in expire
 
 
 def test_streaming_status_uses_typed_health_cli_and_propagates_its_exit_code() -> None:

@@ -40,8 +40,9 @@ Full demo; the Overview and Code tour remain usable without a live stack.
   dbt staging/intermediate/core/mart layers.
 - **CDC-aware analytics** with typed events, delete-aware current state,
   customer SCD Type 2, hard-delete handling, and recreate semantics.
-- **Safe orchestration** with Airflow dataset triggers and analytical refreshes
-  pinned to a healthy, stable Kafka-offset boundary.
+- **Safe orchestration** with Airflow dataset triggers, bounded batch-Bronze
+  snapshot expiration, and analytical refreshes pinned to a healthy, stable
+  Kafka-offset boundary.
 - **Rebuildable serving** through atomic full-snapshot publication from Iceberg
   Gold to ClickHouse.
 - **BI as code** with sanitized Superset datasets and dashboards committed to
@@ -130,11 +131,11 @@ runtime; GitHub Actions provides CI.
 | Kafka | Persistent CDC event transport | [Topic initialization](infrastructure/scripts/kafka_topics_init.sh), [CDC runbook](docs/runbooks/kafka-cdc.md) |
 | CDC consumer | Restart-safe insertion of raw CDC events into Iceberg Bronze | [Consumer](src/omni_retail/streaming/cdc/consumer.py), [integration test](tests/integration/test_postgres_cdc.py) |
 | MinIO | S3-compatible landing, archive, rejected, and lakehouse storage | [Compose runtime](docker-compose.yml), [object paths](src/omni_retail/ingestion/common/paths.py) |
-| Iceberg | Analytical source of truth for Bronze, Silver, Gold, and marts | [Bronze loader](src/omni_retail/lakehouse/bronze/loader.py), [core smoke test](infrastructure/scripts/smoke_core.sh) |
+| Iceberg | Analytical source of truth for Bronze, Silver, Gold, and marts | [Bronze loader](src/omni_retail/lakehouse/bronze/loader.py), [snapshot maintenance](src/omni_retail/lakehouse/snapshot_maintenance.py), [core smoke test](infrastructure/scripts/smoke_core.sh) |
 | Polaris | Iceberg REST catalog | [Catalog initialization](infrastructure/scripts/polaris_init.py), [ADR 0001](docs/adr/0001-project-architecture.md) |
 | Trino | SQL compute over Iceberg and Superset ad-hoc query path | [Iceberg catalog config](trino/etc/catalog/iceberg.properties), [benchmark](docs/benchmarks/phase6-trino-vs-clickhouse.md) |
 | dbt Core | Typing, deduplication, SCD2, facts, dimensions, marts, and tests | [Models](dbt/models/), [model semantics](docs/data-model.md) |
-| Airflow | Batch orchestration and stable-boundary analytical refresh | [DAGs](airflow/dags/), [ADR 0008](docs/adr/0008-cdc-analytical-refresh-orchestration.md) |
+| Airflow | Batch orchestration, batch-Bronze maintenance, and stable-boundary analytical refresh | [DAGs](airflow/dags/), [ADR 0008](docs/adr/0008-cdc-analytical-refresh-orchestration.md) |
 | ClickHouse | Derived low-latency serving copy, rebuildable from Iceberg Gold | [Publisher](src/omni_retail/serving/clickhouse/publisher.py), [publication test](tests/integration/test_serving_publication.py) |
 | Superset | BI dashboards through ClickHouse and ad-hoc SQL through Trino | [Asset guide](superset/README.md), [screenshots](docs/screenshots/README.md) |
 | GitHub Actions | Lint, tests, offline dbt parse, Compose validation, and DAG tests | [CI workflow](.github/workflows/ci.yml), [testing model](#testing-and-ci) |
@@ -338,6 +339,8 @@ make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-
 
 # Lakehouse
 make bronze-load ARGS="run-new"
+make iceberg-snapshot-plan ARGS="--table order_items"   # read-only
+make iceberg-snapshot-expire ARGS="--table order_items" # explicit, irreversible
 make dbt-parse
 make dbt-build
 make dbt-test
@@ -422,6 +425,7 @@ budget. Covered boundaries include:
 - all four supplier-file formats and APIs through real MinIO;
 - PostgreSQL snapshot lifecycle and watermarks;
 - manifest-backed Bronze loading, partial-commit recovery, and idempotent reruns;
+- disposable-schema snapshot expiration with retained time-travel history;
 - dbt core build and business reconciliation;
 - Debezium/Kafka CDC recovery and duplicate handling;
 - Gold-to-ClickHouse publication and rebuildability;
@@ -468,7 +472,7 @@ docs/                ADRs, model, contracts, runbooks, benchmarks, screenshots
 | [Architecture ADRs](docs/adr/README.md) | Technology and lifecycle decisions, including the scope freeze |
 | [Data model](docs/data-model.md) | Source/model grain, keys, CDC and SCD2 semantics |
 | [Data contracts](docs/data-contracts.md) | Source and modeled-data contracts |
-| [Runbook index](docs/runbooks/README.md) | CDC, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
+| [Runbook index](docs/runbooks/README.md) | CDC, Iceberg snapshot maintenance, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
 | [Dashboard capture](docs/screenshots/README.md) | Manual screenshot procedure |
 | [AGENTS.md](AGENTS.md) | Repository rules for coding agents |
 
@@ -480,7 +484,8 @@ label. Material limitations include:
 - MinIO Community is frozen at the last project-validated source releases and
   receives no automatic updates; critical security or compatibility repairs
   remain manual maintenance;
-- long-running Bronze and CDC workloads need bounded snapshot/file maintenance;
+- batch Bronze snapshot history is bounded, but sustained CDC workloads still
+  need CDC-specific compaction and snapshot/file retention (TD-006);
 - dbt model contracts are documented and tested but are not fully enforced by
   the current adapter;
 - the local benchmark fixture is evidence of the method, not a scale claim;

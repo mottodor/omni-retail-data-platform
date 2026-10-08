@@ -27,7 +27,7 @@ from include.runners import run_bronze_load
     ),
 )
 def build_load_bronze_dag() -> None:
-    @task(outlets=[BRONZE])
+    @task(outlets=[BRONZE], pool="iceberg_bronze")
     def load_new() -> dict[str, object]:
         return run_bronze_load()
 

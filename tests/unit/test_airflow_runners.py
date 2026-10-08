@@ -13,11 +13,17 @@ from include import runners
 
 from fakes.storage import FakeStorage
 from omni_retail.lakehouse.bronze.specs import TABLES
+from omni_retail.lakehouse.snapshot_maintenance import SnapshotExpirationPolicy
 
 
 class FakeClosableExecutor:
     def close(self) -> None:
         pass
+
+
+class FakeMaintenanceResult:
+    def as_dict(self) -> dict[str, object]:
+        return {"table_name": "orders", "status": "no_op"}
 
 
 def valid_boundary() -> dict[str, object]:
@@ -81,6 +87,56 @@ def test_bronze_runner_keeps_no_argument_production_defaults(
     runners.run_bronze_load()
 
     assert set(schemas) == {"bronze"}
+
+
+def test_snapshot_maintenance_runner_uses_validated_env_and_custom_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = FakeClosableExecutor()
+    calls: list[tuple[str, str, int, int]] = []
+
+    def fake_expire(
+        supplied_executor: object,
+        table_name: str,
+        policy: SnapshotExpirationPolicy,
+        *,
+        catalog: str,
+        schema: str,
+    ) -> FakeMaintenanceResult:
+        assert supplied_executor is executor
+        calls.append(
+            (
+                table_name,
+                schema,
+                policy.retention_days,
+                policy.retain_last,
+            )
+        )
+        assert catalog == "iceberg"
+        return FakeMaintenanceResult()
+
+    monkeypatch.setenv("ICEBERG_SNAPSHOT_RETENTION_DAYS", "45")
+    monkeypatch.setenv("ICEBERG_SNAPSHOT_RETAIN_LAST", "12")
+    monkeypatch.setattr(runners, "DbapiTrinoExecutor", lambda config: executor)
+    monkeypatch.setattr(runners, "expire_table_snapshots", fake_expire)
+
+    result = runners.run_snapshot_maintenance("orders", schema="it_runner_bronze")
+
+    assert result == {"table_name": "orders", "status": "no_op"}
+    assert calls == [("orders", "it_runner_bronze", 45, 12)]
+
+
+def test_snapshot_maintenance_runner_rejects_unknown_table_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runners,
+        "DbapiTrinoExecutor",
+        lambda config: pytest.fail("executor must not be constructed"),
+    )
+
+    with pytest.raises(ValueError, match="unknown batch Bronze table"):
+        runners.run_snapshot_maintenance("postgres_cdc_events")
 
 
 def test_dbt_schema_env_resolves_defaults_and_custom_values() -> None:

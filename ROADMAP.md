@@ -363,7 +363,9 @@ Acceptance criteria:
 Supplier files загружаются из immutable raw archive в четыре типизированные
 Iceberg Bronze-таблицы. Загрузка разрешается только canonical completed
 manifest-ом, сверяет checksum и accepted/rejected row counts и безопасно
-возобновляется по стабильным координатам source object + row position.
+возобновляется по стабильным координатам source object + row position. История
+snapshots четырнадцати batch Bronze-таблиц ограничена maintenance-политикой:
+30 дней и минимум 10 последних ancestors, с safety floors 7 дней / 2 snapshots.
 
 ### Phase 4 — Airflow orchestration
 
@@ -378,6 +380,7 @@ manifest-ом, сверяет checksum и accepted/rejected row counts и без
 - `ingest_supplier_files`;
 - `ingest_postgres_snapshot`;
 - `load_bronze`;
+- `maintain_iceberg_snapshots`;
 - `transform_lakehouse`.
 
 Acceptance criteria:
@@ -553,8 +556,9 @@ make integration      # live profiles required for their tests
 
 - clean-host bootstrap зависит от восстановления воспроизводимой поставки
   pinned MinIO images (TD-001);
-- Bronze snapshot history и CDC microbatches требуют controlled maintenance при
-  длительной эксплуатации (TD-003, TD-006);
+- batch Bronze snapshot history имеет bounded expiration; CDC microbatches всё
+  ещё требуют CDC-specific compaction/retention при длительной эксплуатации
+  (TD-006);
 - dbt contracts документированы и тестируются, но не полностью enforced
   adapter-ом (TD-004);
 - отдельные generic-test definitions сохраняют dbt v2 migration debt (TD-005).
