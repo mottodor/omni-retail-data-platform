@@ -248,10 +248,13 @@ explicitly destructive and couples the PostgreSQL/core reset with Kafka/Connect
 transport deletion so stale source offsets cannot survive a new source volume.
 It preserves BI and Airflow metadata volumes but deletes MinIO/Iceberg data.
 
-> Known limitation: clean-host bootstrap currently depends on restoring a
-> reproducible supply for pinned MinIO images. See TD-001 in
-> [PROGRESS.md](PROGRESS.md); this README does not claim unconditional
-> clean-clone reproducibility while that debt remains open.
+On a clean host, `make up` first builds the pinned MinIO server and client from
+checksum-verified source commits, then starts the core profile. A cold build
+needs access to GitHub source archives, pinned Docker base images, and the Go
+modules locked by upstream `go.sum` files; repeated runs reuse BuildKit caches.
+Compose never substitutes registry images for these local builds. Versions,
+checksums, diagnostics, and the frozen update policy are documented in
+[`infrastructure/minio/README.md`](infrastructure/minio/README.md).
 
 ### Compose profiles
 
@@ -357,6 +360,7 @@ make dbt-parse        # offline dbt manifest validation
 make airflow-test     # DAG pytest + import-error check in the Airflow image
 
 docker compose config
+make minio-build      # pinned, checksum-verified MinIO/mc source images
 make smoke-core       # requires live core
 make integration      # core required; absent optional profiles are skipped
 ```
@@ -440,8 +444,9 @@ docs/                ADRs, model, contracts, runbooks, benchmarks, screenshots
 Open debt is tracked in [PROGRESS.md](PROGRESS.md), not hidden by the capstone
 label. Material limitations include:
 
-- pinned MinIO image availability prevents an unconditional clean-host bootstrap
-  claim;
+- MinIO Community is frozen at the last project-validated source releases and
+  receives no automatic updates; critical security or compatibility repairs
+  remain manual maintenance;
 - long-running Bronze and CDC workloads need bounded snapshot/file maintenance;
 - dbt model contracts are documented and tested but are not fully enforced by
   the current adapter;

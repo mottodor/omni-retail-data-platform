@@ -61,6 +61,16 @@ def test_offline_target_does_not_receive_local_service_environment() -> None:
     assert RUNNER_COMMAND not in recipe
 
 
+def test_up_builds_repository_owned_minio_images_before_start() -> None:
+    recipe = _render_target("up")
+    build = "docker compose build minio minio-init"
+    start = "docker compose --profile core up -d --wait"
+
+    assert build in recipe
+    assert start in recipe
+    assert recipe.index(build) < recipe.index(start)
+
+
 def test_streaming_status_uses_typed_health_cli_and_propagates_its_exit_code() -> None:
     recipe = _render_target("streaming-status")
 

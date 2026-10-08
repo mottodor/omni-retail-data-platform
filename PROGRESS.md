@@ -18,9 +18,9 @@ Contract:
 
 Phase 8 is complete and the repository is maintenance-only under ADR 0009.
 The full-environment startup contract, fail-loud CDC recovery diagnostics,
-TD-002 supplier-file Bronze loading, and TD-007/TD-009 integration reliability
-repairs are complete. There is no active maintenance plan; remaining priorities
-are the tracked items below.
+TD-001 repository-owned MinIO source images, TD-002 supplier-file Bronze
+loading, and TD-007/TD-009 integration reliability repairs are complete. There
+is no active maintenance plan; remaining priorities are tracked below.
 
 ## Phase status
 
@@ -40,7 +40,7 @@ are the tracked items below.
 
 | ID | Debt / risk | Status | Disposition |
 | --- | --- | --- | --- |
-| TD-001 | `make up` is not reproducible on a clean host because the pinned MinIO images disappeared from Docker Hub; current workstations use locally built images from checksum-verified release binaries. | open | [#17](https://github.com/mottodor/omni-retail-data-platform/issues/17): restore a reproducible image supply; changing the S3 store requires an ADR. |
+| TD-001 | Pinned MinIO images disappeared from Docker Hub and the Community edition moved to source-only distribution. | resolved | `make up` builds repository-owned server/client images from pinned source commits with verified archives, immutable base-image digests, frozen versions, and no registry or in-place update fallback. |
 | TD-002 | Four supplier file sources stopped in MinIO landing/archive and were not loaded into Iceberg Bronze. | resolved | All four formats now load accepted rows through canonical completed manifests with checksum/count validation, stable source-object coordinates, late-date discovery, and partial-commit recovery. |
 | TD-003 | Bronze daily loads leave Iceberg snapshot history unbounded; rebuild churn previously drove `order_items` metadata to v194. | open — eligible maintenance | Safe retention/expiration may be added as bounded maintenance with rollback protection; no scheduled phase. |
 | TD-004 | dbt model contracts are documented and tested but not enforced by dbt because adapter support is incomplete. | blocked upstream | Track dbt-trino contract support; keep YAML documentation plus tests as the fallback. |
