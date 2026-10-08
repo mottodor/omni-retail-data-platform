@@ -10,6 +10,13 @@ Accepted. The unimplemented future-expansion scope is partially superseded by
 [ADR 0009](0009-freeze-capstone-scope-at-phase-8.md); the architecture and
 technology responsibilities delivered through Phase 8 remain accepted.
 
+Scope clarification: the Decision section below preserves the original
+architecture record. Its references to Apache Spark, Prometheus/Grafana,
+OpenLineage/Marquez, `spark`/`observability` Compose profiles, and GHCR
+publication describe future reservations that were never delivered and are now
+superseded by ADR 0009. They are not part of the active roadmap or implemented
+stack. ADR 0009 Decision §4 is the canonical list of delivered components.
+
 ## Context
 
 The project is a production-like e-commerce data platform designed to demonstrate practical Data Engineering skills on a local workstation (Windows 11 + WSL2, 32 GB RAM, Docker Compose as primary runtime).

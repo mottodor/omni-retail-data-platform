@@ -13,6 +13,23 @@ ends at the delivered Phase 0–8 scope. See
 > This project is a production-like educational capstone, not a
 > production-ready platform.
 
+## Start here
+
+Choose the depth that matches your goal; no duration estimate is implied.
+
+| Level | Goal | Next step |
+| --- | --- | --- |
+| **Overview** | Understand the business problem, architecture, and delivered evidence | Continue with [What this project demonstrates](#what-this-project-demonstrates), [Implemented architecture](#implemented-architecture), and the [dashboard gallery](#dashboard-gallery) |
+| **Code tour** | Follow each technology from problem to implementation, decision, and test | Use the guided [learning path](docs/learning-path.md#code-tour) |
+| **Core demo** | Validate the Trino → Polaris → Iceberg → MinIO keystone | Follow the [Core demo](#core-demo) |
+| **Full demo** | Trace a PostgreSQL mutation through CDC, dbt, ClickHouse, and Superset | Follow the [Full demo](docs/learning-path.md#full-demo) |
+
+![Superset Executive dashboard](docs/screenshots/executive-dashboard.jpg)
+
+Clean-host infrastructure startup currently has a known MinIO image-supply
+limitation. Read TD-001 in [PROGRESS.md](PROGRESS.md) before starting the Core or
+Full demo; the Overview and Code tour remain usable without a live stack.
+
 ## What this project demonstrates
 
 - **Heterogeneous batch ingestion** from PostgreSQL snapshots, paginated REST
@@ -50,59 +67,80 @@ repository's final scope.
 
 ## Implemented architecture
 
-```text
-SOURCES
+```mermaid
+flowchart LR
+    pg[(PostgreSQL OLTP)]
+    api[Mock REST APIs]
+    files[Supplier files]
+    archive[(MinIO raw archive)]
+    debezium[Debezium]
+    kafka[Kafka]
+    consumer[CDC consumer]
+    bronze[(Iceberg Bronze)]
+    dbt[Trino + dbt Core]
+    silver[Typed/delete-aware Silver]
+    gold[Kimball Gold and marts]
+    clickhouse[(ClickHouse serving)]
+    superset[Superset dashboards]
+    airflow[Airflow]
 
-PostgreSQL OLTP
-  ├── batch snapshots ── MinIO archive ── Bronze loader ──┐
-  └── WAL ── Debezium ── Kafka ── CDC consumer ──────────┤
-                                                          ├──> Iceberg Bronze
-Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──────┤
-Supplier files ── Airflow/Python ── MinIO archive ── Bronze loader ──────┘
-
-Iceberg Bronze
-      │
-      │  Trino + dbt Core
-      ▼
-Typed/delete-aware Silver
-      │
-      ▼
-Kimball Gold facts/dimensions
-      │
-      ▼
-Analytics marts in Iceberg
-      │
-      │  atomic full-snapshot publication
-      ▼
-ClickHouse serving layer
-      │
-      ▼
-Apache Superset dashboards
-
-ORCHESTRATION: Airflow 2.11.2
-CATALOG: Apache Polaris
-OBJECT STORAGE: MinIO
-RUNTIME: Docker Compose profiles
-CI: GitHub Actions
+    pg -->|batch snapshots| archive
+    api -->|Python ingestion| archive
+    files -->|Python ingestion| archive
+    archive -->|Bronze loader| bronze
+    pg -->|WAL| debezium --> kafka --> consumer --> bronze
+    bronze --> dbt --> silver --> gold
+    gold -->|atomic full snapshot| clickhouse --> superset
+    airflow -.orchestrates ingestion and refresh.-> archive
+    airflow -.pins the analytical boundary.-> dbt
 ```
+
+<details>
+<summary>Text architecture fallback</summary>
+
+```text
+PostgreSQL snapshots / REST APIs / supplier files
+  -> MinIO raw archive -> Bronze loader ----------------------┐
+PostgreSQL WAL -> Debezium -> Kafka -> CDC consumer ----------┤
+                                                              v
+                                                        Iceberg Bronze
+                                                              |
+                                                        Trino + dbt
+                                                              v
+                                             typed Silver -> Gold -> marts
+                                                              |
+                                              atomic full-snapshot publish
+                                                              v
+                                                  ClickHouse -> Superset
+```
+
+Airflow orchestrates batch ingestion and the stable-boundary analytical refresh.
+Polaris is the Iceberg REST catalog; Docker Compose profiles are the local
+runtime; GitHub Actions provides CI.
+
+</details>
 
 ### Component responsibilities
 
-| Component | Responsibility |
-| --- | --- |
-| PostgreSQL | OLTP source with deterministic initial data and mutation workload |
-| Python ingestion | API, file, snapshot, and Bronze-loading flows |
-| Debezium | PostgreSQL WAL change capture for customers, orders, and payments |
-| Kafka | Persistent CDC event transport |
-| CDC consumer | Restart-safe insertion of raw CDC events into Iceberg Bronze |
-| MinIO | S3-compatible landing, archive, rejected, and lakehouse storage |
-| Iceberg | Analytical source of truth for Bronze, Silver, Gold, and marts |
-| Polaris | Iceberg REST catalog |
-| Trino | SQL compute over Iceberg and Superset ad-hoc query path |
-| dbt Core | Typing, deduplication, SCD2, facts, dimensions, marts, and tests |
-| Airflow | Batch orchestration and stable-boundary analytical refresh |
-| ClickHouse | Derived low-latency serving copy, rebuildable from Iceberg Gold |
-| Superset | BI dashboards through ClickHouse and ad-hoc SQL through Trino |
+| Component | Responsibility | Implementation and evidence |
+| --- | --- | --- |
+| PostgreSQL | OLTP source with deterministic initial data and mutation workload | [Schema](postgres/init/01_oltp_schema.sql), [generator](src/omni_retail/generators/oltp/), [tests](tests/unit/generators/oltp/) |
+| Python ingestion | API, file, snapshot, and Bronze-loading flows | [Ingestion package](src/omni_retail/ingestion/), [integration tests](tests/integration/) |
+| Debezium | PostgreSQL WAL change capture for customers, orders, and payments | [Connector reconciler](infrastructure/scripts/debezium_connector_init.py), [ADR 0006](docs/adr/0006-cdc-deployment-and-delivery.md) |
+| Kafka | Persistent CDC event transport | [Topic initialization](infrastructure/scripts/kafka_topics_init.sh), [CDC runbook](docs/runbooks/kafka-cdc.md) |
+| CDC consumer | Restart-safe insertion of raw CDC events into Iceberg Bronze | [Consumer](src/omni_retail/streaming/cdc/consumer.py), [integration test](tests/integration/test_postgres_cdc.py) |
+| MinIO | S3-compatible landing, archive, rejected, and lakehouse storage | [Compose runtime](docker-compose.yml), [object paths](src/omni_retail/ingestion/common/paths.py) |
+| Iceberg | Analytical source of truth for Bronze, Silver, Gold, and marts | [Bronze loader](src/omni_retail/lakehouse/bronze/loader.py), [core smoke test](infrastructure/scripts/smoke_core.sh) |
+| Polaris | Iceberg REST catalog | [Catalog initialization](infrastructure/scripts/polaris_init.py), [ADR 0001](docs/adr/0001-project-architecture.md) |
+| Trino | SQL compute over Iceberg and Superset ad-hoc query path | [Iceberg catalog config](trino/etc/catalog/iceberg.properties), [benchmark](docs/benchmarks/phase6-trino-vs-clickhouse.md) |
+| dbt Core | Typing, deduplication, SCD2, facts, dimensions, marts, and tests | [Models](dbt/models/), [model semantics](docs/data-model.md) |
+| Airflow | Batch orchestration and stable-boundary analytical refresh | [DAGs](airflow/dags/), [ADR 0008](docs/adr/0008-cdc-analytical-refresh-orchestration.md) |
+| ClickHouse | Derived low-latency serving copy, rebuildable from Iceberg Gold | [Publisher](src/omni_retail/serving/clickhouse/publisher.py), [publication test](tests/integration/test_serving_publication.py) |
+| Superset | BI dashboards through ClickHouse and ad-hoc SQL through Trino | [Asset guide](superset/README.md), [screenshots](docs/screenshots/README.md) |
+| GitHub Actions | Lint, tests, offline dbt parse, Compose validation, and DAG tests | [CI workflow](.github/workflows/ci.yml), [testing model](#testing-and-ci) |
+
+For a sequential reading route across these components, use the
+[Code tour](docs/learning-path.md#code-tour).
 
 Iceberg is the analytical source of truth. ClickHouse contains no unique
 business state and can be rebuilt from Gold.
@@ -129,45 +167,20 @@ business state and can be rebuilt from Gold.
 
 ## Correctness and reliability design
 
-### Batch paths
+- **Batch:** immutable raw payloads, logical-date paths, content-addressed file
+  identity, canonical manifests, durable watermarks, checksum/count validation,
+  idempotent Bronze loads, and machine-readable quarantine.
+- **CDC:** a raw event ledger retains source and Kafka coordinates; PostgreSQL
+  LSN plus within-topic offsets select state; duplicate delivery is a no-op;
+  winning deletes remove current Gold keys without erasing history.
+- **Refresh and serving:** Airflow freezes a stable Kafka frontier, dbt models
+  and tests read that boundary, and ClickHouse uses staging twins plus atomic
+  `EXCHANGE TABLES`; failed publication leaves the previous serving snapshot
+  visible.
 
-- Raw API pages and accepted files are preserved unchanged in MinIO.
-- Logical dates, not wall-clock time, define object paths and Bronze
-  partitions; file batch identity is content-addressed by checksum.
-- File checksums and canonical completed manifests provide duplicate detection,
-  load authorization, and audit metadata.
-- PostgreSQL snapshots use keyset pagination and advance durable watermarks only
-  after a successful upload.
-- Bronze loads verify manifest ownership, checksums, accepted/rejected counts,
-  and deterministic source-object coordinates before DML. File loads scan
-  completed manifests so late files for older logical dates remain eligible.
-- Invalid files and rows are quarantined with machine-readable reasons.
-
-### CDC path
-
-- Debezium initial `r` records provide the pre-streaming baseline.
-- Raw Bronze preserves source LSN, transaction metadata, Kafka coordinates, and
-  delete operations.
-- Current state is ordered by source LSN and Kafka offset, not event or ingestion
-  timestamps.
-- Duplicate delivery does not change final analytical state.
-- Winning deletes remove current Gold keys; a later create starts a new
-  lifecycle.
-- Snapshot-backed order items and shipments are filtered through the live CDC
-  order set to suppress stale cascade-deleted children.
-
-### Analytical refresh and serving
-
-- Airflow freezes a stable Kafka frontier before dbt starts.
-- `max_active_runs=1` serializes the boundary/build/publication chain.
-- New CDC events above the frozen boundary wait for a later refresh.
-- ClickHouse publication uses staging tables plus atomic `EXCHANGE TABLES`;
-  readers never observe a partial mart refresh.
-- Routine refresh, retry, and full rebuild use the same publisher code path.
-
-Detailed semantics are documented in the
-[data model](docs/data-model.md), [data contracts](docs/data-contracts.md), and
-[CDC runbook](docs/runbooks/kafka-cdc.md).
+Detailed semantics and recovery procedures are in the
+[data model](docs/data-model.md), [data contracts](docs/data-contracts.md),
+[ADR index](docs/adr/README.md), and [runbook index](docs/runbooks/README.md).
 
 ## Dashboard gallery
 
@@ -187,7 +200,7 @@ The delivered dashboards are:
 
 ### Executive
 
-![Superset Executive dashboard](docs/screenshots/executive-dashboard.jpg)
+The Executive dashboard preview appears in [Start here](#start-here).
 
 ### Customer
 
@@ -218,7 +231,22 @@ processors=6
 swap=8GB
 ```
 
-### Python environment and core smoke test
+### Explore without services
+
+A reader can validate the Python contracts and offline dbt project without
+starting Docker Compose:
+
+```bash
+make setup
+make test
+make dbt-parse
+```
+
+These commands do not claim an end-to-end infrastructure check. Continue with
+the [Code tour](docs/learning-path.md#code-tour) to trace representative files,
+decisions, and tests.
+
+### Core demo
 
 #### One-time workstation setup
 
@@ -265,10 +293,14 @@ to run every service continuously.
 | BI | `make bi-up` | ClickHouse, Superset, metadata/init services |
 | Orchestration | `make airflow-up` | Airflow scheduler/webserver and metadata DB |
 
-#### Routine full-environment startup
+### Full demo
 
-With populated volumes, restart the complete environment without rerunning the
-strict initial loader:
+The guided Full demo—including the initial Debezium snapshot gate, a controlled
+source mutation, a boundary-pinned Airflow refresh, and Superset observation—is
+in the [learning path](docs/learning-path.md#full-demo).
+
+With populated volumes, the routine environment restart is below. It is not the
+first-time bootstrap path and intentionally does not rerun the strict loader:
 
 ```bash
 make up
@@ -322,8 +354,8 @@ make airflow-test
 make airflow-dag-test ARGS="transform_lakehouse 2026-09-18"
 ```
 
-Use `make help` for the complete command list. Operational recovery procedures
-live under [`docs/runbooks/`](docs/runbooks/).
+Use `make help` for the complete command list. Choose recovery procedures from
+the [`docs/runbooks/` index](docs/runbooks/README.md).
 
 ## Analytical model
 
@@ -426,12 +458,13 @@ docs/                ADRs, model, contracts, runbooks, benchmarks, screenshots
 
 | Document | Purpose |
 | --- | --- |
+| [Learning path](docs/learning-path.md) | Overview, guided code tour, Core demo, and Full demo |
 | [ROADMAP.md](ROADMAP.md) | Final Phase 0–8 scope, completed phases, and acceptance criteria |
 | [PROGRESS.md](PROGRESS.md) | Current maintenance status and open technical debt |
 | [Architecture ADRs](docs/adr/README.md) | Technology and lifecycle decisions, including the scope freeze |
 | [Data model](docs/data-model.md) | Source/model grain, keys, CDC and SCD2 semantics |
 | [Data contracts](docs/data-contracts.md) | Source and modeled-data contracts |
-| [Runbooks](docs/runbooks/) | CDC, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
+| [Runbook index](docs/runbooks/README.md) | CDC, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
 | [Dashboard capture](docs/screenshots/README.md) | Manual screenshot procedure |
 | [AGENTS.md](AGENTS.md) | Repository rules for coding agents |
 

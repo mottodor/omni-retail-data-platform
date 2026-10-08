@@ -597,12 +597,13 @@ Remote issues, существующие только для реализации
 | Документ | Ответственность |
 | --- | --- |
 | `README.md` | Portfolio overview, implemented architecture, quick start и evidence |
+| `docs/learning-path.md` | Overview, guided code tour, Core demo и Full demo |
 | `ROADMAP.md` | Финальный scope, completed phases и acceptance criteria |
 | `PROGRESS.md` | Текущее состояние и открытый technical debt |
 | `docs/adr/` | Архитектурные решения и история изменения scope |
 | `docs/data-model.md` | Grain, facts, dimensions и source/model semantics |
 | `docs/data-contracts.md` | Source и modeled-data contracts |
-| `docs/runbooks/` | Recovery и типовые operational procedures |
+| `docs/runbooks/README.md` | Индекс recovery и типовых operational procedures |
 | `docs/benchmarks/` | Воспроизводимые performance comparisons |
 | `docs/screenshots/` | Визуальные dashboard artifacts и capture procedure |
 | `AGENTS.md`, `docs/agent/` | Нормативные правила для coding agents |
