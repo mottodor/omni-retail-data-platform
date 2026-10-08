@@ -26,7 +26,8 @@ Targets come only from the static batch table registry in
 supplier table that has not been loaded yet—are reported as `skipped_missing`.
 The following are intentionally excluded:
 
-- `bronze.postgres_cdc_events` (tracked separately by TD-006);
+- `bronze.postgres_cdc_events` (maintained only by the separate
+  [CDC maintenance path](iceberg-cdc-maintenance.md));
 - Silver, Gold, analytics, and integration-test schemas;
 - tables not present in the batch registry;
 - orphan-file removal, data-file compaction, and manifest rewrite.

@@ -13,6 +13,7 @@ from include import runners
 
 from fakes.storage import FakeStorage
 from omni_retail.lakehouse.bronze.specs import TABLES
+from omni_retail.lakehouse.cdc_maintenance import CdcMaintenancePolicy
 from omni_retail.lakehouse.snapshot_maintenance import SnapshotExpirationPolicy
 
 
@@ -24,6 +25,14 @@ class FakeClosableExecutor:
 class FakeMaintenanceResult:
     def as_dict(self) -> dict[str, object]:
         return {"table_name": "orders", "status": "no_op"}
+
+
+class FakeCdcMaintenanceResult:
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+
+    def as_dict(self) -> dict[str, object]:
+        return {"table_name": "postgres_cdc_events", "stage": self.stage, "status": "no_op"}
 
 
 def valid_boundary() -> dict[str, object]:
@@ -124,6 +133,66 @@ def test_snapshot_maintenance_runner_uses_validated_env_and_custom_schema(
 
     assert result == {"table_name": "orders", "status": "no_op"}
     assert calls == [("orders", "it_runner_bronze", 45, 12)]
+
+
+@pytest.mark.parametrize(
+    ("runner_name", "operation_name", "stage"),
+    [
+        ("run_cdc_compaction", "compact_cdc_data_files", "compact_data_files"),
+        ("run_cdc_snapshot_expiration", "expire_cdc_snapshots", "expire_snapshots"),
+    ],
+)
+def test_cdc_maintenance_runners_use_validated_env_and_custom_schema(
+    runner_name: str,
+    operation_name: str,
+    stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = FakeClosableExecutor()
+    calls: list[tuple[str, int, int, int]] = []
+
+    def fake_operation(
+        supplied_executor: object,
+        policy: CdcMaintenancePolicy,
+        *,
+        catalog: str,
+        schema: str,
+    ) -> FakeCdcMaintenanceResult:
+        assert supplied_executor is executor
+        assert catalog == "iceberg"
+        calls.append(
+            (
+                schema,
+                policy.file_size_threshold_mb,
+                policy.snapshot_retention_days,
+                policy.snapshot_retain_last,
+            )
+        )
+        return FakeCdcMaintenanceResult(stage)
+
+    monkeypatch.setenv("ICEBERG_CDC_FILE_SIZE_THRESHOLD_MB", "64")
+    monkeypatch.setenv("ICEBERG_CDC_SNAPSHOT_RETENTION_DAYS", "45")
+    monkeypatch.setenv("ICEBERG_CDC_SNAPSHOT_RETAIN_LAST", "12")
+    monkeypatch.setattr(runners, "DbapiTrinoExecutor", lambda config: executor)
+    monkeypatch.setattr(runners, operation_name, fake_operation)
+
+    result = getattr(runners, runner_name)(schema="it_runner_bronze")
+
+    assert result["stage"] == stage
+    assert calls == [("it_runner_bronze", 64, 45, 12)]
+
+
+def test_cdc_maintenance_runner_rejects_invalid_schema_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runners,
+        "DbapiTrinoExecutor",
+        lambda config: pytest.fail("executor must not be constructed"),
+    )
+
+    with pytest.raises(ValueError, match="invalid schema name"):
+        runners.run_cdc_compaction(schema="bronze; drop schema gold")
 
 
 def test_snapshot_maintenance_runner_rejects_unknown_table_before_connecting(

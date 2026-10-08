@@ -3,7 +3,7 @@ UV := uv
 
 HOST_RUN := bash infrastructure/scripts/run_host_command.sh
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test minio-build up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild iceberg-snapshot-plan iceberg-snapshot-expire integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test minio-build up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild iceberg-snapshot-plan iceberg-snapshot-expire iceberg-cdc-maintenance-plan iceberg-cdc-maintenance-apply integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -77,6 +77,13 @@ iceberg-snapshot-plan: ## Preview bounded snapshot expiration for batch Bronze t
 iceberg-snapshot-expire: ## DESTRUCTIVE: expire eligible batch Bronze snapshots after reviewing the plan
 	@echo "warning: snapshot expiration is irreversible beyond the retained rollback window"
 	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.maintenance expire --confirm $(ARGS)
+
+iceberg-cdc-maintenance-plan: ## Preview CDC data-file compaction and snapshot expiration
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.maintenance cdc-plan
+
+iceberg-cdc-maintenance-apply: ## DESTRUCTIVE: compact CDC files and expire eligible snapshots
+	@echo "warning: CDC snapshot expiration is irreversible beyond the retained rollback window"
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.maintenance cdc-apply --confirm
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
 	$(UV) run python -m omni_retail.lakehouse.dbt_cli parse --project-dir dbt --profiles-dir dbt

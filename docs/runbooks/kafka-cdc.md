@@ -100,6 +100,15 @@ increase the batch or heap as an ad-hoc recovery action: the benchmark records
 why larger DB-API-expanded MERGE batches were rejected and which signals must be
 remeasured: [CDC clean-replay benchmark](../benchmarks/cdc-clean-replay.md).
 
+Weekly CDC Iceberg maintenance compacts small current data files and bounds
+obsolete snapshot history without stopping this consumer or modifying offsets.
+Current raw rows have no maintenance TTL. Use the read-only plan and explicit
+apply procedures in the
+[CDC maintenance runbook](iceberg-cdc-maintenance.md); do not run orphan-file
+removal or delete MinIO paths as a shortcut. Kafka retains only seven days of
+transport records, so snapshots expired beyond the retained Iceberg window are
+not archive-rebuildable.
+
 ## Inspect connector, offsets, and lag
 
 Use the typed status command first:
@@ -364,6 +373,14 @@ If dbt models or tests fail, publication remains unstarted; fix the typed or
 business contract and rerun the DAG. If ClickHouse fails, Iceberg Gold remains
 authoritative and the old serving snapshot stays visible because exchange is
 never reached; restore ClickHouse and retry `publish_serving` in the same run.
+
+### CDC Iceberg maintenance failure
+
+Maintenance runs independently of transport. A Trino/Polaris failure or
+optimistic commit conflict fails the bounded task and must not reset Kafka,
+Connect, the consumer, or Bronze. Preserve the pre-run snapshot ID and task log,
+verify row identity and lag, then follow the
+[CDC maintenance failure procedure](iceberg-cdc-maintenance.md#failure-and-retry).
 
 ### Kafka or Connect restart
 

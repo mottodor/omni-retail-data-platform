@@ -86,8 +86,10 @@ A preserved-volume `streaming-down` / `streaming-up` cycle retained the same
 210,037 unique rows and returned healthy lag-zero status.
 
 The selected change is intentionally bounded. It does not claim that the raw
-MERGE design scales beyond the delivered workstation workload; long-running
-small-file/snapshot maintenance remains TD-006 in `PROGRESS.md`.
+MERGE design scales beyond the delivered workstation workload. The subsequent
+[CDC maintenance benchmark](cdc-maintenance.md) measures small-file compaction,
+snapshot policy, concurrent appends, and restart/idempotency at this same
+clean-replay boundary.
 
 ## Reproduction outline
 

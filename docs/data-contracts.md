@@ -34,9 +34,10 @@ enforces the seven-day minimum.
 Maintenance preserves `main` and Iceberg refs, does not change rows visible in
 the current snapshot, and never modifies raw archive objects. Missing
 not-yet-loaded batch tables are explicit no-ops. The append-only
-`bronze.postgres_cdc_events` table is excluded; its compaction/retention risk
-remains tracked separately as TD-006. See the
-[Iceberg snapshot maintenance runbook](runbooks/iceberg-snapshot-maintenance.md).
+`bronze.postgres_cdc_events` table has a separate CDC-specific compaction and
+retention path; it is never admitted to the batch allowlist. See the
+[batch snapshot maintenance](runbooks/iceberg-snapshot-maintenance.md) and
+[CDC maintenance](runbooks/iceberg-cdc-maintenance.md) runbooks.
 
 ---
 
@@ -180,7 +181,7 @@ All API sources share the same mechanics:
 | Raw payload | exact decoded key and Debezium envelope JSON retained as text |
 | Delivery | at-least-once; Iceberg MERGE before synchronous Kafka offset commit |
 | Invalid record | fail-stop with topic/partition/offset context; offset is not committed |
-| Retention | Kafka: 7 days or 5 GiB per data-topic partition; automated Iceberg history expiration is not delivered (see TD-006 in `../PROGRESS.md`) |
+| Retention | Current raw CDC rows have no TTL; Kafka transport retains 7 days or 5 GiB per data-topic partition; weekly Iceberg maintenance compacts current files and retains snapshots for 30 days plus at least 10 recent `main` ancestors (hard floors: 7 days / 2 ancestors) |
 
 Each route has one exact primary-key contract: `customers.customer_id`,
 `orders.order_id`, or `payments.payment_id`. The Kafka key must contain exactly
@@ -206,6 +207,13 @@ current-state models must version and test the fields they project. The raw
 ledger never overwrites by business key, LSN, source timestamp, or ingestion
 time, so event-time-out-of-order records remain separate events. Kafka order is
 only per table topic; there is no cross-table total order.
+
+Compaction changes only physical Parquet files. It preserves every current raw
+row and all 17 stored columns, while snapshot expiration bounds obsolete
+time-travel/file history without applying row retention. Preview is read-only;
+apply is explicitly confirmed, preserves refs and rollback floors, and verifies
+full-row survival plus unique `event_id` values while allowing concurrent
+appends. See the [CDC maintenance runbook](runbooks/iceberg-cdc-maintenance.md).
 
 Resetting Kafka while retaining Bronze produces a new snapshot with new
 transport coordinates; this is new raw history, not a duplicate under the

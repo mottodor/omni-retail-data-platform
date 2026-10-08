@@ -155,6 +155,15 @@ transport coordinate even when source/event time moves backwards; the sink
 does not sort or overwrite by business key, LSN, or timestamp, and it makes no
 cross-topic total-order claim.
 
+Physical maintenance does not change this logical contract. Weekly Trino
+`optimize` compacts small current Parquet files independently per `event_date`;
+protected snapshot expiration bounds obsolete time-travel/file history. Every
+current raw row and all 17 columns remain unchanged, current `event_id` values
+remain unique, and concurrent ingestion may only add rows. Current raw events
+have no maintenance TTL. Defaults retain 30 days and at least 10 recent `main`
+ancestors, with hard floors of 7 days and 2 ancestors. See the
+[CDC maintenance runbook](runbooks/iceberg-cdc-maintenance.md).
+
 This table does not replace the snapshot-shaped
 `bronze.customers/orders/payments` tables. It feeds typed/current-state Silver
 and is authoritative for captured Gold entities; snapshot tables remain
