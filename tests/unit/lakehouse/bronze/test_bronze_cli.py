@@ -66,7 +66,7 @@ def test_run_all_loads_every_source_and_tolerates_empty_days(
 
     monkeypatch.setattr(cli, "load_with_retry", fake_load)
     assert run_all(FakeStorage(), FakeTrinoExecutor(), LOGICAL_DATE) == 0
-    assert len(loaded) == 10
+    assert len(loaded) == 14
 
 
 def test_run_all_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,7 +103,7 @@ def test_run_new_loads_every_source_and_tolerates_uptodate(
 
     monkeypatch.setattr(cli, "load_new", fake_load_new)
     assert run_new(FakeStorage(), FakeTrinoExecutor()) == 0
-    assert len(called) == 10
+    assert len(called) == 14
 
 
 def test_run_new_fails_fast_on_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,4 +134,4 @@ def test_main_returns_recoverable_exit_when_trino_connection_resets(
 
 
 def _result(status: Literal["loaded", "empty"]) -> LoadResult:
-    return LoadResult("orders", "postgres-orders-20260918", LOGICAL_DATE, 0, status)
+    return LoadResult("orders", ("postgres-orders-20260918",), LOGICAL_DATE, 0, status)

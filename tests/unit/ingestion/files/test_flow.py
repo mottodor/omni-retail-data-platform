@@ -14,6 +14,7 @@ from openpyxl import Workbook
 
 from fakes.storage import FakeStorage
 from omni_retail.generators.vendor_files.generator import generate_payload
+from omni_retail.ingestion.common.checksum import compute_checksum
 from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
@@ -23,7 +24,12 @@ from omni_retail.ingestion.common.paths import (
     manifest_key,
 )
 from omni_retail.ingestion.common.storage import ObjectStorage
-from omni_retail.ingestion.files.flow import BatchOutcome, RejectedRowsError, process_incoming
+from omni_retail.ingestion.files.flow import (
+    BatchOutcome,
+    FileFlowError,
+    RejectedRowsError,
+    process_incoming,
+)
 from omni_retail.ingestion.files.schemas import (
     HISTORICAL_ORDERS,
     PARTNER_PRODUCTS,
@@ -65,6 +71,7 @@ def fixed_clock() -> datetime:
 def xlsx_payload(rows: list[list[object]]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
+    assert sheet is not None
     for row in rows:
         sheet.append(row)
     buffer = io.BytesIO()
@@ -123,8 +130,17 @@ def test_rerun_of_same_batch_creates_no_duplicates() -> None:
     seed_incoming(storage, "prices.csv", GOOD_CSV)
     second = process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
 
-    assert outcome_for(first, "prices.csv").status == "completed"
+    first_manifest = outcome_for(first, "prices.csv")
+    assert first_manifest.status == "completed"
     assert outcome_for(second, "prices.csv").status == "duplicate"
+    canonical = BatchManifest.from_json(
+        storage.get_object(
+            BUCKET_ARCHIVE,
+            manifest_key("supplier-prices", first_manifest.batch_id),
+        ).decode()
+    )
+    assert canonical.status == "completed"
+    assert canonical.row_count == 2
     archived_files = [
         key
         for bucket, key in storage.stored_objects()
@@ -132,6 +148,39 @@ def test_rerun_of_same_batch_creates_no_duplicates() -> None:
     ]
     assert archived_files == ["supplier-prices/2026/09/11/prices.csv"]
     assert storage.list_object_keys(BUCKET_LANDING, "supplier-prices/") == ()
+
+
+def test_duplicate_marker_without_completed_manifest_fails_loudly() -> None:
+    storage = FakeStorage()
+    seed_incoming(storage, "prices.csv", GOOD_CSV)
+    first = process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
+    manifest = outcome_for(first, "prices.csv")
+    storage.delete_object(
+        BUCKET_ARCHIVE,
+        manifest_key("supplier-prices", manifest.batch_id),
+    )
+    seed_incoming(storage, "prices.csv", GOOD_CSV)
+
+    with pytest.raises(FileFlowError, match="duplicate evidence"):
+        process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
+
+
+def test_same_archive_path_with_different_content_is_rejected_without_overwrite() -> None:
+    storage = FakeStorage()
+    seed_incoming(storage, "prices.csv", GOOD_CSV)
+    first = process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
+    original = outcome_for(first, "prices.csv")
+    replacement = GOOD_CSV + b"acme,SKU-3,1.00,EUR,2026-09-02\n"
+    seed_incoming(storage, "prices.csv", replacement)
+
+    second = process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
+
+    assert outcome_for(second, "prices.csv").status == "rejected"
+    assert any(
+        "archive path collision" in reason
+        for reason in outcome_for(second, "prices.csv").rejection_reasons
+    )
+    assert storage.get_object(BUCKET_ARCHIVE, original.object_key) == GOOD_CSV
 
 
 def test_same_content_under_new_filename_is_duplicate() -> None:
@@ -198,6 +247,43 @@ def test_fail_on_rejected_raises_for_bad_rows() -> None:
         process_incoming(
             storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock, fail_on_rejected=True
         )
+
+
+class MarkerFailOnceStorage(FakeStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_marker = True
+
+    def put_object(self, bucket: str, key: str, body: bytes) -> None:
+        if self.fail_marker and bucket == BUCKET_ARCHIVE and key.startswith("_dedup/"):
+            self.fail_marker = False
+            raise RuntimeError("injected marker write failure")
+        super().put_object(bucket, key, body)
+
+
+def test_completed_manifest_precedes_marker_and_interrupted_run_recovers() -> None:
+    storage = MarkerFailOnceStorage()
+    seed_incoming(storage, "prices.csv", GOOD_CSV)
+    checksum = compute_checksum(GOOD_CSV)
+    batch_id = f"supplier-prices-{checksum[:16]}"
+
+    with pytest.raises(RuntimeError, match="marker write failure"):
+        process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
+
+    canonical = BatchManifest.from_json(
+        storage.get_object(
+            BUCKET_ARCHIVE,
+            manifest_key("supplier-prices", batch_id),
+        ).decode()
+    )
+    assert canonical.status == "completed"
+    assert not storage.object_exists(BUCKET_ARCHIVE, dedup_key("supplier-prices", checksum))
+
+    recovered = process_incoming(storage, SUPPLIER_PRICES, RUN_DATE, clock=fixed_clock)
+
+    assert outcome_for(recovered, "prices.csv").status == "completed"
+    assert storage.object_exists(BUCKET_ARCHIVE, dedup_key("supplier-prices", checksum))
+    assert storage.list_object_keys(BUCKET_LANDING, "supplier-prices/") == ()
 
 
 def test_stranded_processing_object_is_reprocessed() -> None:

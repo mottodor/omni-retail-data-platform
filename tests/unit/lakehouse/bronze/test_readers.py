@@ -9,11 +9,20 @@ import pyarrow.parquet as pq
 import pytest
 
 from fakes.storage import FakeStorage
+from omni_retail.generators.vendor_files.generator import generate_payload
 from omni_retail.ingestion.common.paths import BUCKET_ARCHIVE
+from omni_retail.ingestion.files.schemas import (
+    HISTORICAL_ORDERS,
+    PARTNER_PRODUCTS,
+    SUPPLIER_PRICES,
+    SUPPLIER_STOCK,
+    FileSourceSchema,
+)
 from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
 from omni_retail.lakehouse.bronze.readers import (
     BronzeReadError,
     list_data_objects,
+    read_file_rows,
     read_json_rows,
     read_parquet_rows,
     read_rows,
@@ -177,6 +186,67 @@ def test_json_reader_wraps_invalid_decimal_string() -> None:
     page = {"rates": [{"currency": "USD", "rate": "abc"}]}
     with pytest.raises(BronzeReadError, match="rate"):
         read_json_rows(TABLES["fx_rates"], "key", json.dumps(page).encode())
+
+
+@pytest.mark.parametrize(
+    ("source_schema", "source_key", "expected_type"),
+    [
+        (SUPPLIER_PRICES, "supplier-prices", Decimal),
+        (PARTNER_PRODUCTS, "partner-products", str),
+        (HISTORICAL_ORDERS, "historical-orders", int),
+        (SUPPLIER_STOCK, "supplier-stock", int),
+    ],
+)
+def test_file_reader_types_all_supported_formats(
+    source_schema: FileSourceSchema,
+    source_key: str,
+    expected_type: type[object],
+) -> None:
+    payload = generate_payload(source_schema, seed=7, rows=2, run_date=LOGICAL_DATE)
+    spec = next(spec for spec in TABLES.values() if spec.source_key == source_key)
+
+    result = read_file_rows(
+        spec,
+        f"{source_key}/2026/09/18/batch.{spec.data_object_suffix}",
+        payload,
+    )
+
+    assert result.row_count == 2
+    assert result.rejected_row_count == 0
+    assert [row.row_position for row in result.rows] == [0, 1]
+    typed_value = next(
+        value for value in result.rows[0].values.values() if isinstance(value, expected_type)
+    )
+    assert isinstance(typed_value, expected_type)
+
+
+def test_file_reader_preserves_position_gaps_for_rejected_rows() -> None:
+    payload = (
+        b"supplier_id,sku,price,currency,valid_from\n"
+        b"acme,SKU-1,9.99,EUR,2026-09-01\n"
+        b"acme,SKU-2,broken,EUR,2026-09-01\n"
+        b"acme,SKU-3,25.00,EUR,2026-09-02\n"
+    )
+
+    result = read_file_rows(
+        TABLES["supplier_prices"],
+        "supplier-prices/2026/09/18/prices.csv",
+        payload,
+    )
+
+    assert result.row_count == 3
+    assert result.rejected_row_count == 1
+    assert [row.row_position for row in result.rows] == [0, 2]
+
+
+def test_file_reader_rejects_archived_schema_drift_with_object_context() -> None:
+    key = "supplier-prices/2026/09/18/prices.csv"
+    with pytest.raises(BronzeReadError, match=key):
+        read_file_rows(
+            TABLES["supplier_prices"],
+            key,
+            b"supplier_id,sku\nacme,SKU-1\n",
+        )
 
 
 def test_list_data_objects_filters_by_suffix() -> None:

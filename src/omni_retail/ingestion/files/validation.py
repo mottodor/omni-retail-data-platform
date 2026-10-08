@@ -21,6 +21,14 @@ BAD_ROWS_REASON_COLUMN = "_rejection_reason"
 
 
 @dataclass(frozen=True)
+class AcceptedRow:
+    """One valid source record with its stable zero-based raw position."""
+
+    row_position: int
+    values: dict[str, str]
+
+
+@dataclass(frozen=True)
 class BadRow:
     """One malformed row quarantined with the reason it was rejected."""
 
@@ -35,12 +43,17 @@ class ValidationResult:
 
     file_valid: bool
     file_errors: tuple[str, ...] = ()
-    rows: tuple[dict[str, str], ...] = ()
+    accepted_rows: tuple[AcceptedRow, ...] = ()
     bad_rows: tuple[BadRow, ...] = ()
 
     @property
+    def rows(self) -> tuple[dict[str, str], ...]:
+        """Backward-compatible value-only view used by ingestion callers."""
+        return tuple(row.values for row in self.accepted_rows)
+
+    @property
     def row_count(self) -> int:
-        return len(self.rows) + len(self.bad_rows)
+        return len(self.accepted_rows) + len(self.bad_rows)
 
     @property
     def rejected_row_count(self) -> int:
@@ -92,7 +105,7 @@ def _validate_csv(schema: FileSourceSchema, payload: bytes) -> ValidationResult:
     if file_errors:
         return ValidationResult(file_valid=False, file_errors=file_errors)
 
-    rows: list[dict[str, str]] = []
+    rows: list[AcceptedRow] = []
     bad_rows: list[BadRow] = []
     for row_number, raw_row in enumerate(reader, start=1):
         if None in raw_row:
@@ -106,10 +119,10 @@ def _validate_csv(schema: FileSourceSchema, payload: bytes) -> ValidationResult:
             continue
         reason = _row_error(schema, raw_row)
         if reason is None:
-            rows.append(dict(raw_row))
+            rows.append(AcceptedRow(row_position=row_number - 1, values=dict(raw_row)))
         else:
             bad_rows.append(BadRow(row_number=row_number, values=dict(raw_row), reason=reason))
-    return ValidationResult(file_valid=True, rows=tuple(rows), bad_rows=tuple(bad_rows))
+    return ValidationResult(file_valid=True, accepted_rows=tuple(rows), bad_rows=tuple(bad_rows))
 
 
 def _validate_json(schema: FileSourceSchema, payload: bytes) -> ValidationResult:
@@ -123,7 +136,7 @@ def _validate_json(schema: FileSourceSchema, payload: bytes) -> ValidationResult
             file_errors=("malformed json: root element must be an array of records",),
         )
 
-    rows: list[dict[str, str]] = []
+    rows: list[AcceptedRow] = []
     bad_rows: list[BadRow] = []
     for row_number, record in enumerate(document, start=1):
         if not isinstance(record, dict):
@@ -137,7 +150,12 @@ def _validate_json(schema: FileSourceSchema, payload: bytes) -> ValidationResult
             continue
         reason = _json_row_error(schema, record)
         if reason is None:
-            rows.append({name: str(value) for name, value in record.items()})
+            rows.append(
+                AcceptedRow(
+                    row_position=row_number - 1,
+                    values={name: str(value) for name, value in record.items()},
+                )
+            )
         else:
             bad_rows.append(
                 BadRow(
@@ -146,7 +164,7 @@ def _validate_json(schema: FileSourceSchema, payload: bytes) -> ValidationResult
                     reason=reason,
                 )
             )
-    return ValidationResult(file_valid=True, rows=tuple(rows), bad_rows=tuple(bad_rows))
+    return ValidationResult(file_valid=True, accepted_rows=tuple(rows), bad_rows=tuple(bad_rows))
 
 
 def _header_errors(schema: FileSourceSchema, header: set[str]) -> tuple[str, ...]:
@@ -217,16 +235,16 @@ def _is_empty_row(row: tuple[Any, ...] | None) -> bool:
 
 def _classify_rows(schema: FileSourceSchema, records: Iterator[dict[str, Any]]) -> ValidationResult:
     """Classify string-coerced records into valid rows and quarantined bad rows."""
-    rows: list[dict[str, str]] = []
+    rows: list[AcceptedRow] = []
     bad_rows: list[BadRow] = []
     for row_number, record in enumerate(records, start=1):
         raw_row = {name: _value_to_str(value) for name, value in record.items()}
         reason = _row_error(schema, raw_row)
         if reason is None:
-            rows.append(raw_row)
+            rows.append(AcceptedRow(row_position=row_number - 1, values=raw_row))
         else:
             bad_rows.append(BadRow(row_number=row_number, values=raw_row, reason=reason))
-    return ValidationResult(file_valid=True, rows=tuple(rows), bad_rows=tuple(bad_rows))
+    return ValidationResult(file_valid=True, accepted_rows=tuple(rows), bad_rows=tuple(bad_rows))
 
 
 def _row_error(schema: FileSourceSchema, raw_row: dict[str, Any]) -> str | None:

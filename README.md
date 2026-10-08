@@ -57,9 +57,8 @@ PostgreSQL OLTP
   ├── batch snapshots ── MinIO archive ── Bronze loader ──┐
   └── WAL ── Debezium ── Kafka ── CDC consumer ──────────┤
                                                           ├──> Iceberg Bronze
-Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──┘
-
-Supplier files ── Airflow/Python ── MinIO archive   [raw/archive only]
+Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──────┤
+Supplier files ── Airflow/Python ── MinIO archive ── Bronze loader ──────┘
 
 Iceberg Bronze
       │
@@ -111,8 +110,9 @@ business state and can be rebuilt from Gold.
 ## End-to-end capstone flow
 
 1. The deterministic generator creates an OLTP baseline in PostgreSQL.
-2. Batch extractors preserve raw API and PostgreSQL snapshot payloads in the
-   MinIO archive and load supported sources into Iceberg Bronze.
+2. Batch extractors preserve raw API, PostgreSQL snapshot, and supplier-file
+   payloads in the MinIO archive and load manifest-backed sources into Iceberg
+   Bronze.
 3. Debezium captures customer, order, and payment mutations from PostgreSQL WAL
    and writes them to table-specific Kafka topics.
 4. The CDC consumer writes raw events to Iceberg and commits Kafka offsets only
@@ -132,12 +132,15 @@ business state and can be rebuilt from Gold.
 ### Batch paths
 
 - Raw API pages and accepted files are preserved unchanged in MinIO.
-- Logical dates, not wall-clock time, define object paths and batch identity.
-- File checksums and manifests provide duplicate detection and audit metadata.
+- Logical dates, not wall-clock time, define object paths and Bronze
+  partitions; file batch identity is content-addressed by checksum.
+- File checksums and canonical completed manifests provide duplicate detection,
+  load authorization, and audit metadata.
 - PostgreSQL snapshots use keyset pagination and advance durable watermarks only
   after a successful upload.
-- Bronze loads verify manifest counts before DML and replace deterministic
-  source/date coordinates.
+- Bronze loads verify manifest ownership, checksums, accepted/rejected counts,
+  and deterministic source-object coordinates before DML. File loads scan
+  completed manifests so late files for older logical dates remain eligible.
 - Invalid files and rows are quarantined with machine-readable reasons.
 
 ### CDC path
@@ -217,20 +220,41 @@ swap=8GB
 
 ### Python environment and core smoke test
 
+#### One-time workstation setup
+
 ```bash
 cp .env.example .env      # fill local values; never commit .env
 make setup                # uv sync + pre-commit install
+```
+
+#### First-time data bootstrap
+
+Use this sequence only for a new set of local volumes:
+
+```bash
 make up                   # core profile, health-gated
+make generate-oltp        # strict deterministic initial load
 make smoke-core           # Trino -> Polaris -> Iceberg -> MinIO
 ```
 
-`make down` stops services while preserving named volumes. `make reset` is
-explicitly destructive and removes core volumes.
+`generate-oltp` intentionally fails when any OLTP table is already populated;
+that is a data-loss guard, not a failed routine restart. Its destructive
+`--truncate-oltp-data` option is not a startup tool: truncating PostgreSQL must
+be coordinated with the explicit CDC transport/Bronze recovery procedure in the
+[Kafka/CDC runbook](docs/runbooks/kafka-cdc.md).
 
-> Known limitation: clean-host bootstrap currently depends on restoring a
-> reproducible supply for pinned MinIO images. See TD-001 in
-> [PROGRESS.md](PROGRESS.md); this README does not claim unconditional
-> clean-clone reproducibility while that debt remains open.
+`make down` stops core services while preserving named volumes. `make reset` is
+explicitly destructive and couples the PostgreSQL/core reset with Kafka/Connect
+transport deletion so stale source offsets cannot survive a new source volume.
+It preserves BI and Airflow metadata volumes but deletes MinIO/Iceberg data.
+
+On a clean host, `make up` first builds the pinned MinIO server and client from
+checksum-verified source commits, then starts the core profile. A cold build
+needs access to GitHub source archives, pinned Docker base images, and the Go
+modules locked by upstream `go.sum` files; repeated runs reuse BuildKit caches.
+Compose never substitutes registry images for these local builds. Versions,
+checksums, diagnostics, and the frozen update policy are documented in
+[`infrastructure/minio/README.md`](infrastructure/minio/README.md).
 
 ### Compose profiles
 
@@ -244,16 +268,23 @@ to run every service continuously.
 | BI | `make bi-up` | ClickHouse, Superset, metadata/init services |
 | Orchestration | `make airflow-up` | Airflow scheduler/webserver and metadata DB |
 
-Typical service order for a full local environment:
+#### Routine full-environment startup
+
+With populated volumes, restart the complete environment without rerunning the
+strict initial loader:
 
 ```bash
 make up
-make generate-oltp
 make streaming-up
-make streaming-status
 make bi-up
 make airflow-up
+make streaming-status
 ```
+
+An already populated OLTP source is the expected successful state for this
+routine path. `make streaming-status` exits non-zero unless the connector, every
+task, and the active CDC consumer are healthy; non-zero lag is displayed as
+catch-up progress and is not by itself a service-health failure.
 
 Before the first analytical refresh on a new CDC deployment, complete the
 initial-snapshot gate in the
@@ -263,7 +294,7 @@ publication commands concurrently with `transform_lakehouse`.
 ### Representative commands
 
 ```bash
-# Source data
+# Source data (generate-oltp is first-time-only and rejects populated tables)
 make generate-oltp
 make mutate-oltp EVENTS=300
 make seed-supplier-files ROWS=500 SEED=11
@@ -329,16 +360,36 @@ make dbt-parse        # offline dbt manifest validation
 make airflow-test     # DAG pytest + import-error check in the Airflow image
 
 docker compose config
+make minio-build      # pinned, checksum-verified MinIO/mc source images
 make smoke-core       # requires live core
-make integration      # requires the relevant live profiles
+make integration      # core required; absent optional profiles are skipped
 ```
 
-The integration suite uses disposable lakehouse schemas and exact-key rollback
-journals rather than resetting shared schemas. Covered boundaries include:
+`make integration` is opt-in and never starts or resets services. A healthy
+core profile is mandatory. Streaming and BI checks run only when their host
+endpoints are reachable; otherwise they report actionable skips. To execute
+rather than skip every BI data check, prepare the normal Gold and serving state:
 
-- files and APIs through real MinIO;
+```bash
+make up
+make bi-up
+make dbt-build
+make serving-rebuild
+make integration
+```
+
+Once an optional service is reachable, unhealthy responses, bad credentials,
+incomplete bootstrap, query failures, permission regressions, and reconciliation
+differences fail the suite rather than being converted into skips.
+
+The integration suite uses disposable lakehouse schemas and exact-key rollback
+journals rather than resetting shared schemas. Catalog-aware teardown retries
+only recognized transient Trino/Polaris visibility failures with a finite
+budget. Covered boundaries include:
+
+- all four supplier-file formats and APIs through real MinIO;
 - PostgreSQL snapshot lifecycle and watermarks;
-- Bronze loading and idempotent reruns;
+- manifest-backed Bronze loading, partial-commit recovery, and idempotent reruns;
 - dbt core build and business reconciliation;
 - Debezium/Kafka CDC recovery and duplicate handling;
 - Gold-to-ClickHouse publication and rebuildability;
@@ -393,9 +444,9 @@ docs/                ADRs, model, contracts, runbooks, benchmarks, screenshots
 Open debt is tracked in [PROGRESS.md](PROGRESS.md), not hidden by the capstone
 label. Material limitations include:
 
-- pinned MinIO image availability prevents an unconditional clean-host bootstrap
-  claim;
-- supplier file sources stop in MinIO archive and do not enter Iceberg Bronze;
+- MinIO Community is frozen at the last project-validated source releases and
+  receives no automatic updates; critical security or compatibility repairs
+  remain manual maintenance;
 - long-running Bronze and CDC workloads need bounded snapshot/file maintenance;
 - dbt model contracts are documented and tested but are not fully enforced by
   the current adapter;

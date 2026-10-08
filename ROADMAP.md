@@ -79,9 +79,8 @@ PostgreSQL OLTP
   ├── batch snapshots ── MinIO archive ── Bronze loader ──┐
   └── WAL ── Debezium ── Kafka ── CDC consumer ──────────┤
                                                           ├──> Iceberg Bronze
-Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──┘
-
-Supplier files ── Airflow/Python ── MinIO archive   [raw/archive only]
+Mock REST APIs ── Airflow/Python ── MinIO archive ── Bronze loader ──────┤
+Supplier files ── Airflow/Python ── MinIO archive ── Bronze loader ──────┘
 
 Iceberg Bronze
       │
@@ -350,7 +349,8 @@ Acceptance criteria:
 - PostgreSQL snapshots с keyset pagination и durable watermarks;
 - MinIO flow `landing → processing → archive | rejected`;
 - checksums, manifests, quarantine и logical-date backfill;
-- Bronze loading для API и PostgreSQL snapshot archive.
+- Bronze loading для API, PostgreSQL snapshot archive и всех четырёх
+  manifest-backed supplier file formats.
 
 Acceptance criteria:
 
@@ -360,8 +360,10 @@ Acceptance criteria:
 - backfill определяется explicit logical dates;
 - interrupted snapshot/load можно безопасно повторить.
 
-Known scope boundary: supplier files завершают путь в raw archive и не
-загружаются в Iceberg Bronze; это сохранено как TD-002 в `PROGRESS.md`.
+Supplier files загружаются из immutable raw archive в четыре типизированные
+Iceberg Bronze-таблицы. Загрузка разрешается только canonical completed
+manifest-ом, сверяет checksum и accepted/rejected row counts и безопасно
+возобновляется по стабильным координатам source object + row position.
 
 ### Phase 4 — Airflow orchestration
 
@@ -551,7 +553,6 @@ make integration      # live profiles required for their tests
 
 - clean-host bootstrap зависит от восстановления воспроизводимой поставки
   pinned MinIO images (TD-001);
-- supplier file sources не загружаются из archive в Iceberg Bronze (TD-002);
 - Bronze snapshot history и CDC microbatches требуют controlled maintenance при
   длительной эксплуатации (TD-003, TD-006);
 - dbt contracts документированы и тестируются, но не полностью enforced

@@ -15,13 +15,18 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import psycopg
-import pytest
 from confluent_kafka import Consumer, TopicPartition
 
 from omni_retail.ingestion.postgres_snapshot.config import PostgresSourceConfig
 from omni_retail.lakehouse.trino import DbapiTrinoExecutor, TrinoConfig
 from omni_retail.streaming.cdc.consumer import CdcBatchWriter
 from omni_retail.streaming.cdc.model import KafkaRecord, parse_debezium_record
+
+from .prerequisites import (
+    OptionalServiceUnavailableError,
+    kafka_connector_is_running,
+    require_kafka_connector_running,
+)
 
 TABLE = "iceberg.bronze.postgres_cdc_events"
 SCHEMA_EVOLUTION_COLUMN = "cdc_schema_evolution_note"
@@ -106,22 +111,29 @@ def run_cdc_dbt(namespace: Namespace, *, target_path: Path) -> None:
     assert completed.returncode == 0, "CDC Silver and delete-aware core graph must build"
 
 
-def connector_running() -> bool:
+def connector_status() -> dict[str, object]:
+    """Load connector status, distinguishing endpoint absence from bad responses."""
     port = os.environ.get("KAFKA_CONNECT_PORT", "8083")
     request = urllib.request.Request(f"http://127.0.0.1:{port}/connectors/omni-postgres-cdc/status")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(request, timeout=2) as response:  # noqa: S310 -- loopback only
             status = json.loads(response.read())
-    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+    except urllib.error.HTTPError:
+        raise
+    except (OSError, urllib.error.URLError) as error:
+        raise OptionalServiceUnavailableError("Kafka Connect endpoint unavailable") from error
+    if not isinstance(status, dict):
+        raise ValueError(f"Kafka Connect returned a non-object status payload: {status!r}")
+    return cast(dict[str, object], status)
+
+
+def connector_running() -> bool:
+    try:
+        status = connector_status()
+    except OptionalServiceUnavailableError:
         return False
-    connector = status.get("connector", {})
-    tasks = status.get("tasks", [])
-    return (
-        connector.get("state") == "RUNNING"
-        and bool(tasks)
-        and all(task.get("state") == "RUNNING" for task in tasks)
-    )
+    return kafka_connector_is_running(status)
 
 
 def owned_predicate(customer_ids: list[int], order_id: int, payment_id: int) -> str:
@@ -149,8 +161,7 @@ def count_distinct_owned(executor: DbapiTrinoExecutor, predicate: str) -> tuple[
 
 
 def test_postgres_cdc_additive_schema_evolution_without_restart() -> None:
-    if not connector_running():
-        pytest.skip("streaming profile is not healthy; run `make streaming-up`")
+    require_kafka_connector_running(connector_status)
 
     token = uuid.uuid4().hex[:12]
     marker = f"cdc-schema-it-{token}"
@@ -260,8 +271,7 @@ def test_postgres_cdc_create_update_delete_replay_and_restart(
     lakehouse_namespace: Namespace,
     tmp_path: Path,
 ) -> None:
-    if not connector_running():
-        pytest.skip("streaming profile is not healthy; run `make streaming-up`")
+    require_kafka_connector_running(connector_status)
 
     token = uuid.uuid4().hex[:12]
     marker = f"cdc-it-{token}"

@@ -47,7 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--source",
         required=True,
-        help="OLTP table name (orders, ...) or API source name (fx-rates, ...)",
+        help=(
+            "OLTP table (orders, ...), API source (fx-rates, ...), or file "
+            "source (supplier-prices, ...)"
+        ),
     )
     run_parser.add_argument(
         "--date",
@@ -64,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "run-new",
         help=(
-            "load every source's archived logical dates newer than its Bronze "
-            "watermark (max _batch_date); fails fast, restartable"
+            "load every source's eligible archived dates; PostgreSQL/API use "
+            "the Bronze watermark and files scan completed manifests; fails fast, restartable"
         ),
     )
     return parser

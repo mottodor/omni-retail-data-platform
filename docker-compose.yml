@@ -82,12 +82,20 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # MinIO CE is source-only. Build the frozen, checksum-verified release from
+    # this repository; never fall back to a mutable or unavailable registry tag.
+    image: omni-retail/minio:RELEASE.2025-09-07T16-13-09Z
+    pull_policy: never
+    build:
+      context: ./infrastructure/minio
+      target: minio
     profiles: ["core"]
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # Frozen capstone dependency: disable MinIO's in-place update endpoint.
+      MINIO_UPDATE: "off"
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
@@ -101,7 +109,11 @@ services:
     restart: unless-stopped
 
   minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: omni-retail/minio-mc:RELEASE.2025-08-13T08-35-41Z
+    pull_policy: never
+    build:
+      context: ./infrastructure/minio
+      target: minio-mc
     profiles: ["core"]
     depends_on:
       minio:
@@ -216,12 +228,13 @@ services:
     restart: "no"
 
   trino:
-    # NOTE: Trino 483 is affected by trinodb/trino#30816 (merged after this
-    # release; no released image contains the fix yet). Each catalog operation
-    # may fetch a fresh OAuth2 token against Polaris; rapid writes can lose auth
-    # and yield empty-body 401s. Bronze uses bounded chunk retries and the
-    # explicit rebuild command can restart Polaris before resuming.
-    image: trinodb/trino:483
+    # Trino 483 is affected by trinodb/trino#30816: session=NONE fetches a new
+    # OAuth2 token for every REST-catalog operation and can trigger Polaris 401s
+    # during write-heavy builds. The local image backports the exact merged fix
+    # while 484 remains unreleased; remove the patch when adopting that release.
+    image: omni-retail/trino:483-pr30816
+    build:
+      context: ./infrastructure/trino
     profiles: ["core"]
     depends_on:
       polaris-init:
@@ -243,6 +256,9 @@ services:
       timeout: 10s
       retries: 12
       start_period: 10s
+    # A measured 210k-event CDC replay needs more JVM headroom than the former
+    # 2 GiB heap; keep both heap and container memory finite for the workstation.
+    mem_limit: 6g
     restart: unless-stopped
 
   mock-api:

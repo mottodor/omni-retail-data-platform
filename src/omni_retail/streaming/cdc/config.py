@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 DEFAULT_TABLES = ("customers", "orders", "payments")
+MAX_CDC_BATCH_SIZE = 500
 
 
 class CdcConfigError(ValueError):
@@ -20,6 +21,13 @@ def _positive_int(name: str, default: int) -> int:
         raise CdcConfigError(f"{name} must be an integer") from exc
     if value <= 0:
         raise CdcConfigError(f"{name} must be greater than zero")
+    return value
+
+
+def _bounded_positive_int(name: str, default: int, *, maximum: int) -> int:
+    value = _positive_int(name, default)
+    if value > maximum:
+        raise CdcConfigError(f"{name} must not exceed {maximum}")
     return value
 
 
@@ -51,7 +59,7 @@ class CdcConfig:
     bootstrap_servers: str = "127.0.0.1:9092"
     group_id: str = "omni-iceberg-bronze-cdc-v1"
     topic_prefix: str = "omni.oltp"
-    batch_size: int = 500
+    batch_size: int = MAX_CDC_BATCH_SIZE
     poll_timeout_seconds: float = 1.0
     write_attempts: int = 3
     readiness_file: str = "/tmp/cdc-consumer.ready"
@@ -86,7 +94,9 @@ class CdcConfig:
             bootstrap_servers=bootstrap_servers,
             group_id=group_id,
             topic_prefix=topic_prefix,
-            batch_size=_positive_int("CDC_BATCH_SIZE", cls.batch_size),
+            batch_size=_bounded_positive_int(
+                "CDC_BATCH_SIZE", cls.batch_size, maximum=MAX_CDC_BATCH_SIZE
+            ),
             poll_timeout_seconds=_positive_float(
                 "CDC_POLL_TIMEOUT_SECONDS", cls.poll_timeout_seconds
             ),

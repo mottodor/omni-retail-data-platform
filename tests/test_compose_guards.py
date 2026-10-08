@@ -21,8 +21,15 @@ COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 TRINO_CATALOG_FILE = REPO_ROOT / "trino" / "etc" / "catalog" / "iceberg.properties"
 TRINO_JVM_FILE = REPO_ROOT / "trino" / "etc" / "jvm.config"
 TRINO_CONFIG_FILE = REPO_ROOT / "trino" / "etc" / "config.properties"
+TRINO_DOCKERFILE = REPO_ROOT / "infrastructure" / "trino" / "Dockerfile"
+TRINO_OAUTH_PATCH_DIR = REPO_ROOT / "infrastructure" / "trino" / "patches" / "30816"
 ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
 MINIO_INIT_FILE = REPO_ROOT / "infrastructure" / "scripts" / "minio_init.sh"
+MINIO_BUILD_DIR = REPO_ROOT / "infrastructure" / "minio"
+MINIO_DOCKERFILE = MINIO_BUILD_DIR / "Dockerfile"
+MINIO_ENTRYPOINT = MINIO_BUILD_DIR / "entrypoint.sh"
+MINIO_SERVER_IMAGE = "omni-retail/minio:RELEASE.2025-09-07T16-13-09Z"
+MINIO_CLIENT_IMAGE = "omni-retail/minio-mc:RELEASE.2025-08-13T08-35-41Z"
 MOCK_API_DIR = REPO_ROOT / "infrastructure" / "mock_api"
 MOCK_API_DOCKERFILE = MOCK_API_DIR / "Dockerfile"
 MOCK_API_REQUIREMENTS = MOCK_API_DIR / "requirements.txt"
@@ -287,9 +294,11 @@ def test_stateful_services_use_named_volumes() -> None:
     )
 
 
-def test_trino_jvm_heap_is_the_committed_workstation_baseline() -> None:
+def test_trino_jvm_heap_is_the_measured_clean_replay_baseline() -> None:
     assert TRINO_JVM_FILE.is_file(), "trino/etc/jvm.config is missing"
-    assert "-Xmx2g" in TRINO_JVM_FILE.read_text(encoding="utf-8")
+    assert "-Xmx4g" in TRINO_JVM_FILE.read_text(encoding="utf-8")
+    trino = _load_compose()["services"]["trino"]
+    assert trino["mem_limit"] == "6g"
 
 
 def test_trino_rebuild_memory_and_query_text_limits_fit_the_jvm() -> None:
@@ -307,6 +316,25 @@ def test_trino_catalog_targets_polaris_rest_api() -> None:
     assert "iceberg.catalog.type=rest" in props
     assert re.search(r"iceberg\.rest-catalog\.uri=\S+polaris:8181/api/catalog", props)
     assert "iceberg.rest-catalog.warehouse=lakehouse" in props
+    assert not re.search(r"^iceberg\.rest-catalog\.session=USER$", props, re.MULTILINE)
+
+
+def test_trino_image_backports_rest_oauth_session_fix() -> None:
+    trino = _load_compose()["services"]["trino"]
+    assert trino["image"] == "omni-retail/trino:483-pr30816"
+    assert trino["build"] == {"context": "./infrastructure/trino"}
+
+    dockerfile = TRINO_DOCKERFILE.read_text(encoding="utf-8")
+    assert (
+        "trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534"
+        in dockerfile
+    )
+    assert "io.trino_trino-iceberg-483.jar" in dockerfile
+    patch_sources = {path.name for path in TRINO_OAUTH_PATCH_DIR.rglob("*.java") if path.is_file()}
+    assert patch_sources == {
+        "OAuth2SecurityProperties.java",
+        "SharedSessionOAuth2Manager.java",
+    }
 
 
 @pytest.mark.parametrize(
@@ -620,6 +648,46 @@ def test_dag_directory_contains_only_expected_dags() -> None:
         "transform_lakehouse.py",
     ]
     assert dag_files == expected, f"unexpected DAG files: {dag_files}"
+
+
+def test_minio_images_are_repository_owned_source_builds() -> None:
+    services = _load_compose()["services"]
+    expected = {
+        "minio": (MINIO_SERVER_IMAGE, "minio"),
+        "minio-init": (MINIO_CLIENT_IMAGE, "minio-mc"),
+    }
+    for service_name, (image, target) in expected.items():
+        service = services[service_name]
+        assert service["image"] == image
+        assert service["pull_policy"] == "never"
+        assert service["build"] == {
+            "context": "./infrastructure/minio",
+            "target": target,
+        }
+    assert services["minio"]["environment"]["MINIO_UPDATE"] == "off"
+
+
+def test_minio_source_build_pins_and_verifies_every_input() -> None:
+    assert MINIO_DOCKERFILE.is_file(), "MinIO source-build Dockerfile is missing"
+    assert MINIO_ENTRYPOINT.is_file(), "MinIO entrypoint is missing"
+    dockerfile = MINIO_DOCKERFILE.read_text(encoding="utf-8")
+
+    expected_inputs = {
+        "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",
+        "golang:1.24.6-alpine3.22@sha256:c8c5f95d64aa79b6547f3b626eb84b16a7ce18a139e3e9ca19a8c078b85ba80d",
+        "alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1",
+        "07c3a429bfed433e49018cb0f78a52145d4bedeb",
+        "8819e3e7817e46b7b3798f8f200ead208562e571563c2e040352378031abe9f2",
+        "7394ce0dd2a80935aded936b09fa12cbb3cb8096",
+        "95cd293c7119f16921a6dc515a1fb74a2227f19fd994b9c8b770a154e802ac44",
+    }
+    for pinned_input in expected_inputs:
+        assert pinned_input in dockerfile
+    assert dockerfile.count("sha256sum -c -") == 2
+    assert "GOTOOLCHAIN=local" in dockerfile
+    assert "@latest" not in dockerfile
+    assert "FROM minio/" not in dockerfile
+    assert "COPY --from=mc-builder /out/mc /usr/bin/mc" in dockerfile
 
 
 def test_minio_init_creates_least_privilege_ingestion_user() -> None:

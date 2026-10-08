@@ -54,10 +54,11 @@ logger = logging.getLogger(__name__)
 
 #: dbt project location inside the Airflow image (compose mounts it read-only).
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
-#: ``uv pip --target`` installs dbt's modules but not console scripts in the
-#: custom Airflow image. Invoke the locked CLI entry point through the active
-#: interpreter while retaining an argument-list-only subprocess boundary.
-DBT_CLI_ENTRYPOINT = "from dbt.cli.main import cli; cli(prog_name='dbt')"
+#: ``uv pip --target`` installs Python modules but not console scripts in the
+#: custom Airflow image. Invoke the project's clock-stable dbt entry point
+#: through the active interpreter while retaining an argument-list-only
+#: subprocess boundary.
+DBT_CLI_ENTRYPOINT = "from omni_retail.lakehouse.dbt_cli import main; main()"
 
 
 def summarize_manifest(manifest: BatchManifest) -> dict[str, object]:
@@ -136,9 +137,11 @@ def run_bronze_load(
     storage: ObjectStorage | None = None,
     schema: str | None = None,
 ) -> dict[str, object]:
-    """Watermark-driven Bronze load of every registered source (Phase 5 §3).
+    """Restart-safe Bronze load of every registered batch source.
 
-    DAG calls remain argument-free. Explicit storage/schema boundaries exist so
+    PostgreSQL/API sources resume from date watermarks; file sources scan
+    completed manifests so late older batches remain eligible. DAG calls remain
+    argument-free. Explicit storage/schema boundaries exist so
     integration tests can retain the real runner path without seeing shared raw
     dates or writing production schemas.
     """

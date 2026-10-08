@@ -43,6 +43,7 @@ def parquet_payload(columns: dict[str, list[object]]) -> bytes:
 def xlsx_payload(rows: list[list[object]]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
+    assert sheet is not None
     for row in rows:
         sheet.append(row)
     buffer = io.BytesIO()
@@ -169,6 +170,7 @@ def test_mixed_valid_and_bad_rows_keep_good_rows() -> None:
     assert result.file_valid
     assert result.row_count == 3
     assert [row["sku"] for row in result.rows] == ["SKU-1", "SKU-3"]
+    assert [row.row_position for row in result.accepted_rows] == [0, 2]
     assert [bad.row_number for bad in result.bad_rows] == [2]
 
 

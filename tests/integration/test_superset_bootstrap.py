@@ -18,23 +18,47 @@ custom image and runs the one-shot ``superset-init``), then run via
   reconciliation idea).
 """
 
+# pyright: reportMissingImports=false
+
 import math
 import os
+from collections.abc import Generator
+from functools import partial
 from typing import Any
 
 import clickhouse_connect
 import httpx
 import pytest
+from clickhouse_connect.driver.client import Client
 from clickhouse_connect.driver.exceptions import DatabaseError
+from clickhouse_connect.driver.exceptions import OperationalError as ClickHouseOperationalError
+
+from integration.lakehouse_seed import trino_scalar
+
+from .prerequisites import (
+    require_clickhouse_rows,
+    require_superset_health,
+    require_trino_rows,
+)
 
 SUPERSET_PORT = os.environ.get("SUPERSET_PORT", "8088")
 SUPERSET_BASE_URL = f"http://127.0.0.1:{SUPERSET_PORT}"
 REQUEST_TIMEOUT_SECONDS = 15.0
 
 
-@pytest.fixture()
-def admin_token() -> str:
+@pytest.fixture(scope="module", autouse=True)
+def superset_health() -> httpx.Response:
+    """Skip this optional module only when its Superset endpoint is absent."""
+    return require_superset_health(
+        SUPERSET_BASE_URL,
+        timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+    )
+
+
+@pytest.fixture(scope="module")
+def admin_token(superset_health: httpx.Response) -> str:
     """Log in as the admin bootstrapped from .env; failure means bad bootstrap."""
+    del superset_health
     response = httpx.post(
         f"{SUPERSET_BASE_URL}/api/v1/security/login",
         json={
@@ -53,10 +77,9 @@ def admin_token() -> str:
     return token
 
 
-def test_health_endpoint_reports_ok() -> None:
-    response = httpx.get(f"{SUPERSET_BASE_URL}/health", timeout=REQUEST_TIMEOUT_SECONDS)
-    assert response.status_code == 200
-    assert response.text.startswith("OK")
+def test_health_endpoint_reports_ok(superset_health: httpx.Response) -> None:
+    assert superset_health.status_code == 200
+    assert superset_health.text.startswith("OK")
 
 
 def _fetch_databases(token: str) -> dict[str, str]:
@@ -102,22 +125,70 @@ def test_bootstrap_created_both_connections(admin_token: str) -> None:
     assert trino_uri == "trino://omni_superset@trino:8080/iceberg", trino_uri
 
 
-def test_reader_account_can_query_serving_marts() -> None:
-    """The BI account is SELECT-only but sufficient for the published marts."""
-    client = clickhouse_connect.get_client(
-        host=os.environ.get("CLICKHOUSE_HOST", "127.0.0.1"),
-        port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
-        username=os.environ.get("CLICKHOUSE_READER_USER", "superset_reader"),
-        password=os.environ.get("CLICKHOUSE_READER_PASSWORD", ""),
-        database=os.environ.get("CLICKHOUSE_DB", "analytics"),
+@pytest.fixture(scope="module")
+def reader_client() -> Generator[Client, None, None]:
+    """Return the BI reader, skipping only a transport-level ClickHouse absence."""
+    client: Client | None = None
+    try:
+        client = clickhouse_connect.get_client(
+            host=os.environ.get("CLICKHOUSE_HOST", "127.0.0.1"),
+            port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+            username=os.environ.get("CLICKHOUSE_READER_USER", "superset_reader"),
+            password=os.environ.get("CLICKHOUSE_READER_PASSWORD", ""),
+            database=os.environ.get("CLICKHOUSE_DB", "analytics"),
+        )
+        client.query("SELECT 1")
+    except ClickHouseOperationalError as error:
+        if client is not None:
+            client.close()
+        pytest.skip(
+            f"ClickHouse is not reachable ({type(error).__name__}); "
+            "start the BI profile: `make bi-up`"
+        )
+    assert client is not None
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+def _serving_row_count(client: Client, table: str) -> int:
+    result = client.query(f"SELECT count() FROM {table}")  # nosec B608 -- allow-listed table
+    return int(result.result_rows[0][0])
+
+
+@pytest.fixture(scope="module")
+def daily_sales_ready(reader_client: Client) -> None:
+    require_clickhouse_rows(
+        lambda: _serving_row_count(reader_client, "mart_daily_sales"),
+        dataset="ClickHouse analytics.mart_daily_sales",
+        setup_command="make dbt-build && make serving-rebuild",
     )
-    result = client.query("SELECT count() FROM mart_daily_sales")
-    row_count = int(result.result_rows[0][0])
-    assert row_count >= 0, "reader query against the serving mart failed"
+
+
+@pytest.fixture(scope="module")
+def canary_marts_ready(reader_client: Client) -> None:
+    for table in ("mart_daily_sales", "mart_customer_ltv"):
+        require_clickhouse_rows(
+            partial(_serving_row_count, reader_client, table),
+            dataset=f"ClickHouse analytics.{table}",
+            setup_command="make dbt-build && make serving-rebuild",
+        )
+
+
+def test_reader_account_can_query_serving_marts(
+    reader_client: Client,
+    daily_sales_ready: None,
+) -> None:
+    """The BI account is SELECT-only but sufficient for the published marts."""
+    del daily_sales_ready
+    assert _serving_row_count(reader_client, "mart_daily_sales") > 0
 
     denied = pytest.raises(DatabaseError)
     with denied:
-        client.command("CREATE TABLE analytics.reader_must_not_create (id UInt8) ENGINE = Memory")
+        reader_client.command(
+            "CREATE TABLE analytics.reader_must_not_create (id UInt8) ENGINE = Memory"
+        )
 
 
 EXPECTED_DATASETS = {
@@ -150,7 +221,11 @@ class SupersetSession:
             base_url=SUPERSET_BASE_URL, timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False
         )
         self.client.headers["Authorization"] = f"Bearer {token}"
-        csrf = self.client.get("/api/v1/security/csrf_token/").json()["result"]
+        response = self.client.get("/api/v1/security/csrf_token/")
+        assert response.status_code == 200, (
+            f"CSRF token request failed: {response.status_code} {response.text}"
+        )
+        csrf = response.json()["result"]
         self.client.headers.update({"X-CSRFToken": csrf, "Referer": SUPERSET_BASE_URL})
 
     def get(self, path: str, **kwargs: Any) -> httpx.Response:
@@ -159,10 +234,17 @@ class SupersetSession:
     def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return self.client.post(path, **kwargs)
 
+    def close(self) -> None:
+        self.client.close()
 
-@pytest.fixture()
-def superset_session(admin_token: str) -> SupersetSession:
-    return SupersetSession(admin_token)
+
+@pytest.fixture(scope="module")
+def superset_session(admin_token: str) -> Generator[SupersetSession, None, None]:
+    session = SupersetSession(admin_token)
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def test_bootstrap_imported_bi_assets(admin_token: str) -> None:
@@ -215,8 +297,13 @@ def test_bootstrap_imported_bi_assets(admin_token: str) -> None:
     assert not missing, f"dashboards missing from the bootstrap import: {sorted(missing)}"
 
 
-def test_chart_canary_reconciles_with_clickhouse(superset_session: SupersetSession) -> None:
+def test_chart_canary_reconciles_with_clickhouse(
+    superset_session: SupersetSession,
+    reader_client: Client,
+    canary_marts_ready: None,
+) -> None:
     """Totals through Superset's data API match direct reader queries."""
+    del canary_marts_ready
     datasets = superset_session.get("/api/v1/dataset/", params={"limit": 100}).json()["result"]
     dataset_ids = {item["table_name"]: item["id"] for item in datasets}
 
@@ -241,18 +328,13 @@ def test_chart_canary_reconciles_with_clickhouse(superset_session: SupersetSessi
     sales_row = run_query("mart_daily_sales", ["revenue", "orders", "aov"])
     ltv_row = run_query("mart_customer_ltv", ["gmv", "customers"])
 
-    reader = clickhouse_connect.get_client(
-        host=os.environ.get("CLICKHOUSE_HOST", "127.0.0.1"),
-        port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
-        username=os.environ.get("CLICKHOUSE_READER_USER", "superset_reader"),
-        password=os.environ.get("CLICKHOUSE_READER_PASSWORD", ""),
-        database=os.environ.get("CLICKHOUSE_DB", "analytics"),
-    )
-    direct_sales = reader.query(
+    direct_sales = reader_client.query(
         "SELECT sum(revenue_eur), sum(orders_count), "
         "sum(revenue_eur) / sum(orders_count) FROM mart_daily_sales"
     ).result_rows[0]
-    direct_ltv = reader.query("SELECT sum(gmv_eur), count() FROM mart_customer_ltv").result_rows[0]
+    direct_ltv = reader_client.query(
+        "SELECT sum(gmv_eur), count() FROM mart_customer_ltv"
+    ).result_rows[0]
 
     assert math.isclose(sales_row["revenue"], float(direct_sales[0]), rel_tol=1e-9)
     assert sales_row["orders"] == int(direct_sales[1])
@@ -261,13 +343,26 @@ def test_chart_canary_reconciles_with_clickhouse(superset_session: SupersetSessi
     assert ltv_row["customers"] == int(direct_ltv[1])
 
 
-def test_sqllab_trino_adhoc_path(superset_session: SupersetSession) -> None:
+@pytest.fixture(scope="module")
+def gold_orders_ready() -> None:
+    require_trino_rows(
+        lambda: trino_scalar("SELECT count(*) FROM iceberg.gold.fact_orders"),
+        dataset="Iceberg gold.fact_orders",
+        setup_command="make dbt-build",
+    )
+
+
+def test_sqllab_trino_adhoc_path(
+    superset_session: SupersetSession,
+    gold_orders_ready: None,
+) -> None:
     """The exploration path works: SQL Lab executes against the Iceberg catalog.
 
     Uses the same REST endpoint (``/api/v1/sqllab/execute/``) the SQL Lab UI
     posts to, with the session cookie the CSRF check requires — see the
     runbook's exploration section for when to prefer this path.
     """
+    del gold_orders_ready
     databases = superset_session.get("/api/v1/database/", params={"limit": 100}).json()["result"]
     trino_id = next(item["id"] for item in databases if item["database_name"] == "Trino iceberg")
 

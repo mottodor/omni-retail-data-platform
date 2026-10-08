@@ -1,11 +1,9 @@
 SHELL := /bin/bash
 UV := uv
 
-LOCALHOST_NO_PROXY := 127.0.0.1,localhost
-# shellcheck disable=SC2034  # GNU Make variable expanded in host-side recipes below.
-LOCALHOST_PROXY_BYPASS=no_proxy="$(LOCALHOST_NO_PROXY)$${no_proxy:+,$${no_proxy}}" NO_PROXY="$(LOCALHOST_NO_PROXY)$${NO_PROXY:+,$${NO_PROXY}}"
+HOST_RUN := bash infrastructure/scripts/run_host_command.sh
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test minio-build up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -25,8 +23,12 @@ test: ## Run unit tests
 unit: test ## Alias for unit tests
 
 COMPOSE := docker compose --profile core
+MINIO_IMAGE_SERVICES := minio minio-init
 
-up: ## Start core infrastructure and wait until healthy
+minio-build: ## Build pinned MinIO server/client images from verified source
+	docker compose build $(MINIO_IMAGE_SERVICES)
+
+up: minio-build ## Build images, start core infrastructure, and wait until healthy
 	$(COMPOSE) up -d --wait
 
 down: ## Stop services (named volumes are preserved)
@@ -35,9 +37,10 @@ down: ## Stop services (named volumes are preserved)
 logs: ## Follow service logs
 	docker compose logs -f --tail=100
 
-reset: ## WARNING: destroy containers AND named volumes (all local data)
-	@echo "warning: reset destroys all local volumes (postgres, minio, polaris metadata)"
-	@$(COMPOSE) down -v
+reset: ## DESTRUCTIVE: reset coupled core+streaming state; preserve BI/Airflow metadata
+	@echo "warning: reset destroys PostgreSQL, MinIO/Iceberg, Polaris metadata, and Kafka/Connect transport state"
+	@echo "warning: BI and Airflow metadata volumes are preserved"
+	@$(STREAMING_COMPOSE) down -v
 
 smoke-core: ## End-to-end check: Trino -> Polaris -> Iceberg -> MinIO
 	bash infrastructure/scripts/smoke_core.sh
@@ -45,40 +48,40 @@ smoke-core: ## End-to-end check: Trino -> Polaris -> Iceberg -> MinIO
 EVENTS ?= 200
 
 generate-oltp: ## Apply OLTP schema and load initial data (10k/5k/100k, seed 42). ARGS="--orders 1000" to override
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.generators.oltp initial $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.generators.oltp initial $(ARGS)
 
 mutate-oltp: ## Apply EVENTS random mutations (inserts/updates/deletes) to the OLTP source
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.generators.oltp mutate --events $(EVENTS) $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.generators.oltp mutate --events $(EVENTS) $(ARGS)
 
 ROWS ?= 200
 SEED ?= 7
 
 seed-supplier-files: ## Generate deterministic vendor files and upload to landing. ARGS="--rows 500 --seed 11" to override
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.generators.vendor_files generate --upload --rows $(ROWS) --seed $(SEED) $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.generators.vendor_files generate --upload --rows $(ROWS) --seed $(SEED) $(ARGS)
 
 ingest-files: ## Process pending vendor files (landing -> processing -> archive | rejected). ARGS="--source supplier-prices --date 2026-09-11"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.ingestion.files process $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.ingestion.files process $(ARGS)
 
 ingest-api: ## Fetch raw API pages into the archive bucket. ARGS="run --source fx-rates --date 2026-09-11" or "backfill --source fx-rates --from 2026-09-01 --to 2026-09-10"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.ingestion.api $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.ingestion.api $(ARGS)
 
 bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source orders --date 2026-09-18", "run-all --date 2026-09-18" or "run-new"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.bronze $(ARGS)
 
 bronze-rebuild: ## DESTRUCTIVE: clear only the configured Bronze schema, then rebuild it from archive with bounded Polaris recovery
-	$(LOCALHOST_PROXY_BYPASS) bash infrastructure/scripts/bronze_rebuild.sh
+	$(HOST_RUN) bash infrastructure/scripts/bronze_rebuild.sh
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
-	$(UV) run dbt parse --project-dir dbt --profiles-dir dbt
+	$(UV) run python -m omni_retail.lakehouse.dbt_cli parse --project-dir dbt --profiles-dir dbt
 
 dbt-build: ## Run dbt models + tests against the live core stack. ARGS="--select staging"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt build --project-dir dbt --profiles-dir dbt $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.dbt_cli build --project-dir dbt --profiles-dir dbt $(ARGS)
 
 dbt-test: ## Run dbt tests. ARGS="--select staging"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run dbt test --project-dir dbt --profiles-dir dbt $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.dbt_cli test --project-dir dbt --profiles-dir dbt $(ARGS)
 
 integration: ## Run integration tests against the live stacks (requires `make up`; optional profiles for their tests)
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) OMNI_INTEGRATION=1 $(UV) run pytest tests/integration -v'
+	@env OMNI_INTEGRATION=1 $(HOST_RUN) $(UV) run pytest tests/integration -v
 
 STREAMING_COMPOSE := docker compose --profile core --profile streaming
 STREAMING_SERVICES := cdc-consumer debezium-connector-init debezium-connect kafka-topics-init kafka postgres-cdc-init postgres-cdc-reset
@@ -97,10 +100,9 @@ streaming-down: ## Stop streaming services; preserve Kafka, connector, slot, and
 	$(STREAMING_COMPOSE) stop cdc-consumer debezium-connect kafka
 	$(STREAMING_COMPOSE) rm -f $(STREAMING_SERVICES)
 
-streaming-status: ## Show streaming health, connector/task state, and Bronze consumer offsets
+streaming-status: ## Validate connector, tasks, consumer membership, offsets, and lag
 	$(STREAMING_COMPOSE) ps postgres trino kafka debezium-connect cdc-consumer
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) curl --fail --silent --show-error "http://127.0.0.1:$${KAFKA_CONNECT_PORT:-8083}/connectors/omni-postgres-cdc/status"; echo'
-	$(STREAMING_COMPOSE) exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --group "$${CDC_CONSUMER_GROUP_ID:-omni-iceberg-bronze-cdc-v1}" --describe
+	@$(HOST_RUN) $(UV) run python -m omni_retail.streaming.cdc status
 
 streaming-reset: ## DESTRUCTIVE: reset Kafka/Connect transport and PG slot/publication; preserve OLTP and Bronze
 	@echo "warning: streaming-reset destroys Kafka records, Connect state, and the PostgreSQL CDC slot/publication"
@@ -126,13 +128,13 @@ bi-down: ## Stop the bi profile services (clickhouse-data and superset metadata 
 	$(BI_COMPOSE) down
 
 serving-publish: ## Publish a Gold mart to ClickHouse. ARGS="--mart mart_daily_sales"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.serving.clickhouse publish $(ARGS)
 
 serving-rebuild: ## Rebuild serving marts from Iceberg Gold. No ARGS = every mart; ARGS="--mart mart_daily_sales" = one mart
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.serving.clickhouse rebuild $(if $(ARGS),$(ARGS),--all)'
+	@$(HOST_RUN) bash -c 'exec $(UV) run python -m omni_retail.serving.clickhouse rebuild $(if $(ARGS),$(ARGS),--all)'
 
 serving-benchmark: ## Compare a representative Gold query in Trino and ClickHouse. ARGS="--repetitions 5"
-	@bash -c 'set -a; source .env; set +a; $(LOCALHOST_PROXY_BYPASS) $(UV) run python -m omni_retail.serving.clickhouse benchmark $(ARGS)'
+	@$(HOST_RUN) $(UV) run python -m omni_retail.serving.clickhouse benchmark $(ARGS)
 
 AIRFLOW_COMPOSE := docker compose --profile orchestration
 

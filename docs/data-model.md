@@ -95,22 +95,33 @@ Currency: 85 % USD / 10 % EUR / 5 % GBP. Item popularity follows a power law
 
 ## Bronze layer (Phase 5 slice 1)
 
-Ten Iceberg tables (`bronze` schema) mirror the raw archive objects one
-logical day at a time, partitioned by `_batch_date`:
+Fourteen Iceberg tables (`bronze` schema) mirror manifest-backed raw archive
+objects, partitioned by `_batch_date`:
 
 | Table | Source | Grain |
 |---|---|---|
 | `orders`, `order_items`, `customers`, `products`, `categories`, `payments`, `shipments` | PG snapshots (Parquet) | one row per source record per logical batch |
 | `fx_rates`, `campaigns`, `deliveries` | API pages (JSON, flattened) | one row per source record per raw page |
+| `supplier_prices` | supplier-prices CSV | one accepted row per content-addressed file batch |
+| `partner_products` | partner-products JSON | one accepted object per content-addressed file batch |
+| `historical_orders` | historical-orders Parquet | one accepted row per content-addressed file batch |
+| `supplier_stock` | supplier-stock XLSX | one accepted worksheet row per content-addressed file batch |
 
-Service columns on every table: `_batch_id` (deterministic
-`<source>-<yyyymmdd>`), `_batch_date` (partition), `_source_object`,
-`_source_object_row_position` (zero-based coordinate inside the immutable raw
-object), `_ingested_at`. Explicit-date loads are idempotent per (table,
-logical date): `DELETE` partition → batched `INSERT`, row-count-verified
-against the raw manifest. Watermark-driven `run-new` resumes at independently
-replaceable source-object row ranges and verifies the manifest count plus
-unique raw coordinates.
+Service columns on every table: `_batch_id`, `_batch_date` (partition),
+`_source_object`, `_source_object_row_position` (zero-based coordinate inside
+the immutable raw object), and `_ingested_at`. PostgreSQL/API `_batch_id` values
+are deterministic `<source>-<yyyymmdd>` identities; supplier-file values are
+content-addressed `<source>-<sha256[:16]>` identities from each owning completed
+manifest. Rejected rows are absent from Bronze, so their original positions
+remain visible as gaps rather than being renumbered.
+
+Explicit-date loads are idempotent per (table, logical date): `DELETE`
+partition → batched `INSERT`, verified against manifests. Watermark-driven
+PostgreSQL/API `run-new` resumes at independently replaceable source-object row
+ranges. File `run-new` scans completed manifests on every run so late files for
+older dates remain eligible, skips complete coordinates, and verifies both row
+count and coordinate uniqueness against the sum of
+`row_count - rejected_row_count`.
 
 ## PostgreSQL CDC Bronze ledger (Phase 8)
 

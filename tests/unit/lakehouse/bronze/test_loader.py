@@ -9,7 +9,12 @@ from decimal import Decimal
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from trino.exceptions import TrinoConnectionError, TrinoExternalError, TrinoQueryError
+from trino.exceptions import (
+    TrinoConnectionError,
+    TrinoExternalError,
+    TrinoQueryError,
+    TrinoUserError,
+)
 
 from fakes.storage import FakeStorage
 from fakes.trino import FakeTrinoExecutor
@@ -17,9 +22,12 @@ from omni_retail.ingestion.common.manifest import BatchManifest
 from omni_retail.ingestion.common.paths import (
     BUCKET_ARCHIVE,
     api_page_key,
+    incoming_key,
     manifest_key,
     postgres_snapshot_key,
 )
+from omni_retail.ingestion.files.flow import process_incoming
+from omni_retail.ingestion.files.schemas import SUPPLIER_PRICES
 from omni_retail.ingestion.postgres_snapshot.tables import table_by_name
 from omni_retail.lakehouse.bronze.loader import (
     DbapiTrinoExecutor,
@@ -30,6 +38,7 @@ from omni_retail.lakehouse.bronze.loader import (
     create_table_sql,
     delete_partition_sql,
     discover_archive_dates,
+    ensure_table,
     is_transient_catalog_error,
     is_transient_trino_error,
     load,
@@ -53,6 +62,26 @@ def test_trino_connection_errors_are_recoverable_for_rebuild() -> None:
                 "type": "EXTERNAL",
                 "name": "ICEBERG_CATALOG_ERROR",
                 "message": "Failed to load table: fx_rates in bronze namespace",
+            },
+            "test-query",
+        )
+    )
+    assert is_transient_catalog_error(
+        TrinoExternalError(
+            {
+                "type": "EXTERNAL",
+                "name": "ICEBERG_CATALOG_ERROR",
+                "message": "Failed to load view 'postgres_cdc_events'",
+            },
+            "test-query",
+        )
+    )
+    assert is_transient_catalog_error(
+        TrinoExternalError(
+            {
+                "type": "EXTERNAL",
+                "name": "ICEBERG_CATALOG_ERROR",
+                "message": "Failed to check namespace 'it_fixture_bronze'",
             },
             "test-query",
         )
@@ -106,6 +135,136 @@ def test_create_table_sql_declares_all_columns_and_partitioning() -> None:
     assert '"updated_at" timestamp(6) with time zone' in sql
     assert '"_batch_date" date' in sql
     assert sql.endswith("with (partitioning = ARRAY['_batch_date'])")
+
+
+class FlakyDdlExecutor(FakeTrinoExecutor):
+    """Fail one DDL prefix a configured number of times with the same error."""
+
+    def __init__(self, prefix: str, failures: int, error: Exception) -> None:
+        super().__init__()
+        self.prefix = prefix
+        self.failures = failures
+        self.error = error
+
+    def execute(self, sql: str) -> None:
+        self.statements.append(sql)
+        if sql.startswith(self.prefix) and self.failures > 0:
+            self.failures -= 1
+            raise self.error
+
+
+def namespace_catalog_error() -> TrinoExternalError:
+    return TrinoExternalError(
+        {
+            "type": "EXTERNAL",
+            "name": "ICEBERG_CATALOG_ERROR",
+            "message": "Failed to check namespace 'it_fixture_bronze'",
+        },
+        "test-query",
+    )
+
+
+def test_ensure_table_succeeds_without_retry_sleep() -> None:
+    executor = FakeTrinoExecutor()
+    sleeps: list[float] = []
+
+    ensure_table(
+        executor,
+        TABLES["orders"],
+        "iceberg",
+        "it_fixture_bronze",
+        sleep=sleeps.append,
+    )
+
+    assert len(executor.statements) == 3
+    assert executor.statements[0] == "create schema if not exists iceberg.it_fixture_bronze"
+    assert executor.statements[1].startswith(
+        "create table if not exists iceberg.it_fixture_bronze.orders"
+    )
+    assert executor.statements[2].startswith(
+        "alter table iceberg.it_fixture_bronze.orders add column if not exists"
+    )
+    assert sleeps == []
+
+
+def test_ensure_table_retries_only_failed_idempotent_ddl() -> None:
+    error = namespace_catalog_error()
+    executor = FlakyDdlExecutor("create table", failures=1, error=error)
+    sleeps: list[float] = []
+
+    ensure_table(
+        executor,
+        TABLES["orders"],
+        "iceberg",
+        "it_fixture_bronze",
+        sleep=sleeps.append,
+    )
+
+    assert len(executor.statements_matching("create schema")) == 1
+    assert len(executor.statements_matching("create table")) == 2
+    assert len(executor.statements_matching("alter table")) == 1
+    assert sleeps == [2.0]
+
+
+def test_ensure_table_exhausts_transient_retry_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error = namespace_catalog_error()
+    executor = FlakyDdlExecutor("create schema", failures=99, error=error)
+    sleeps: list[float] = []
+
+    with pytest.raises(TrinoExternalError) as raised:
+        ensure_table(
+            executor,
+            TABLES["orders"],
+            "iceberg",
+            "it_fixture_bronze",
+            sleep=sleeps.append,
+        )
+
+    assert raised.value is error
+    assert len(executor.statements_matching("create schema")) == 3
+    assert executor.statements_matching("create table") == []
+    assert sleeps == [2.0, 4.0]
+    assert "schema=it_fixture_bronze" in caplog.text
+    assert "table=orders" in caplog.text
+    assert "attempts=3" in caplog.text
+    assert "error_type=TrinoExternalError" in caplog.text
+    assert "Failed to check namespace 'it_fixture_bronze'" in caplog.text
+
+
+def test_ensure_table_does_not_retry_non_transient_error() -> None:
+    error = TrinoUserError(
+        {"type": "USER_ERROR", "name": "SYNTAX_ERROR", "message": "bad DDL"},
+        "test-query",
+    )
+    executor = FlakyDdlExecutor("create schema", failures=1, error=error)
+    sleeps: list[float] = []
+
+    with pytest.raises(TrinoUserError) as raised:
+        ensure_table(
+            executor,
+            TABLES["orders"],
+            "iceberg",
+            "it_fixture_bronze",
+            sleep=sleeps.append,
+        )
+
+    assert raised.value is error
+    assert len(executor.statements_matching("create schema")) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_ensure_table_rejects_empty_retry_budget(attempts: int) -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        ensure_table(
+            FakeTrinoExecutor(),
+            TABLES["orders"],
+            "iceberg",
+            "it_fixture_bronze",
+            attempts=attempts,
+        )
 
 
 def test_delete_partition_sql_targets_logical_date() -> None:
@@ -215,6 +374,139 @@ def seed_fx_batch(storage: FakeStorage, logical_date: date = LOGICAL_DATE) -> No
         row_count=3,
         logical_date=logical_date,
     )
+
+
+def seed_supplier_prices_batch(
+    storage: FakeStorage,
+    *,
+    logical_date: date = LOGICAL_DATE,
+    filename: str = "prices.csv",
+    rows: tuple[bytes, ...] = (b"acme,SKU-1,9.99,EUR,2026-09-01\n",),
+) -> BatchManifest:
+    payload = b"supplier_id,sku,price,currency,valid_from\n" + b"".join(rows)
+    storage.put_object(
+        "landing",
+        incoming_key("supplier-prices", filename),
+        payload,
+    )
+    outcomes = process_incoming(
+        storage,
+        SUPPLIER_PRICES,
+        logical_date,
+        clock=fixed_clock,
+    )
+    assert len(outcomes) == 1
+    return outcomes[0].manifest
+
+
+def test_load_file_batch_uses_manifest_identity_and_raw_positions() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    manifest = seed_supplier_prices_batch(
+        storage,
+        rows=(
+            b"acme,SKU-1,9.99,EUR,2026-09-01\n",
+            b"acme,SKU-2,broken,EUR,2026-09-01\n",
+            b"acme,SKU-3,25.00,EUR,2026-09-02\n",
+        ),
+    )
+
+    result = load(
+        storage,
+        executor,
+        TABLES["supplier_prices"],
+        logical_date=LOGICAL_DATE,
+        clock=fixed_clock,
+    )
+
+    assert result.row_count == 2
+    assert result.batch_ids == (manifest.batch_id,)
+    insert = executor.statements_matching("insert into")[0]
+    assert f"'{manifest.batch_id}'" in insert
+    assert f"'{manifest.object_key}'" in insert
+    assert ", 0, TIMESTAMP" in insert
+    assert ", 2, TIMESTAMP" in insert
+    assert ", 1, TIMESTAMP" not in insert
+
+
+def test_load_file_date_combines_multiple_completed_manifests() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    first = seed_supplier_prices_batch(storage, filename="a.csv")
+    second = seed_supplier_prices_batch(
+        storage,
+        filename="b.csv",
+        rows=(b"globex,SKU-2,15.50,USD,2026-09-02\n",),
+    )
+
+    result = load(
+        storage,
+        executor,
+        TABLES["supplier_prices"],
+        logical_date=LOGICAL_DATE,
+        clock=fixed_clock,
+    )
+
+    assert result.row_count == 2
+    assert result.batch_ids == (first.batch_id, second.batch_id)
+    insert = executor.statements_matching("insert into")[0]
+    assert first.object_key in insert
+    assert second.object_key in insert
+
+
+def test_load_file_rejects_orphan_archive_object_before_dml() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    storage.put_object(
+        BUCKET_ARCHIVE,
+        "supplier-prices/2026/09/18/orphan.csv",
+        b"supplier_id,sku,price,currency,valid_from\n",
+    )
+
+    with pytest.raises(LoadError, match="archive/manifest mismatch"):
+        load(
+            storage,
+            executor,
+            TABLES["supplier_prices"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+        )
+    assert executor.statements == []
+
+
+def test_load_file_rejects_checksum_mismatch_before_dml() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    manifest = seed_supplier_prices_batch(storage)
+    body = storage.get_object(BUCKET_ARCHIVE, manifest.object_key)
+    storage.put_object(BUCKET_ARCHIVE, manifest.object_key, body.replace(b"9.99", b"8.99"))
+
+    with pytest.raises(LoadError, match="integrity mismatch"):
+        load(
+            storage,
+            executor,
+            TABLES["supplier_prices"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+        )
+    assert executor.statements == []
+
+
+def test_load_file_rejects_missing_manifest_owned_object_before_dml() -> None:
+    storage = FakeStorage()
+    executor = FakeTrinoExecutor()
+    manifest = seed_supplier_prices_batch(storage)
+    storage.delete_object(BUCKET_ARCHIVE, manifest.object_key)
+
+    with pytest.raises(LoadError, match="archive/manifest mismatch"):
+        load(
+            storage,
+            executor,
+            TABLES["supplier_prices"],
+            logical_date=LOGICAL_DATE,
+            clock=fixed_clock,
+        )
+    assert executor.statements == []
 
 
 def test_load_postgres_batch_deletes_then_inserts() -> None:
@@ -512,6 +804,36 @@ def test_discover_archive_dates_returns_sorted_unique_dates() -> None:
         date(2026, 9, 18),
     )
     assert discover_archive_dates(storage, TABLES["fx_rates"]) == (date(2026, 9, 17),)
+
+
+def test_file_load_new_includes_late_date_older_than_table_watermark() -> None:
+    storage = FakeStorage()
+    seed_supplier_prices_batch(
+        storage,
+        logical_date=date(2026, 9, 16),
+        filename="old.csv",
+    )
+    seed_supplier_prices_batch(
+        storage,
+        logical_date=date(2026, 9, 18),
+        filename="new.csv",
+        rows=(b"globex,SKU-2,15.50,USD,2026-09-02\n",),
+    )
+    executor = watermarked_executor(date(2026, 9, 18))
+    executor.fetch_handler = bronze_counts_by_date({date(2026, 9, 16): 1, date(2026, 9, 18): 1})
+
+    results = load_new(
+        storage,
+        executor,
+        TABLES["supplier_prices"],
+        clock=fixed_clock,
+    )
+
+    assert [result.logical_date for result in results] == [
+        date(2026, 9, 16),
+        date(2026, 9, 18),
+    ]
+    assert executor.statements_matching("select max(") == []
 
 
 def test_load_new_missing_table_loads_all_dates_ascending() -> None:

@@ -26,6 +26,7 @@ def test_config_builds_the_exact_three_topic_allow_list(
         "omni.oltp.public.payments": "payments",
     }
     assert config.group_id.endswith("-v1")
+    assert config.batch_size == 500
     assert config.connect_url == "http://127.0.0.1:8083"
     assert config.boundary_stability_seconds == 10.0
     assert config.boundary_timeout_seconds == 300.0
@@ -35,6 +36,10 @@ def test_config_builds_the_exact_three_topic_allow_list(
 def test_config_rejects_invalid_batch_and_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CDC_BATCH_SIZE", "0")
     with pytest.raises(CdcConfigError, match="greater than zero"):
+        CdcConfig.from_env()
+
+    monkeypatch.setenv("CDC_BATCH_SIZE", "501")
+    with pytest.raises(CdcConfigError, match="must not exceed 500"):
         CdcConfig.from_env()
 
     monkeypatch.setenv("CDC_BATCH_SIZE", "10")

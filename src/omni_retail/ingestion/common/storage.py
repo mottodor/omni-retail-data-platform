@@ -136,7 +136,10 @@ class BotoObjectStorage:
                     response = self.client.list_objects_v2(
                         Bucket=bucket, Prefix=prefix, ContinuationToken=continuation_token
                     )
-                keys.extend(item["Key"] for item in response.get("Contents", []))
+                for item in response.get("Contents", []):
+                    key = item.get("Key")
+                    if key is not None:
+                        keys.append(key)
                 if not response.get("IsTruncated"):
                     break
                 continuation_token = response["NextContinuationToken"]
