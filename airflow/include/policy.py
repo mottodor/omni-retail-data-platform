@@ -49,6 +49,26 @@ SNAPSHOT_MAINTENANCE_TASK_DEFAULT_ARGS: TaskPolicy = {
     "execution_timeout": timedelta(minutes=30),
 }
 
+#: Applied to CDC data-file compaction. A retry replans current files and the
+#: insert-only ledger makes a completed first attempt converge to a no-op.
+CDC_COMPACTION_TASK_DEFAULT_ARGS: TaskPolicy = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=15),
+    "execution_timeout": timedelta(minutes=60),
+}
+
+#: Applied to CDC snapshot expiration after compaction. Protected refs and
+#: retained ancestors are recalculated on every bounded retry.
+CDC_EXPIRATION_TASK_DEFAULT_ARGS: TaskPolicy = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=15),
+    "execution_timeout": timedelta(minutes=30),
+}
+
 #: Applied to stable-boundary polling before any analytical work starts.
 #: The primitive has its own five-minute default deadline; the task timeout
 #: leaves a small margin for client cleanup and log flushing.

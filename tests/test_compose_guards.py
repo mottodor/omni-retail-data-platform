@@ -80,6 +80,9 @@ EXPECTED_TRINO_ENV_KEYS = {
     "TRINO_USER",
     "ICEBERG_SNAPSHOT_RETENTION_DAYS",
     "ICEBERG_SNAPSHOT_RETAIN_LAST",
+    "ICEBERG_CDC_FILE_SIZE_THRESHOLD_MB",
+    "ICEBERG_CDC_SNAPSHOT_RETENTION_DAYS",
+    "ICEBERG_CDC_SNAPSHOT_RETAIN_LAST",
     "ICEBERG_BRONZE_SCHEMA",
     "DBT_BRONZE_SCHEMA",
     "DBT_SILVER_SCHEMA",
@@ -598,8 +601,18 @@ def test_airflow_snapshot_maintenance_policy_and_pool_are_explicit() -> None:
         env = services[name]["environment"]
         assert env["ICEBERG_SNAPSHOT_RETENTION_DAYS"] == "${ICEBERG_SNAPSHOT_RETENTION_DAYS:-30}"
         assert env["ICEBERG_SNAPSHOT_RETAIN_LAST"] == "${ICEBERG_SNAPSHOT_RETAIN_LAST:-10}"
+        assert env["ICEBERG_CDC_FILE_SIZE_THRESHOLD_MB"] == (
+            "${ICEBERG_CDC_FILE_SIZE_THRESHOLD_MB:-128}"
+        )
+        assert env["ICEBERG_CDC_SNAPSHOT_RETENTION_DAYS"] == (
+            "${ICEBERG_CDC_SNAPSHOT_RETENTION_DAYS:-30}"
+        )
+        assert env["ICEBERG_CDC_SNAPSHOT_RETAIN_LAST"] == (
+            "${ICEBERG_CDC_SNAPSHOT_RETAIN_LAST:-10}"
+        )
     command = str(services["airflow-init"]["command"])
     assert "airflow pools set iceberg_bronze 1" in command
+    assert "Airflow-managed Bronze writes and maintenance" in command
 
 
 def test_airflow_cdc_boundary_env_uses_network_addresses_without_profile_dependencies() -> None:
@@ -658,6 +671,7 @@ def test_dag_directory_contains_only_expected_dags() -> None:
         "ingest_postgres_snapshot.py",
         "ingest_supplier_files.py",
         "load_bronze.py",
+        "maintain_cdc_iceberg.py",
         "maintain_iceberg_snapshots.py",
         "transform_lakehouse.py",
     ]

@@ -381,6 +381,7 @@ snapshots четырнадцати batch Bronze-таблиц ограничен�
 - `ingest_postgres_snapshot`;
 - `load_bronze`;
 - `maintain_iceberg_snapshots`;
+- `maintain_cdc_iceberg`;
 - `transform_lakehouse`.
 
 Acceptance criteria:
@@ -475,6 +476,7 @@ Acceptance criteria:
 - topics для customers, orders и payments;
 - persistent Kafka/Connect state;
 - route-aware CDC contract и insert-only Iceberg Bronze table;
+- bounded weekly compaction малых CDC data files и protected snapshot retention;
 - offset commit только после successful Iceberg MERGE;
 - typed/delete-aware current state по PostgreSQL LSN и Kafka offsets;
 - customer SCD2 lifecycle, hard-delete handling и recreate semantics;
@@ -556,9 +558,8 @@ make integration      # live profiles required for their tests
 
 - clean-host bootstrap зависит от восстановления воспроизводимой поставки
   pinned MinIO images (TD-001);
-- batch Bronze snapshot history имеет bounded expiration; CDC microbatches всё
-  ещё требуют CDC-specific compaction/retention при длительной эксплуатации
-  (TD-006);
+- CDC compaction/retention измерены на delivered 210,000-row clean replay;
+  масштаб за пределами этого локального fixture не заявляется;
 - dbt contracts документированы и тестируются, но не полностью enforced
   adapter-ом (TD-004);
 - отдельные generic-test definitions сохраняют dbt v2 migration debt (TD-005).

@@ -339,8 +339,10 @@ make ingest-api ARGS="backfill --source fx-rates --from 2026-09-01 --to 2026-09-
 
 # Lakehouse
 make bronze-load ARGS="run-new"
-make iceberg-snapshot-plan ARGS="--table order_items"   # read-only
-make iceberg-snapshot-expire ARGS="--table order_items" # explicit, irreversible
+make iceberg-snapshot-plan ARGS="--table order_items"   # batch read-only
+make iceberg-snapshot-expire ARGS="--table order_items" # batch explicit/irreversible
+make iceberg-cdc-maintenance-plan                        # CDC read-only
+make iceberg-cdc-maintenance-apply                       # CDC explicit/irreversible
 make dbt-parse
 make dbt-build
 make dbt-test
@@ -425,7 +427,8 @@ budget. Covered boundaries include:
 - all four supplier-file formats and APIs through real MinIO;
 - PostgreSQL snapshot lifecycle and watermarks;
 - manifest-backed Bronze loading, partial-commit recovery, and idempotent reruns;
-- disposable-schema snapshot expiration with retained time-travel history;
+- disposable-schema batch and CDC maintenance with compaction, full-row
+  preservation, idempotency, and retained time-travel history;
 - dbt core build and business reconciliation;
 - Debezium/Kafka CDC recovery and duplicate handling;
 - Gold-to-ClickHouse publication and rebuildability;
@@ -438,14 +441,15 @@ integration environment.
 
 ## Performance evidence
 
-The repository includes a reproducible representative comparison of the same
-aggregation over Trino/Iceberg and ClickHouse:
+The repository includes reproducible local evidence:
 
-- [Phase 6 Trino vs ClickHouse benchmark](docs/benchmarks/phase6-trino-vs-clickhouse.md)
+- [Phase 6 Trino vs ClickHouse benchmark](docs/benchmarks/phase6-trino-vs-clickhouse.md);
+- [CDC clean-replay resource benchmark](docs/benchmarks/cdc-clean-replay.md);
+- [CDC Iceberg maintenance benchmark](docs/benchmarks/cdc-maintenance.md).
 
-The recorded numbers are local-workstation observations for a small fixture,
-not general engine performance claims. The report preserves query equivalence,
-plans, and measurement context.
+The recorded numbers are local-workstation observations for bounded fixtures,
+not general engine performance claims. The reports preserve workload,
+measurement context, and reproduction commands.
 
 ## Repository layout
 
@@ -472,7 +476,7 @@ docs/                ADRs, model, contracts, runbooks, benchmarks, screenshots
 | [Architecture ADRs](docs/adr/README.md) | Technology and lifecycle decisions, including the scope freeze |
 | [Data model](docs/data-model.md) | Source/model grain, keys, CDC and SCD2 semantics |
 | [Data contracts](docs/data-contracts.md) | Source and modeled-data contracts |
-| [Runbook index](docs/runbooks/README.md) | CDC, Iceberg snapshot maintenance, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
+| [Runbook index](docs/runbooks/README.md) | CDC transport, batch/CDC Iceberg maintenance, Bronze rebuild, ClickHouse outage, Superset, and quarantine recovery |
 | [Dashboard capture](docs/screenshots/README.md) | Manual screenshot procedure |
 | [AGENTS.md](AGENTS.md) | Repository rules for coding agents |
 
@@ -484,8 +488,9 @@ label. Material limitations include:
 - MinIO Community is frozen at the last project-validated source releases and
   receives no automatic updates; critical security or compatibility repairs
   remain manual maintenance;
-- batch Bronze snapshot history is bounded, but sustained CDC workloads still
-  need CDC-specific compaction and snapshot/file retention (TD-006);
+- CDC compaction and snapshot retention are bounded and measured at the
+  delivered 210,000-row workload; scale beyond that local fixture is not
+  claimed;
 - dbt model contracts are documented and tested but are not fully enforced by
   the current adapter;
 - the local benchmark fixture is evidence of the method, not a scale claim;

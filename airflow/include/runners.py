@@ -41,6 +41,11 @@ from omni_retail.lakehouse.bronze.loader import (
     validate_schema_name,
 )
 from omni_retail.lakehouse.bronze.specs import TABLES
+from omni_retail.lakehouse.cdc_maintenance import (  # pyright: ignore[reportMissingImports]
+    CdcMaintenancePolicy,
+    compact_cdc_data_files,
+    expire_cdc_snapshots,
+)
 from omni_retail.lakehouse.snapshot_maintenance import (
     SnapshotExpirationPolicy,
     expire_table_snapshots,
@@ -182,6 +187,38 @@ def run_bronze_load(
         "rows": total_rows,
         "by_source": by_source,
     }
+
+
+def run_cdc_compaction(*, schema: str | None = None) -> dict[str, object]:
+    """Compact the exact CDC Bronze ledger with semantic postconditions."""
+    configure_logging()
+    effective_schema = bronze_schema_from_env() if schema is None else validate_schema_name(schema)
+    policy = CdcMaintenancePolicy.from_env()
+    config = TrinoConfig.from_env()
+    with contextlib.closing(DbapiTrinoExecutor(config)) as executor:
+        result = compact_cdc_data_files(
+            executor,
+            policy,
+            catalog=config.catalog,
+            schema=effective_schema,
+        )
+    return result.as_dict()
+
+
+def run_cdc_snapshot_expiration(*, schema: str | None = None) -> dict[str, object]:
+    """Expire CDC snapshots through the protected shared retention primitive."""
+    configure_logging()
+    effective_schema = bronze_schema_from_env() if schema is None else validate_schema_name(schema)
+    policy = CdcMaintenancePolicy.from_env()
+    config = TrinoConfig.from_env()
+    with contextlib.closing(DbapiTrinoExecutor(config)) as executor:
+        result = expire_cdc_snapshots(
+            executor,
+            policy,
+            catalog=config.catalog,
+            schema=effective_schema,
+        )
+    return result.as_dict()
 
 
 def run_snapshot_maintenance(

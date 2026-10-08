@@ -7,6 +7,7 @@ generic troubleshooting step.
 | Scenario | Runbook | Covers |
 | --- | --- | --- |
 | PostgreSQL CDC, connector/task failure, consumer lag, stale WAL, replay, or transport reset | [Kafka and CDC](kafka-cdc.md) | First bootstrap, health and lag inspection, offset-after-Iceberg semantics, stable-boundary refresh, and explicit recovery paths |
+| Compact the raw CDC ledger or expire old CDC snapshot history | [Iceberg CDC maintenance](iceberg-cdc-maintenance.md) | Read-only preview, explicit apply, concurrent append safety, weekly Airflow operation, rollback floors, and recovery limits |
 | Expire old batch Bronze snapshot history | [Iceberg snapshot maintenance](iceberg-snapshot-maintenance.md) | Safe preview, retention floors, weekly Airflow operation, verification, and archive-backed recovery |
 | Rebuild Bronze from preserved raw archive objects | [Bronze rebuild](bronze-rebuild.md) | Scope checks, destructive confirmation, rebuild, validation, and recovery from a failed rebuild |
 | Malformed or rejected supplier input | [Bad supplier file](bad-supplier-file.md) | Quarantine inspection, reason classification, corrected-file replay, and audit checks |

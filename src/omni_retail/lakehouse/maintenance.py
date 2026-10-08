@@ -15,6 +15,12 @@ from omni_retail.lakehouse.bronze.loader import bronze_schema_from_env
 from omni_retail.lakehouse.bronze.specs import TABLES
 from omni_retail.lakehouse.trino import DbapiTrinoExecutor, TrinoConfig, TrinoExecutor
 
+from .cdc_maintenance import (  # pyright: ignore[reportMissingImports]
+    CdcMaintenancePolicy,
+    compact_cdc_data_files,
+    expire_cdc_snapshots,
+    plan_cdc_maintenance,
+)
 from .snapshot_maintenance import (
     SnapshotExpirationPolicy,
     SnapshotExpirationResult,
@@ -42,6 +48,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_table_argument(expire_parser)
     expire_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="required acknowledgement that snapshot expiration is irreversible",
+    )
+
+    subparsers.add_parser(
+        "cdc-plan",
+        help="read-only CDC data-file compaction and snapshot-expiration preview",
+    )
+    cdc_apply_parser = subparsers.add_parser(
+        "cdc-apply",
+        help="compact the CDC ledger and expire eligible snapshots",
+    )
+    cdc_apply_parser.add_argument(
         "--confirm",
         action="store_true",
         help="required acknowledgement that snapshot expiration is irreversible",
@@ -112,14 +132,45 @@ def run_tables(
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = build_parser().parse_args(argv)
-    if args.command == "expire" and not args.confirm:
-        logger.error("expire requires --confirm; run plan first and review its output")
+    if args.command in {"expire", "cdc-apply"} and not args.confirm:
+        logger.error("%s requires --confirm; run its plan first", args.command)
         return 2
 
     try:
-        policy = SnapshotExpirationPolicy.from_env()
         config = TrinoConfig.from_env()
         schema = bronze_schema_from_env()
+        if args.command in {"cdc-plan", "cdc-apply"}:
+            cdc_policy = CdcMaintenancePolicy.from_env()
+            with contextlib.closing(DbapiTrinoExecutor(config)) as executor:
+                if args.command == "cdc-plan":
+                    plan = plan_cdc_maintenance(
+                        executor,
+                        cdc_policy,
+                        catalog=config.catalog,
+                        schema=schema,
+                    )
+                    logger.info("CDC maintenance plan: %s", plan.as_dict())
+                else:
+                    logger.warning(
+                        "CDC snapshot expiration is irreversible beyond the retained window"
+                    )
+                    compaction = compact_cdc_data_files(
+                        executor,
+                        cdc_policy,
+                        catalog=config.catalog,
+                        schema=schema,
+                    )
+                    logger.info("CDC maintenance stage complete: %s", compaction.as_dict())
+                    expiration = expire_cdc_snapshots(
+                        executor,
+                        cdc_policy,
+                        catalog=config.catalog,
+                        schema=schema,
+                    )
+                    logger.info("CDC maintenance stage complete: %s", expiration.as_dict())
+            return 0
+
+        policy = SnapshotExpirationPolicy.from_env()
         table_names = (args.table,) if args.table else tuple(TABLES)
         operation = expire_table_snapshots if args.command == "expire" else plan_table_snapshots
         with contextlib.closing(DbapiTrinoExecutor(config)) as executor:

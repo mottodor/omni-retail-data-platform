@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -125,9 +126,10 @@ def plan_table_snapshots(
     catalog: str = "iceberg",
     schema: str = "bronze",
     clock: datetime | None = None,
+    allowed_tables: Collection[str] = TABLES,
 ) -> SnapshotExpirationResult:
     """Read metadata and report snapshots eligible by age without mutating the table."""
-    _validate_target(table_name, catalog, schema)
+    _validate_target(table_name, catalog, schema, allowed_tables)
     if not _table_exists(executor, table_name, catalog, schema):
         return _empty_result(table_name, "skipped_missing", policy)
 
@@ -159,9 +161,10 @@ def expire_table_snapshots(
     catalog: str = "iceberg",
     schema: str = "bronze",
     clock: datetime | None = None,
+    allowed_tables: Collection[str] = TABLES,
 ) -> SnapshotExpirationResult:
     """Expire eligible snapshots and verify refs and rollback snapshots remain."""
-    _validate_target(table_name, catalog, schema)
+    _validate_target(table_name, catalog, schema, allowed_tables)
     if not _table_exists(executor, table_name, catalog, schema):
         return _empty_result(table_name, "skipped_missing", policy)
 
@@ -237,12 +240,18 @@ def _environment_integer(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from error
 
 
-def _validate_target(table_name: str, catalog: str, schema: str) -> None:
+def _validate_target(
+    table_name: str,
+    catalog: str,
+    schema: str,
+    allowed_tables: Collection[str] = TABLES,
+) -> None:
     validate_schema_name(catalog)
     validate_schema_name(schema)
-    if table_name not in TABLES:
-        known = ", ".join(TABLES)
-        raise ValueError(f"unknown batch Bronze table {table_name!r} (known: {known})")
+    if table_name not in allowed_tables:
+        known = ", ".join(allowed_tables)
+        label = "batch Bronze" if allowed_tables is TABLES else "maintenance"
+        raise ValueError(f"unknown {label} table {table_name!r} (known: {known})")
 
 
 def _identifier(value: str) -> str:

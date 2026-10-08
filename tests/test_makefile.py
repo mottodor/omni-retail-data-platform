@@ -22,6 +22,8 @@ HOST_SIDE_SERVICE_TARGETS = (
     "bronze-rebuild",
     "iceberg-snapshot-plan",
     "iceberg-snapshot-expire",
+    "iceberg-cdc-maintenance-plan",
+    "iceberg-cdc-maintenance-apply",
     "dbt-build",
     "dbt-test",
     "integration",
@@ -81,6 +83,16 @@ def test_snapshot_maintenance_targets_separate_preview_from_explicit_apply() -> 
     assert "--confirm" not in plan
     assert "lakehouse.maintenance expire --confirm" in expire
     assert "snapshot expiration is irreversible" in expire
+
+
+def test_cdc_maintenance_targets_separate_preview_from_explicit_apply() -> None:
+    plan = _render_target("iceberg-cdc-maintenance-plan")
+    apply = _render_target("iceberg-cdc-maintenance-apply")
+
+    assert "lakehouse.maintenance cdc-plan" in plan
+    assert "--confirm" not in plan
+    assert "lakehouse.maintenance cdc-apply --confirm" in apply
+    assert "snapshot expiration is irreversible" in apply
 
 
 def test_streaming_status_uses_typed_health_cli_and_propagates_its_exit_code() -> None:

@@ -25,6 +25,7 @@ EXPECTED_DAG_IDS = {
     "ingest_supplier_files",
     "ingest_postgres_snapshot",
     "load_bronze",
+    "maintain_cdc_iceberg",
     "maintain_iceberg_snapshots",
     "transform_lakehouse",
 }
@@ -39,6 +40,7 @@ INGESTION_DAG_IDS = {
 
 LAKEHOUSE_DAG_IDS = {
     "load_bronze",
+    "maintain_cdc_iceberg",
     "maintain_iceberg_snapshots",
     "transform_lakehouse",
 }
@@ -146,6 +148,11 @@ def test_load_bronze_is_triggered_by_raw_datasets(dag_bag: DagBag) -> None:
 def test_snapshot_maintenance_uses_weekly_utc_schedule(dag_bag: DagBag) -> None:
     dag = dag_bag.dags["maintain_iceberg_snapshots"]
     assert dag.schedule_interval == "0 3 * * 0"
+
+
+def test_cdc_maintenance_uses_weekly_utc_schedule(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["maintain_cdc_iceberg"]
+    assert dag.schedule_interval == "30 4 * * 0"
 
 
 def test_transform_lakehouse_uses_dataset_or_hourly_schedule(dag_bag: DagBag) -> None:
@@ -263,6 +270,27 @@ def test_snapshot_maintenance_tasks_are_independent_and_bounded(dag_bag: DagBag)
         assert task.pool == "iceberg_bronze"
 
 
+def test_cdc_maintenance_tasks_are_ordered_and_bounded(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["maintain_cdc_iceberg"]
+    assert {task.task_id for task in dag.tasks} == {
+        "compact_data_files",
+        "expire_snapshots",
+    }
+    compact = dag.get_task("compact_data_files")
+    expire = dag.get_task("expire_snapshots")
+    assert compact.upstream_task_ids == set()
+    assert compact.downstream_task_ids == {"expire_snapshots"}
+    assert expire.upstream_task_ids == {"compact_data_files"}
+    assert expire.downstream_task_ids == set()
+    for task, timeout in ((compact, 60), (expire, 30)):
+        assert task.retries == 2
+        assert task.retry_delay == timedelta(minutes=2)
+        assert task.retry_exponential_backoff is True
+        assert task.max_retry_delay == timedelta(minutes=15)
+        assert task.execution_timeout == timedelta(minutes=timeout)
+        assert task.pool == "iceberg_bronze"
+
+
 @pytest.mark.parametrize(
     ("task_id", "retries", "delay", "cap", "timeout"),
     [
@@ -325,6 +353,8 @@ def test_lakehouse_task_pools(dag_bag: DagBag) -> None:
     """Batch Bronze writers serialize; unrelated transformations use the default."""
     assert dag_bag.dags["load_bronze"].get_task("load_new").pool == "iceberg_bronze"
     for task in dag_bag.dags["maintain_iceberg_snapshots"].tasks:
+        assert task.pool == "iceberg_bronze", task.task_id
+    for task in dag_bag.dags["maintain_cdc_iceberg"].tasks:
         assert task.pool == "iceberg_bronze", task.task_id
     for task in dag_bag.dags["transform_lakehouse"].tasks:
         assert task.pool == "default_pool", task.task_id
