@@ -3,7 +3,7 @@ UV := uv
 
 HOST_RUN := bash infrastructure/scripts/run_host_command.sh
 
-.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test minio-build up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
+.PHONY: help setup lint test unit dbt-parse dbt-build dbt-test minio-build up down logs reset smoke-core generate-oltp mutate-oltp seed-supplier-files ingest-files ingest-api bronze-load bronze-rebuild iceberg-snapshot-plan iceberg-snapshot-expire integration streaming-up streaming-down streaming-status streaming-reset bi-up bi-down serving-publish serving-rebuild serving-benchmark airflow-build airflow-up airflow-down airflow-test airflow-backfill airflow-dag-test
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z _-]+: ## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ": ## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -70,6 +70,13 @@ bronze-load: ## Load raw archive data into Iceberg Bronze. ARGS="run --source or
 
 bronze-rebuild: ## DESTRUCTIVE: clear only the configured Bronze schema, then rebuild it from archive with bounded Polaris recovery
 	$(HOST_RUN) bash infrastructure/scripts/bronze_rebuild.sh
+
+iceberg-snapshot-plan: ## Preview bounded snapshot expiration for batch Bronze tables. ARGS="--table order_items"
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.maintenance plan $(ARGS)
+
+iceberg-snapshot-expire: ## DESTRUCTIVE: expire eligible batch Bronze snapshots after reviewing the plan
+	@echo "warning: snapshot expiration is irreversible beyond the retained rollback window"
+	@$(HOST_RUN) $(UV) run python -m omni_retail.lakehouse.maintenance expire --confirm $(ARGS)
 
 dbt-parse: ## Parse the dbt project offline (no live stack needed)
 	$(UV) run python -m omni_retail.lakehouse.dbt_cli parse --project-dir dbt --profiles-dir dbt

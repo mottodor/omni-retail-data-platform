@@ -39,6 +39,16 @@ LAKEHOUSE_TASK_DEFAULT_ARGS: TaskPolicy = {
     "execution_timeout": timedelta(minutes=30),
 }
 
+#: Applied to idempotent weekly batch-Bronze snapshot expiration. Each retry
+#: replans the table, so already-expired snapshots become an explicit no-op.
+SNAPSHOT_MAINTENANCE_TASK_DEFAULT_ARGS: TaskPolicy = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=15),
+    "execution_timeout": timedelta(minutes=30),
+}
+
 #: Applied to stable-boundary polling before any analytical work starts.
 #: The primitive has its own five-minute default deadline; the task timeout
 #: leaves a small margin for client cleanup and log flushing.

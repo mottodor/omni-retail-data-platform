@@ -25,6 +25,7 @@ EXPECTED_DAG_IDS = {
     "ingest_supplier_files",
     "ingest_postgres_snapshot",
     "load_bronze",
+    "maintain_iceberg_snapshots",
     "transform_lakehouse",
 }
 
@@ -36,7 +37,11 @@ INGESTION_DAG_IDS = {
     "ingest_postgres_snapshot",
 }
 
-LAKEHOUSE_DAG_IDS = {"load_bronze", "transform_lakehouse"}
+LAKEHOUSE_DAG_IDS = {
+    "load_bronze",
+    "maintain_iceberg_snapshots",
+    "transform_lakehouse",
+}
 
 #: dag_id -> raw dataset URI emitted by the API ingestion task.
 API_DAG_DATASET_URIS = {
@@ -62,6 +67,23 @@ EXPECTED_SNAPSHOT_TASK_IDS = {
     "snapshot_order_items",
     "snapshot_payments",
     "snapshot_shipments",
+}
+
+EXPECTED_MAINTENANCE_TASK_IDS = {
+    "expire_categories",
+    "expire_products",
+    "expire_customers",
+    "expire_orders",
+    "expire_order_items",
+    "expire_payments",
+    "expire_shipments",
+    "expire_fx_rates",
+    "expire_campaigns",
+    "expire_deliveries",
+    "expire_supplier_prices",
+    "expire_partner_products",
+    "expire_historical_orders",
+    "expire_supplier_stock",
 }
 
 
@@ -119,6 +141,11 @@ def test_load_bronze_is_triggered_by_raw_datasets(dag_bag: DagBag) -> None:
             "raw://supplier-stock",
         )
     }
+
+
+def test_snapshot_maintenance_uses_weekly_utc_schedule(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["maintain_iceberg_snapshots"]
+    assert dag.schedule_interval == "0 3 * * 0"
 
 
 def test_transform_lakehouse_uses_dataset_or_hourly_schedule(dag_bag: DagBag) -> None:
@@ -222,6 +249,20 @@ def test_load_bronze_task_policy(dag_bag: DagBag) -> None:
     assert task.execution_timeout == timedelta(minutes=30)
 
 
+def test_snapshot_maintenance_tasks_are_independent_and_bounded(dag_bag: DagBag) -> None:
+    dag = dag_bag.dags["maintain_iceberg_snapshots"]
+    assert {task.task_id for task in dag.tasks} == EXPECTED_MAINTENANCE_TASK_IDS
+    for task in dag.tasks:
+        assert not task.upstream_task_ids
+        assert not task.downstream_task_ids
+        assert task.retries == 2
+        assert task.retry_delay == timedelta(minutes=2)
+        assert task.retry_exponential_backoff is True
+        assert task.max_retry_delay == timedelta(minutes=15)
+        assert task.execution_timeout == timedelta(minutes=30)
+        assert task.pool == "iceberg_bronze"
+
+
 @pytest.mark.parametrize(
     ("task_id", "retries", "delay", "cap", "timeout"),
     [
@@ -280,11 +321,13 @@ def test_lakehouse_dag_task_graph(dag_bag: DagBag) -> None:
     assert dag.get_task("publish_serving").upstream_task_ids == {"dbt_build"}
 
 
-def test_lakehouse_tasks_use_default_pool(dag_bag: DagBag) -> None:
-    """Lakehouse tasks do not touch the mock API pool."""
-    for dag_id in sorted(LAKEHOUSE_DAG_IDS):
-        for task in dag_bag.dags[dag_id].tasks:
-            assert task.pool == "default_pool", f"{dag_id}.{task.task_id}: pool"
+def test_lakehouse_task_pools(dag_bag: DagBag) -> None:
+    """Batch Bronze writers serialize; unrelated transformations use the default."""
+    assert dag_bag.dags["load_bronze"].get_task("load_new").pool == "iceberg_bronze"
+    for task in dag_bag.dags["maintain_iceberg_snapshots"].tasks:
+        assert task.pool == "iceberg_bronze", task.task_id
+    for task in dag_bag.dags["transform_lakehouse"].tasks:
+        assert task.pool == "default_pool", task.task_id
 
 
 @pytest.mark.parametrize("dag_id", API_DAG_IDS)

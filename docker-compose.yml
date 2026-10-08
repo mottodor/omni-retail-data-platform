@@ -32,6 +32,8 @@ x-airflow-env: &airflow-env
   # Trino over the docker network; defaults live in TrinoConfig/profiles.yml.
   TRINO_HOST: trino
   TRINO_PORT: "8080"
+  ICEBERG_SNAPSHOT_RETENTION_DAYS: ${ICEBERG_SNAPSHOT_RETENTION_DAYS:-30}
+  ICEBERG_SNAPSHOT_RETAIN_LAST: ${ICEBERG_SNAPSHOT_RETAIN_LAST:-10}
   # Serving publication runs inside the Docker network; do not use the
   # host-loopback defaults used by the local CLI.
   CLICKHOUSE_HOST: clickhouse
@@ -610,7 +612,8 @@ services:
     # The image entrypoint runs db migrate + admin user creation first, then
     # exec's this command (Phase 4 design spec §8).
     command: >
-      bash -c "airflow pools set mock_api 2 'mock external API concurrency limit'"
+      bash -c "airflow pools set mock_api 2 'mock external API concurrency limit' &&
+      airflow pools set iceberg_bronze 1 'serialize batch Bronze writes and snapshot maintenance'"
     restart: "no"
 
   airflow-webserver:

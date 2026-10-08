@@ -22,6 +22,22 @@ here; this repository makes no commitment to a broader future contract layer.
 - Monetary values are decimals with 2 fractional digits; rates are floats as published by the source.
 - The raw payload stored in the `archive` bucket is immutable and never rewritten by the platform.
 
+### Batch Bronze snapshot retention
+
+The fourteen batch Bronze tables registered in
+`omni_retail.lakehouse.bronze.specs.TABLES` use bounded Iceberg snapshot
+history. Weekly maintenance keeps every snapshot newer than 30 days and at
+least the ten newest `main` ancestors. Runtime validation enforces floors of
+seven days and two retained snapshots, and the Trino catalog independently
+enforces the seven-day minimum.
+
+Maintenance preserves `main` and Iceberg refs, does not change rows visible in
+the current snapshot, and never modifies raw archive objects. Missing
+not-yet-loaded batch tables are explicit no-ops. The append-only
+`bronze.postgres_cdc_events` table is excluded; its compaction/retention risk
+remains tracked separately as TD-006. See the
+[Iceberg snapshot maintenance runbook](runbooks/iceberg-snapshot-maintenance.md).
+
 ---
 
 ## File sources
