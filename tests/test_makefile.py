@@ -103,11 +103,19 @@ def test_reset_explicitly_couples_core_and_streaming_without_bi_or_airflow() -> 
     ],
 )
 def test_host_runner_preserves_proxy_exclusions_and_explicit_project(
+    tmp_path: Path,
     lower: str,
     upper: str,
     expected_lower: str,
     expected_upper: str,
 ) -> None:
+    # Exercise the runner in a clean-clone-like layout instead of depending on
+    # the developer's gitignored .env (which is intentionally absent in CI).
+    sandbox_runner = tmp_path / "infrastructure" / "scripts" / HOST_RUNNER.name
+    sandbox_runner.parent.mkdir(parents=True)
+    sandbox_runner.write_text(HOST_RUNNER.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / ".env").write_text("COMPOSE_PROJECT_NAME=from-dotenv\n", encoding="utf-8")
+
     env = {
         **os.environ,
         "COMPOSE_PROJECT_NAME": "isolated-validation",
@@ -117,12 +125,12 @@ def test_host_runner_preserves_proxy_exclusions_and_explicit_project(
     result = subprocess.run(
         [
             "bash",
-            str(HOST_RUNNER),
+            str(sandbox_runner),
             "bash",
             "-c",
             'printf "%s\\n%s\\n%s\\n" "$no_proxy" "$NO_PROXY" "$COMPOSE_PROJECT_NAME"',
         ],
-        cwd=REPO_ROOT,
+        cwd=tmp_path,
         check=True,
         capture_output=True,
         text=True,
