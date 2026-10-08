@@ -556,8 +556,8 @@ make integration      # live profiles required for their tests
 Текущий status и полный реестр принадлежат [PROGRESS.md](PROGRESS.md). На момент
 фиксации capstone существенны следующие ограничения:
 
-- clean-host bootstrap зависит от восстановления воспроизводимой поставки
-  pinned MinIO images (TD-001);
+- MinIO Community зафиксирован на последних проверенных source releases;
+  обновления security/compatibility требуют явного maintenance;
 - CDC compaction/retention измерены на delivered 210,000-row clean replay;
   масштаб за пределами этого локального fixture не заявляется;
 - dbt contracts документированы и тестируются, но не полностью enforced
